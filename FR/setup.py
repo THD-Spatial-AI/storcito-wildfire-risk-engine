@@ -8,13 +8,21 @@ import numpy.typing as npt
 from pathlib import Path
 from datetime import datetime as time
 from collections import defaultdict
-from typing import Literal
+from typing import Literal, TypedDict
 from itertools import batched
 
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from datetime import datetime
 
-def parse_filename(filename:str,date_format:str="%Y-%m-%d-%H_%M")->dict[str,str|datetime]:
+class ParsedFilename(TypedDict):
+    fecha_inicio: datetime
+    fecha_fin: datetime
+    satelite: str
+    nivel: str
+    banda: str
+    filename: str
+
+def parse_filename(filename:str,date_format:str="%Y-%m-%d-%H_%M")->ParsedFilename:
     
     """
     Parsea nombres de archivo con el patrón Sentinel.
@@ -34,15 +42,17 @@ def parse_filename(filename:str,date_format:str="%Y-%m-%d-%H_%M")->dict[str,str|
     match = full_pattern.match(filename)
 
     if match:
-        return {
-                'fecha_inicio': datetime.strptime(match.group('fecha_inicio'), date_format),
-                'fecha_fin': datetime.strptime(match.group('fecha_fin'), date_format),
-                'satelite': match.group('satelite'),
-                'nivel': match.group('nivel'),
-                'banda': match.group('banda'),
-                'filename': filename
-            }
-    return {}
+        return ParsedFilename(
+            fecha_inicio=datetime.strptime(match.group('fecha_inicio'), date_format),
+            fecha_fin=datetime.strptime(match.group('fecha_fin'), date_format),
+            satelite=match.group('satelite'),
+            nivel=match.group('nivel'),
+            banda=match.group('banda'),
+            filename=filename
+            )
+    else:
+        raise ValueError(f"Filename '{filename}' does not match the expected pattern.")
+
 def get_output_folder(input_folder:str):
     if not os.path.isdir(input_folder):
         raise ValueError(f"The provided path '{input_folder}' is not a valid directory.")
@@ -211,7 +221,8 @@ def read_and_group(valids:list[dict]):
                     
                 bands.append(src.read(1).astype(np.float32))
 
-                current_band=parse_filename(path.name)['banda']
+                parsed = parse_filename(path.name)
+                current_band = parsed['banda']
                 good_dict[current_band].append(src.read(1).astype(np.float32))
 
         name_keys = ['fecha_inicio', 'fecha_fin', 'satelite', 'nivel']
@@ -243,7 +254,7 @@ def reproject_raster(src_path:str|Path, dst_crs:str = "EPSG:32629")->tuple[np.nd
         kwargs = src.meta.copy()
         kwargs.update({'crs': dst_crs, 'transform': transform, 'width': width, 'height': height})
 
-        dest_array = np.empty((height, width), dtype=src.dtypes[0])
+        dest_array = np.empty((height, width), dtype=src.dtypes[0]) #type: ignore
 
         reproject(source=rasterio.band(src, 1), destination=dest_array,
                     src_transform=src.transform, src_crs=src.crs,

@@ -39,7 +39,8 @@ def Fhist(folder_pre='', folder_post='', output_fhist='',export_image:bool=False
 
     def calcular_dnbr(pre_b8,pre_b12,post_b8,post_b12)->tuple[np.ndarray, rasterio.Affine, dict]:
         
-        year=parse_filename(pre_b8.name)['fecha_inicio'].year
+        parsed = parse_filename(pre_b8.name)
+        year = parsed['fecha_inicio'].year
 
         nir_m, meta_m = reproject_raster(pre_b8)
         swir_m, _ = reproject_raster(pre_b12)
@@ -96,7 +97,8 @@ def Fhist(folder_pre='', folder_post='', output_fhist='',export_image:bool=False
         # Remuestrear si es necesario y acumular
         if out_image.shape[1:] == suma_total.shape:
             suma_total += out_image[0].astype('float32')
-        else:
+
+        elif target_meta is not None:
             dest = np.zeros(suma_total.shape, dtype='float32')
 
             reproject(source=out_image[0].astype('float32'), destination=dest,
@@ -146,7 +148,9 @@ def Fhist(folder_pre='', folder_post='', output_fhist='',export_image:bool=False
         rasters_dir.mkdir(parents=True, exist_ok=True)
         png_dir.mkdir(parents=True, exist_ok=True)
         
-        
+        if not target_meta:
+            return
+
         # Guardar suma_total como float tif
         tmeta = target_meta.copy()
         tmeta.update(dtype='float32', count=1)
@@ -177,6 +181,5 @@ def Fhist(folder_pre='', folder_post='', output_fhist='',export_image:bool=False
 
 
 if __name__ == "__main__":
-    print(os.path.splitext(os.path.basename(r'C:\Users\Mateo G\Desktop\STORCITO\Salida Datos\HIST\HIST.tif'))[0])
-    # Fhist()
+    Fhist()
 
