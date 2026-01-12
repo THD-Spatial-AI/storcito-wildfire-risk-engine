@@ -51,15 +51,15 @@ def wui(input_road, input_clc, output_iuf):
     code = pol2_sel['Code_18'].values
     
     conditions = [
+        code < 300,
         code == 311,
         code == 312,
         code == 313,
         code == 321,
         (code == 322) | (code == 323) | (code == 324),
         code == 333,
-        code < 300
     ]
-    choices = [2, 5, 4, 2, 3, 2, 1]
+    choices = [ 1, 2, 5, 4, 2, 3, 2]
     
     risk_array = np.select(conditions, choices, default=0)
     pol2_sel['risk'] = risk_array

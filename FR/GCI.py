@@ -27,9 +27,10 @@ def GCI(input_folder:str='INPUT',output_folder:str='OUTPUT',export_image:bool=Fa
     tiff_dir=Path(output_folder)/'TIFFs'/'GCI'
     png_dir=Path(output_folder)/'PNGs'/'GCI'
 
-    tiff_dir.mkdir(parents=True, exist_ok=True); png_dir.mkdir(parents=True, exist_ok=True)
     
     if export_image:
+        tiff_dir.mkdir(parents=True, exist_ok=True)
+        png_dir.mkdir(parents=True, exist_ok=True)
 
         for gci_i,meta_ref_i,extra_info in zip(gci,info['meta_ref'],info['id']):
     

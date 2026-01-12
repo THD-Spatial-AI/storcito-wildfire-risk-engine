@@ -145,16 +145,10 @@ def Fhist(input_folder=Path('INPUT'), output_folder=Path('OUTPUT'),export_image:
     time_range = f"{parse_filename(prev_files[0])['fecha_inicio'].year}-{parse_filename(post_files[-1])['fecha_fin'].year}"
 
     # Mostrar imágenes desde datos en memoria
-    cumulative_figure, ax1=plt.subplots()
-    img1=ax1.imshow(suma_total, cmap='Reds')
-    cumulative_figure.colorbar(img1, ax1)
-    ax1.set_title(f'Historical Burned Sum ({time_range})')
+    cumulative_figure, ax1 = default_imshow(suma_total,f'Historical Burned Sum ({time_range})')
     plt.show()
-
-    reclasified_figure, ax2=plt.subplots()
-    img2=ax2.imshow(reclas, cmap='Reds', interpolation='none')
-    reclasified_figure.colorbar(img2, ax2,ticks=[1,2,3,4,5], label='Risk')
-    ax1.set_title(f'Historical Burned Areas Risk Map ({time_range})')
+    reclasified_figure, ax2 = default_imshow(reclas,f'Historical Burned Areas Risk Map ({time_range})',
+                                             colorbar_params={'ticks':[1,2,3,4,5], 'label':'Risk'})
     plt.show()
 
     # Guardar si el usuario lo solicita

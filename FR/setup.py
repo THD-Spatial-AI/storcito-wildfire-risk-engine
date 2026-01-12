@@ -4,6 +4,9 @@ import re
 import rasterio
 import numpy as np
 import numpy.typing as npt
+import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib.axes import Axes
 
 from pathlib import Path
 from datetime import datetime as time
@@ -13,6 +16,12 @@ from itertools import batched
 
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from datetime import datetime
+
+DEFAULT_PLOT={
+    'figure':{'figsize':(8,6),'tight_layout':True},
+    'imshow':{'cmap':'Reds'},
+    'save':{'dpi':300,'bbox_inches':'tight'}
+}
 
 class ParsedFilename(TypedDict):
     fecha_inicio: datetime
@@ -122,73 +131,94 @@ def sort_time_comparative(band_folder:Path|None=None,date_format:str="%Y-%m-%d-%
         #TODO: Implement other date formats
         raise NotImplementedError(f"Date format '{date_format}' not implemented yet.")
  
-def check_valid_entries(bands:list[str],input_folder:str="INPUT",
-                        satelite:Literal['Sentinel-2']='Sentinel-2')->tuple[list[dict],list[dict]]:
+def check_valid_entries(bands: list[str], input_folder: str = "INPUT", 
+                        satellite: Literal['Sentinel-2'] = 'Sentinel-2') -> tuple[list[dict], list[dict]]:
+    """Valida que todas las bandas requeridas existan para cada escena temporal.
     
-    """Check if for a given group of bands they are present for the exact same time sample and if they are from the same satellite
-
+    Agrupa archivos por fecha, satélite y nivel, verificando que todas las bandas
+    requeridas estén presentes en cada grupo.
+    
     Args:
-        bands (list[str]): bands to check
-        input_folder (str, optional): folder where the files are. Defaults to "INPUT".
-        satelite (Literal[&#39;Sentinel, optional): satellite name. Defaults to 'Sentinel-2'.
-
-    Raises:
-        NotImplementedError: Time format not implemented yet.
-
+        bands: Lista de bandas requeridas (ej: ['B04', 'B08', 'B12'])
+        input_folder: Ruta a la carpeta con archivos TIFF
+        satellite: Satélite esperado (actualmente solo 'Sentinel-2')
+    
     Returns:
-        tuple[list[dict],list[dict]]: It returns two dictionaries, one with the complete entries and another with the incomplete ones.
+        Tupla (entradas_completas, entradas_incompletas) donde cada entrada es un dict con:
+        - fecha_inicio, fecha_fin, satelite, nivel
+        - archivos: rutas de archivos encontrados
+        - bandas_faltantes: bandas no encontradas (vacío si completa)
+    
+    Raises:
+        FileNotFoundError: Si no hay entradas completas
+        NotImplementedError: Si el satélite no está soportado
     """
     
-    if satelite=="Sentinel-2":
-        
-        listado_archivos=[f.name for f in Path(input_folder).glob("*.tiff")]
-        grupos = defaultdict(list)
-
-        for archivo in listado_archivos:
-            info = parse_filename(archivo)
-            # print(info)
-            if info and info['banda'] in bands:
-                # Clave única: fechas + satélite + nivel
-                clave = (
-                    info['fecha_inicio'],
-                    info['fecha_fin'],
-                    info['satelite'],
-                    info['nivel'],
-                )
-                grupos[clave].append(info)
-
-        resultados_completos = []
-        resultados_incompletos = []
+    if satellite != "Sentinel-2":
+        raise NotImplementedError(f"Satellite '{satellite}' not implemented yet.")
     
-        for clave, lista_entrada_datos in grupos.items():
-
-            bandas_disponibles = set(arch['banda'] for arch in lista_entrada_datos)
-            bandas_faltantes = set(bands) - bandas_disponibles
-
-            resultado = {
-            'fecha_inicio': clave[0],
-            'fecha_fin': clave[1],
-            'satelite': clave[2],
-            'nivel': lista_entrada_datos[0]['nivel'],  # Tomamos el nivel del primer archivo
-            # 'bandas_disponibles': sorted(bandas_disponibles),
-            'bandas_faltantes': sorted(bandas_faltantes) if bandas_faltantes else [],
-            'archivos': sorted([Path(input_folder)/arch['filename'] for arch in lista_entrada_datos]),
-            'completed': not bandas_faltantes
-            }
-            
-            if not bandas_faltantes:
-                resultados_completos.append(resultado)
-            else:
-                resultados_incompletos.append(resultado)
-
-
-    else:
-        raise NotImplementedError(f"Satelite '{satelite}' not implemented yet.")
-
-    if not resultados_completos:
-        raise FileNotFoundError(f"No se encontraron entradas válidas con las bandas requeridas para calcular el TWI.\n \
-                         Prueba a en la muestra {resultados_incompletos[0]['fecha_inicio']}_{resultados_incompletos[0]['fecha_fin']} \n \
-                         \t añadiendo las bandas faltantes: {', '.join(resultados_incompletos[0]['bandas_faltantes'])} ")
+    # Validar input_folder
+    input_path = Path(input_folder)
+    if not input_path.is_dir():
+        raise ValueError(f"Input folder '{input_folder}' does not exist or is not a directory.")
+    
+    # Buscar archivos TIFF
+    tiff_files = list(input_path.glob("*.tiff"))
+    if not tiff_files:
+        raise FileNotFoundError(f"No TIFF files found in '{input_folder}'.")
+    
+    # Agrupar por escena temporal
+    scenes = defaultdict(list)
+    for file_path in tiff_files:
+        parsed = parse_filename(file_path.name)
+        if parsed['banda'] not in bands:
+            continue
+        
+        scene_key = (
+            parsed['fecha_inicio'],
+            parsed['fecha_fin'],
+            parsed['satelite'],
+            parsed['nivel'],
+        )
+        scenes[scene_key].append(parsed)
+    
+    # Evaluar completitud de cada escena
+    complete_entries = []
+    incomplete_entries = []
+    
+    available_bands = set(bands)  # Bandas que buscamos
+    
+    for scene_key, files_in_scene in scenes.items():
+        found_bands = {f['banda'] for f in files_in_scene}
+        missing_bands = available_bands - found_bands
+        
+        entry = {
+            'fecha_inicio': scene_key[0],
+            'fecha_fin': scene_key[1],
+            'satelite': scene_key[2],
+            'nivel': scene_key[3],
+            'archivos': sorted([input_path / f['filename'] for f in files_in_scene]),
+            'bandas_faltantes': sorted(missing_bands),
+        }
+        
+        if missing_bands:
+            incomplete_entries.append(entry)
+        else:
+            complete_entries.append(entry)
+    
+    # Error si no hay entradas completas
+    if not complete_entries:
+        if incomplete_entries:
+            first_incomplete = incomplete_entries[0]
+            missing = ', '.join(first_incomplete['bandas_faltantes'])
+            msg = (f"No valid entries found with all required bands {bands}.\n"
+                   f"Sample: {first_incomplete['fecha_inicio']}_{first_incomplete['fecha_fin']}\n"
+                   f"Missing: {missing}")
+        else:
+            msg = f"No files matching pattern found in '{input_folder}'."
+        raise FileNotFoundError(msg)
+    
+    return complete_entries, incomplete_entries
     
     return resultados_completos, resultados_incompletos
 
@@ -231,6 +261,27 @@ def read_and_group(valids:list[dict]):
 
     return entry_arrays_tiffs,meta_ref,good_dict
 
+def default_imshow(array: npt.NDArray, title: str, colorbar_params: dict | None = None) -> tuple[Figure, Axes]:
+    """Muestra un array como imagen con colorbar y configuración por defecto.
+    
+    Args:
+        array: Array 2D a visualizar
+        title: Título del gráfico
+        colorbar_params: Parámetros adicionales para la colorbar (default: {})
+    
+    Returns:
+        Tupla (figura, ejes) de matplotlib
+    """
+    if colorbar_params is None:
+        colorbar_params = {}
+    
+    fig1, ax1 = plt.subplots(**DEFAULT_PLOT['figure'])
+    img1 = ax1.imshow(array, **DEFAULT_PLOT['imshow'])
+    fig1.colorbar(img1, ax1, **colorbar_params)
+    ax1.set_title(title)
+
+    return fig1, ax1
+
 def save_file(array: npt.NDArray, meta: dict, id_name: str, type_name: str, output_folder: Path, extensions: list[str] =['tif', 'tiff']) -> tuple[Path, ...]:
     """Guarda array en múltiples formatos TIFF.
     
@@ -252,6 +303,9 @@ def save_file(array: npt.NDArray, meta: dict, id_name: str, type_name: str, outp
     files_2_save = tuple([output_folder / f'{id_name}_({type_name}).{extension}' for extension in extensions])
     
     for file in files_2_save:
+        if file.suffix=='.png':
+            pass
+
         with rasterio.open(file, 'w', **meta_i) as dst:
             dst.write(array.astype('float32'), 1)
 

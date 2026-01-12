@@ -3,23 +3,27 @@ import os
 import numpy as np
 import rasterio
 import matplotlib.pyplot as plt
+from pathlib import Path
 
-def mdt(ruta_mdt, ruta_slope, ruta_aspect, salida_mdt, salida_slope, salida_aspect, show_plots=True):
+def mdt(ruta_mdt, ruta_slope, ruta_aspect, 
+        salida_mdt, salida_slope, salida_aspect, show_plots=True):
+    
+    output_folder=Path('OUTPUT')
+    export_image=False
     print('MDT, SLOPE and ASPECT Layers processing...')
 
     # preguntar si guardar rasters .tif y PNGs
-    while True:
-        ans = input("定Guardar rasters .tif y PNGs al terminar? (y/n): ").strip().lower()
-        if ans in ('y','n'):
-            save = (ans == 'y')
-            break
-        print("Introduce 'y' o 'n'.")
+    # while True:
+    #     ans = input("定Guardar rasters .tif y PNGs al terminar? (y/n): ").strip().lower()
+    #     print("Introduce 'y' o 'n'.")
 
-    rasters_dir = r'C:\Users\Mateo G\Desktop\STORCITO\Salida Datos\re'
-    png_dir = r'C:\Users\Mateo G\Desktop\STORCITO\Salida Datos\MDT'
-    if save:
-        os.makedirs(rasters_dir, exist_ok=True)
-        os.makedirs(png_dir, exist_ok=True)
+    rasters_dir = output_folder/'TIFFs'/'MDT'
+    png_dir = output_folder/'PNGs'/'MDT'
+    
+    if export_image:
+
+        rasters_dir.mkdir(exist_ok=True,parents=True)
+        png_dir.mkdir(exist_ok=True,parents=True)
 
     # leer MDT completo (masked to avoid extra nan passes)
     with rasterio.open(ruta_mdt) as src:
@@ -37,34 +41,37 @@ def mdt(ruta_mdt, ruta_slope, ruta_aspect, salida_mdt, salida_slope, salida_aspe
     aspect = np.where(aspect < 0, 360 + aspect, aspect)
     print("Slope y Aspect calculados.")
 
+    def save_and_plot(array, base_path, title):
+        base = os.path.splitext(os.path.basename(base_path))[0]
+        meta_out = meta.copy()
+        meta_out.update(dtype='int32', count=1, nodata=-9999, driver='GTiff')
+        
+        if export_image:
+
+            tif_path = rasters_dir/f'{base}.tif'
+
+            with rasterio.open(tif_path, 'w', **meta_out) as dst:
+                dst.write(array.astype('int32'), 1)
+
+            png_path = png_dir/f'{base}.png'
+            
+            plt.figure(figsize=(8, 6))
+            plt.imshow(array, cmap='Reds')
+            plt.colorbar()
+            plt.title(title)
+            plt.tight_layout()
+
+       
+            plt.savefig(png_path, dpi=300, bbox_inches='tight')
+            if show_plots:
+                plt.show()
+    
     # reclasificaciones
     print("Reclasificando MDT...")
     mdt_bins = [0, 200, 400, 600, 800]
     mdt_classes = np.array([0, 5, 4, 3, 2, 1], dtype='int32')
     mdt_re = mdt_classes[np.digitize(mdt, mdt_bins, right=True)]
     print("MDT reclasificado completado.")
-
-    def save_and_plot(array, base_path, title):
-        base = os.path.splitext(os.path.basename(base_path))[0]
-        meta_out = meta.copy()
-        meta_out.update(dtype='int32', count=1, nodata=-9999, driver='GTiff')
-        if save:
-            tif_path = os.path.join(rasters_dir, f'{base}.tif')
-            with rasterio.open(tif_path, 'w', **meta_out) as dst:
-                dst.write(array.astype('int32'), 1)
-            png_path = os.path.join(png_dir, f'{base}.png')
-        if show_plots or save:
-            plt.figure(figsize=(8, 6))
-            plt.imshow(array, cmap='Reds')
-            plt.colorbar()
-            plt.title(title)
-            plt.tight_layout()
-            if save:
-                plt.savefig(png_path, dpi=300, bbox_inches='tight')
-            if show_plots:
-                plt.show()
-            plt.close()
-
     save_and_plot(mdt_re, salida_mdt, 'MDT Risk Map')
 
     print("Reclasificando Slope...")
@@ -77,7 +84,7 @@ def mdt(ruta_mdt, ruta_slope, ruta_aspect, salida_mdt, salida_slope, salida_aspe
     print("Reclasificando Aspect...")
     aspect_re = np.select(
         [
-            ((aspect == 0) | (aspect == 360)) | ((aspect > 0) & (aspect < 45)),
+            (aspect >= 0) & (aspect < 45) | (aspect == 360),
             (aspect >= 45) & (aspect < 90),
             (aspect >= 90) & (aspect < 135),
             (aspect >= 135) & (aspect < 180),

@@ -3,6 +3,7 @@ import rasterio
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
+from setup import *
 
 ROTHERMEL_MAP = {
     1111: 4, 1112: 9, 
@@ -25,14 +26,10 @@ FINAL_MAP = {
     12: 4, 13: 5,
 }
 
-def fmt(archivo_lectura:str|Path, ruta_salida):
+def fmt(archivo_lectura:str|Path,output_folder=Path('OUTPUT') ,file_name:str='FMT',export_image:bool=False):
 
     if isinstance(archivo_lectura,str):
         archivo_lectura=Path(archivo_lectura)
-
-    output_folder=Path('OUTPUT')
-    export_image=False
-
 
     # Leer datos una sola vez
     with rasterio.open(archivo_lectura) as src:
@@ -52,16 +49,10 @@ def fmt(archivo_lectura:str|Path, ruta_salida):
     rasters_dir =output_folder/'TIFFs'/'FMT'
     png_dir =output_folder/'PNGs'/'FMT'
     
-
-    fig1, ax1=plt.subplots(figsize=(8, 6))
-    img1=ax1.imshow(fmt_final, cmap='Reds')
-    fig1.colorbar(img1, ax=ax1)
-    ax1.set_title('Fuel Model Type Risk Map')
-
+    fig1,ax1 = default_imshow(fmt_final,'Fuel Model Type Risk Map')
 
     if export_image:
 
-        file_name = os.path.splitext(os.path.basename(ruta_salida))[0]
         rasters_dir.mkdir(exist_ok=True,parents=True)
         png_dir.mkdir(exist_ok=True,parents=True)
 
@@ -73,7 +64,11 @@ def fmt(archivo_lectura:str|Path, ruta_salida):
     
         png_path = png_dir/f'{file_name}.png'
         fig1.savefig(png_path, dpi=300, bbox_inches='tight')
-        plt.close()
+        # plt.close()
+
+        print(f'Historical Burned Areas Layer completed and saved on:\n' \
+        f' - Rasters: {rasters_dir} \n - PNGs: {png_dir}')
+
     
     # # Guardar también en ruta_salida para compatibilidad
     # try:

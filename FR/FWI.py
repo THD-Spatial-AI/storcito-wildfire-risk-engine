@@ -7,10 +7,13 @@ import matplotlib.pyplot as plt
 import rutinas.FWI_Equations as Fwi
 # import tifffile as tif
 import rasterio
-from rasterio.transform import from_origin
+from pathlib import Path
 
 
 def f_w_index(folder_nc, output_fwi):
+
+    output_folder=Path('OUTPUT')
+    export_image:bool=False
 
     print("Fire Weather Index Layer processing...")
 

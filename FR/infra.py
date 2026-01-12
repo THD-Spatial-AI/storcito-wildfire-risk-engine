@@ -4,6 +4,7 @@ import geopandas as gpd
 import matplotlib.pyplot as plt
 import rasterio
 from rasterio.features import rasterize
+from rasterio.transform import from_bounds
 
 def infrastructure(input_infra, output_infra):
     print('Infrastructure Layer processing...')
@@ -47,7 +48,7 @@ def infrastructure(input_infra, output_infra):
 
     x_res = int((x_max - x_min) / 25)
     y_res = int((y_max - y_min) / 25)
-    transform = rasterio.transform.from_bounds(x_min, y_min, x_max, y_max, x_res, y_res)
+    transform = from_bounds(x_min, y_min, x_max, y_max, x_res, y_res)
 
     # Rasterizar directamente en memoria
     geoms = ((geom, val) for geom, val in zip(anillos.geometry, anillos['risk']))
@@ -64,15 +65,18 @@ def infrastructure(input_infra, output_infra):
         os.makedirs(rasters_dir, exist_ok=True)
         os.makedirs(png_dir, exist_ok=True)
 
+
+    meta={'driver':'GTiff', 'height':y_res, 'width':x_res, 'count':1,
+                       'dtype':rasterio.uint8, 'crs':anillos.crosses, 'transform':transform}
+
+
     # Guardar raster una sola vez
-    with rasterio.open(raster_path, 'w', driver='GTiff', height=y_res, width=x_res, count=1,
-                       dtype=rasterio.uint8, crs=anillos.crs.to_string(), transform=transform) as dst:
+    with rasterio.open(raster_path, 'w', **meta) as dst:
         dst.write(raster_data, 1)
     
     # Guardar también en output_infra para compatibilidad
     try:
-        with rasterio.open(output_infra, 'w', driver='GTiff', height=y_res, width=x_res, count=1,
-                           dtype=rasterio.uint8, crs=anillos.crs.to_string(), transform=transform) as dst:
+        with rasterio.open(output_infra, 'w', **meta) as dst:
             dst.write(raster_data, 1)
     except Exception:
         pass

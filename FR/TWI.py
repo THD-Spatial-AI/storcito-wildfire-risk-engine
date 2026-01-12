@@ -23,6 +23,7 @@ def twi(input_folder:str='INPUT',output_folder:str="OUTPUT",export_image:bool=Fa
 
     twi =[ 2.84 * (info['B05'][i] - info['B06'][i]) / (info['B03'][i] + info['B12'][i]) + 
           ( 1.25 * ( info['B03'][i] - info['B01'][i] ) - ( info['B08'][i] - info['B01'][i] ) ) / ( info['B08'][i] + 1.25 *  info['B03'][i] - 0.25 * info['B01'][i] )  
+          
           for i in range(len(info['id'])) ]
 
     tiff_dir=Path(output_folder)/'TIFFs'/'TWI'
