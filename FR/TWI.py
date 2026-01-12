@@ -38,7 +38,7 @@ def twi(input_folder:str='INPUT',output_folder:str="OUTPUT",export_image:bool=Fa
             save_file(twi_i,meta_ref_i,extra_info,'TWI',tiff_dir)
             plt.figure(figsize=(8,6)); 
             plt.imshow(twi_i, cmap='RdYlGn'); plt.colorbar(); plt.title('TWI'); plt.tight_layout()
-            plt.savefig(png_dir/f'{extra_info}_(TWI).png', dpi=300, bbox_inches='tight'); plt.close()
+            plt.savefig(png_dir/f'{extra_info}_(TWI).png', **DEFAULT_PLOT['save']); plt.close()
 
         print(f"Imágenes guardadas en:\n - Rasters: {tiff_dir}\n - PNGs: {png_dir}")
 

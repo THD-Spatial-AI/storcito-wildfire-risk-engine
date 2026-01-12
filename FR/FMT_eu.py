@@ -63,7 +63,7 @@ def fmt(archivo_lectura:str|Path,output_folder=Path('OUTPUT') ,file_name:str='FM
             dst.write(fmt_final, 1)
     
         png_path = png_dir/f'{file_name}.png'
-        fig1.savefig(png_path, dpi=300, bbox_inches='tight')
+        fig1.savefig(png_path, **DEFAULT_PLOT['save'])
         # plt.close()
 
         print(f'Historical Burned Areas Layer completed and saved on:\n' \

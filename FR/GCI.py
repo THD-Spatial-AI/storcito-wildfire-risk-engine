@@ -39,7 +39,7 @@ def GCI(input_folder:str='INPUT',output_folder:str='OUTPUT',export_image:bool=Fa
             # Guardar PNGs en carpeta separada
             plt.figure(figsize=(8,6)); 
             plt.imshow(gci_i, cmap='RdYlGn'); plt.colorbar(); plt.title('GCI'); plt.tight_layout()
-            plt.savefig(png_dir/f'{extra_info}_(GCI).png', dpi=300, bbox_inches='tight'); plt.close()
+            plt.savefig(png_dir/f'{extra_info}_(GCI).png', **DEFAULT_PLOT['save']); plt.close()
 
         print(f"Imágenes guardadas en:\n - Rasters: {tiff_dir}\n - PNGs: {png_dir}")
 

@@ -170,8 +170,8 @@ def Fhist(input_folder=Path('INPUT'), output_folder=Path('OUTPUT'),export_image:
         base_file,_=save_file(suma_total,tmeta,'Fire_History_Sum',f'{time_range}',rasters_dir)
         risk_file,_=save_file(reclas,tmeta,'Fire_History_(Risk_Map)',f'{time_range}',rasters_dir)
 
-        cumulative_figure.savefig(png_dir/f'{base_file.stem}.png', dpi=300, bbox_inches='tight')
-        reclasified_figure.savefig(png_dir/f'{risk_file.stem}.png', dpi=300, bbox_inches='tight')
+        cumulative_figure.savefig(png_dir/f'{base_file.stem}.png', **DEFAULT_PLOT['save'])
+        reclasified_figure.savefig(png_dir/f'{risk_file.stem}.png', **DEFAULT_PLOT['save'])
 
         # Guardar también en output_fhist para compatibilidad
         # try:
