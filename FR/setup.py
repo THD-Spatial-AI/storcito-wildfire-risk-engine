@@ -13,6 +13,7 @@ from datetime import datetime as time
 from collections import defaultdict
 from typing import Literal, TypedDict
 from itertools import batched
+from enum import Enum
 
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from datetime import datetime
@@ -22,6 +23,27 @@ DEFAULT_PLOT={
     'imshow':{'cmap':'Reds'},
     'save':{'dpi':300,'bbox_inches':'tight'}
 }
+
+class Sen2(Enum):
+    
+    """Bandas espectrales de Sentinel-2."""
+
+    B01 = "B01"
+    B02 = "B02"
+    B03 = "B03"
+    B04 = "B04"
+    B05 = "B05"
+    B06 = "B06"
+    B07 = "B07"
+    B08 = "B08"
+    B8A = "B8A"
+    B09 = "B09"
+    B10 = "B10"
+    B11 = "B11"
+    B12 = "B12"
+    
+    def __str__(self):
+        return self.value
 
 class ParsedFilename(TypedDict):
     fecha_inicio: datetime
@@ -123,12 +145,7 @@ def band_date_sort(file:str):
         raise ValueError(f"Filename '{file}' does not match expected pattern.")
 
 def sort_time_comparative(band_folder:Path|None=None,date_format:str="%Y-%m-%d-%H_%M")->None:
-    """Initially filled folder with pairs of files showcasing the before and after fire
 
-    Args:
-        band_folder (str): Folder containing pairs of fire images
-        date_format (str, optional): Time formata for sorting. Defaults to "%Y-%m-%d-%H_%M".
-    """
 
     if not band_folder:
         band_folder=Path("INPUT")
@@ -163,9 +180,8 @@ def sort_time_comparative(band_folder:Path|None=None,date_format:str="%Y-%m-%d-%
 
             shutil.move(band_folder/prev_fire,pre_fire_folder/prev_fire)
             shutil.move(band_folder/post_fire,post_fire_folder/post_fire)
- 
-def check_valid_entries(bands: list[str], input_folder: str = "INPUT", 
-                        satellite: Literal['Sentinel-2'] = 'Sentinel-2') -> tuple[list[dict], list[dict]]:
+
+def check_valid_entries(bands: list[str], input_folder: str = "INPUT",satellite: Literal['Sentinel-2'] = 'Sentinel-2') -> tuple[list[dict], list[dict]]:
     """Valida que todas las bandas requeridas existan para cada escena temporal.
     
     Agrupa archivos por fecha, satélite y nivel, verificando que todas las bandas
