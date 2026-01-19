@@ -5,11 +5,7 @@ Optimized for NumPy arrays (no slow loops).
 import numpy as np
 
 
-def ffmc(temp: np.ndarray, 
-         hum: np.ndarray, 
-         wind: np.ndarray, 
-         rain: np.ndarray, 
-         f0: np.ndarray) -> np.ndarray:
+def ffmc(temp, hum, wind, rain, f0) -> np.ndarray:
     """
     Calculate the Fine Fuel Moisture Code (FFMC).
     
@@ -93,11 +89,7 @@ def ffmc(temp: np.ndarray,
     
     return f
 
-def dmc(temp: np.ndarray,
-        hum: np.ndarray,
-        rain: np.ndarray,
-        p0: np.ndarray,
-        month: int) -> np.ndarray:
+def dmc(temp, hum, rain, p0, month) -> np.ndarray:
     """
     Calculate the Duff Moisture Code (DMC).
     
@@ -160,10 +152,7 @@ def dmc(temp: np.ndarray,
     p = pr + 100.0 * k
     return p
 
-def dc(temp: np.ndarray,
-       rain: np.ndarray,
-       month: int,
-       d0: np.ndarray) -> np.ndarray:
+def dc(temp, rain, month, d0) -> np.ndarray:
     """
     Calculate the Drought Code (DC).
     
@@ -211,8 +200,7 @@ def dc(temp: np.ndarray,
     d = dr + 0.5 * v
     return d
 
-def isi(wind: np.ndarray,
-        f: np.ndarray) -> np.ndarray:
+def isi(wind, f) -> np.ndarray:
     """
     Calculate the Initial Spread Index (ISI).
     
@@ -236,8 +224,7 @@ def isi(wind: np.ndarray,
     r = 0.208 * f_u * f_f
     return r
 
-def bui(p: np.ndarray,
-        d: np.ndarray) -> np.ndarray:
+def bui(p, d) -> np.ndarray:
     """
     Calculate the Build-up Index (BUI).
     
@@ -269,8 +256,7 @@ def bui(p: np.ndarray,
     u = np.maximum(u, 0.0)
     return u
 
-def fwi(r: np.ndarray,
-        u: np.ndarray) -> np.ndarray:
+def fwi(r, u) -> np.ndarray:
     """
     Calculate the Fire Weather Index (FWI).
     

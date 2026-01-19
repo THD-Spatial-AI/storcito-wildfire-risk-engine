@@ -13,14 +13,15 @@ from rasterio.transform import from_origin
 from scipy.interpolate import griddata
 
 
-def f_w_index(input_folder:str|Path, output_fwi):
+def f_w_index(input_folder:str|Path,file_name:str='FWI_Risk_Map',output_folder:Path|str=Path('OUTPUT'),
+    expoort_image:bool=False,crs:str="EPSG:4326")->None:
 
     if isinstance(input_folder,str):
         input_folder=Path(input_folder)
+    if isinstance(output_folder,str):
+        output_folder=Path(output_folder)
 
-    file_name:str='FWI_Risk_Map'
-    output_folder=Path('OUTPUT')
-    expoort_image:bool=False
+
 
     print("Fire Weather Index Layer processing...")
 
@@ -83,7 +84,7 @@ def f_w_index(input_folder:str|Path, output_fwi):
         
         # Inicialización en el primer paso
         if id_file == 0:
-            f0 = np.full_like(hum_m, 85.0)  # Más explícito que ones * 85
+            f0 = np.full_like(hum_m, 85.0)  
             p0 = np.full_like(hum_m, 6.0)
             d0 = np.full_like(hum_m, 15.0)
         
@@ -117,7 +118,7 @@ def f_w_index(input_folder:str|Path, output_fwi):
     pixel_size_x = (xf.max() - xf.min()) / (data.shape[1] - 1)
     pixel_size_y = (yf.max() - yf.min()) / (data.shape[0] - 1)
     transform = from_origin(xf.min(), yf.max(), pixel_size_x, pixel_size_y)
-    crs = "EPSG:4326"
+    # crs = "EPSG:4326"
 
     # --------------------------------------------------------
     # RECLASIFICACIÓN
@@ -138,6 +139,9 @@ def f_w_index(input_folder:str|Path, output_fwi):
     # --------------------------------------------------------
     # METADATOS DEL RASTER
     # --------------------------------------------------------
+    
+    # FIXME: widht and height may be swapped
+
     meta = {
         "driver": "GTiff",
         "count": 1,
