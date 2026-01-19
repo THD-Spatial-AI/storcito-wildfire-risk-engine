@@ -1,6 +1,7 @@
 import os
 os.environ['GDAL_DATA'] = r'C:\Users\alvar\anaconda3\envs\storcito\Library\share\gdal'
 import sys
+import time
 import pandas as pd
 import geopandas as gpd
 import matplotlib.pyplot as plt
@@ -10,8 +11,6 @@ from setup import *
 from pathlib import Path
 from rasterio.features import rasterize
 from rasterio.transform import from_bounds
-import time
-from typing import Union
 from shapely.geometry.base import BaseGeometry
 
 # sys.path.append(r'..\geo_auxy')

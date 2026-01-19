@@ -1,9 +1,11 @@
 import os
 import rasterio
+
 import numpy as np
 import matplotlib.pyplot as plt
-from pathlib import Path
+
 from setup import *
+from pathlib import Path
 
 ROTHERMEL_MAP = {
     1111: 4, 1112: 9, 

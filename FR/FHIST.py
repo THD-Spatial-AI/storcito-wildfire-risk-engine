@@ -1,13 +1,13 @@
 import os
 import rasterio
+
 import numpy as np
 import matplotlib.pyplot as plt
 import geopandas as gpd
 
+from setup import *
 from itertools import groupby
 from pathlib import Path
-
-from setup import *
 from rasterio.warp import reproject, Resampling
 from rasterio.mask import mask
 from rasterio.io import MemoryFile
