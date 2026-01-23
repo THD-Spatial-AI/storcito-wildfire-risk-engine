@@ -24,13 +24,7 @@ def GCI(input_folder:str='INPUT',output_folder:str='OUTPUT',export_image:bool=Fa
     gci =[ (info['B08'][i] / info['B03'][i]) - 1
           for i in range(len(info['id'])) ]
     
-    tiff_dir=Path(output_folder)/'TIFFs'/'GCI'
-    png_dir=Path(output_folder)/'PNGs'/'GCI'
-
-    
     if export_image:
-        tiff_dir.mkdir(parents=True, exist_ok=True)
-        png_dir.mkdir(parents=True, exist_ok=True)
 
         for gci_i,meta_ref_i,extra_info in zip(gci,info['meta_ref'],info['id']):
     

@@ -64,15 +64,15 @@ def infrastructure(input_infra: str|Path,
     """
     
     # Validar y convertir paths
-    if isinstance(input_infra, str):
-        input_infra = Path(input_infra)
-    if isinstance(output_folder, str):
-        output_folder = Path(output_folder)
+
+    input_infra = Path(input_infra)
+    output_folder = Path(output_folder)
+    ref_raster = Path(ref_raster)
     
     # Validar existencia de archivos
     if not input_infra.exists():
         raise FileNotFoundError(f"Archivo de infraestructura no encontrado: {input_infra}")
-    if not Path(ref_raster).exists():
+    if not ref_raster.exists():
         raise FileNotFoundError(f"Raster de referencia no encontrado: {ref_raster}")
     
     # Leer y reproyectar infraestructuras

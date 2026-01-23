@@ -8,23 +8,15 @@ from setup import *
 from osgeo import gdal
 from pathlib import Path
 
-def mdt(ruta_mdt, 
-        salida_mdt, salida_slope, salida_aspect, show_plots=True):
+def mdt(ruta_mdt,output_folder:str|Path=Path('OUTPUT'),
+        export_image=False,
+        show_plots=True):
     
     # XXX: Hay dos parametros de salida que no se usan: ruta_slope, ruta_aspect
 
-    output_folder=Path('OUTPUT')
-    export_image=False
+
     print('MDT, SLOPE and ASPECT Layers processing...')
-
-
-    rasters_dir = output_folder/'TIFFs'/'MDT'
-    png_dir = output_folder/'PNGs'/'MDT'
-    
-    if export_image:
-
-        rasters_dir.mkdir(exist_ok=True,parents=True)
-        png_dir.mkdir(exist_ok=True,parents=True)
+    output_folder=Path(output_folder)
 
     # leer MDT completo (masked to avoid extra nan passes)
     with rasterio.open(ruta_mdt) as src:
@@ -42,31 +34,6 @@ def mdt(ruta_mdt,
     slope_ds = aspect_ds = ds = None  # close datasets
     aspect = np.where(aspect < 0, 360 + aspect, aspect)
     print("Slope y Aspect calculados.")
-
-    def save_and_plot(array, base_path, title):
-        base = os.path.splitext(os.path.basename(base_path))[0]
-        meta_out = meta.copy()
-        meta_out.update(dtype='int32', count=1, nodata=-9999, driver='GTiff')
-        
-        if export_image:
-
-            tif_path = rasters_dir/f'{base}.tif'
-
-            with rasterio.open(tif_path, 'w', **meta_out) as dst:
-                dst.write(array.astype('int32'), 1)
-
-            png_path = png_dir/f'{base}.png'
-            
-            plt.figure(figsize=(8, 6))
-            plt.imshow(array, cmap='Reds')
-            plt.colorbar()
-            plt.title(title)
-            plt.tight_layout()
-
-       
-            plt.savefig(png_path, dpi=300, bbox_inches='tight')
-            if show_plots:
-                plt.show()
     
     # reclasificaciones
     print("Reclasificando MDT...")
@@ -102,16 +69,18 @@ def mdt(ruta_mdt,
     fig_aspect, ax_aspect = default_imshow(aspect_re, 'Aspect Risk Map', {'label':'Risk'})
     print("Aspect reclasificado completado.")
 
+    if show_plots:
+        plt.show()
+
     if export_image:
-        # save_file(fig_mdt,)
-        pass
 
-
-
-    save_and_plot(mdt_re, salida_mdt, 'MDT Risk Map')
-    save_and_plot(slope_re, salida_slope, 'Slope Risk Map')
-    save_and_plot(aspect_re, salida_aspect, 'Aspect Risk Map')
+        meta_out = meta.copy()
+        meta_out.update(dtype='int32', count=1, nodata=-9999, driver='GTiff')
+    
+        save_file(mdt_re, 'MDT_RISK_MAP', output_folder, meta_out, extensions=['tif','png'], fig=fig_mdt, meta_intact=True)
+        save_file(slope_re, 'SLOPE_RISK_MAP', output_folder, meta_out, extensions=['tif','png'], fig=fig_slpe, meta_intact=True)
+        save_file(aspect_re, 'ASPECT_RISK_MAP', output_folder, meta_out, extensions=['tif','png'], fig=fig_aspect, meta_intact=True)
 
 
     print("MDT, SLOPE and ASPECT Layers completed.")
-    return
+    return mdt_re, slope_re, aspect_re

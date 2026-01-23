@@ -22,48 +22,32 @@ def Ndvi(input_folder:str='INPUT',output_folder:str='OUTPUT',export_image:bool=F
       
     np.seterr(divide='ignore', invalid='ignore')
 
-    ndvi =[(info['B08'][i] - info['B04'][i]) / (info['B08'][i] + info['B04'][i]) 
-           for i in range(len(info['id']))]
+    ndvi =np.array([(info['B08'][i] - info['B04'][i]) / (info['B08'][i] + info['B04'][i]) 
+           for i in range(len(info['id']))])
 
     condiciones = [
-        (ndvi_i <= 0.27,
-        (ndvi_i > 0.27) & (ndvi_i <= 0.40),
-        (ndvi_i > 0.40) & (ndvi_i <= 0.54),
-        (ndvi_i > 0.54) & (ndvi_i <= 0.67),
-        ndvi_i > 0.67) 
-        for ndvi_i in ndvi]
+        (ndvi <= 0.27,
+        (ndvi > 0.27) & (ndvi <= 0.40),
+        (ndvi > 0.40) & (ndvi <= 0.54),
+        (ndvi > 0.54) & (ndvi <= 0.67),
+        ndvi > 0.67) 
+        ]
     
     valores = [5, 4, 3, 2, 1]
 
-    reclasificados = [np.select(cond, valores, default=0).astype('int32') for cond in condiciones]
-
-    tiff_dir = Path(output_folder)/'TIFFs'/'NDVI'
-    png_dir = Path(output_folder)/'PNGs'/'NDVI'
-
-    tiff_dir.mkdir(parents=True, exist_ok=True); png_dir.mkdir(parents=True, exist_ok=True)
+    reclasificados = np.select(condiciones, valores, default=0).astype('int32')
 
     if export_image:
         
         for ndvi_i,meta_ref_i,extra_info in zip(ndvi,info['meta_ref'],info['id']): 
 
-            save_file(ndvi_i, extra_info, tiff_dir, meta_ref_i, 'NDVI')
-            plt.figure(figsize=(8,6))
-            plt.imshow(ndvi, cmap='RdYlGn'); plt.colorbar(); plt.title('NDVI'); plt.tight_layout()
-            plt.savefig(png_dir/f'{extra_info}_(NDVI).png', **DEFAULT_PLOT['save']); plt.close()
-
-
+            fig1,ax1=default_imshow(ndvi_i,'NDVI')
+            save_file(ndvi_i, extra_info, output_folder, meta_ref_i, 'NDVI',extensions=['tif','tiff','png'], fig=fig1)
+           
         for reclasificado_i,meta_ref_i,extra_info in zip(reclasificados,info['meta_ref'],info['id']):
 
-            save_file(reclasificado_i, extra_info, tiff_dir, meta_ref_i, 'NDVI_Risk_Map')
-            plt.figure(figsize=(8,6)) 
-            plt.imshow(reclasificado_i, cmap='Reds'); plt.colorbar(); plt.title('NDVI Risk Map'); plt.tight_layout()
-            plt.savefig(png_dir/f'{extra_info}_(NDVI_Risk_Map).png', **DEFAULT_PLOT['save']); plt.close()
-
-        print(f"Imágenes guardadas en:\n - Rasters: {tiff_dir}\n - PNGs: {png_dir}")
-
-    # # Mostrar las imágenes siempre (independientemente de la elección)
-    # plt.figure(figsize=(8,6)); plt.imshow(ndvi, cmap='RdYlGn'); plt.colorbar(); plt.title('NDVI'); plt.tight_layout(); plt.show()
-    # plt.figure(figsize=(8,6)); plt.imshow(reclasificado, cmap='Reds'); plt.colorbar(); plt.title('NDVI Risk Map'); plt.tight_layout(); plt.show()
-
+            fig1,ax1=default_imshow(reclasificado_i,'NDVI Risk Map')
+            save_file(reclasificado_i, extra_info, output_folder, meta_ref_i, 'NDVI_Risk_Map',extensions=['tif','tiff','png'], fig=fig1)
+           
 if __name__ == "__main__":
     Ndvi(export_image=True)

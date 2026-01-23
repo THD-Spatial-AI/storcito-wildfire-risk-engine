@@ -116,7 +116,7 @@ def Fhist(input_folder=Path('INPUT'), output_folder=Path('OUTPUT'),
         
         out_image, out_transform, meta = calcular_dnbr(pre_b8, pre_b12, post_b8, post_b12)
         
-        if suma_total is None:
+        if not suma_total:
             # Primera imagen - usar como referencia
             target_shape = out_image.shape[1:]
             suma_total = np.zeros(target_shape, dtype='float32')
@@ -129,7 +129,7 @@ def Fhist(input_folder=Path('INPUT'), output_folder=Path('OUTPUT'),
         if out_image.shape[1:] == suma_total.shape:
             suma_total += out_image[0].astype('float32')
 
-        elif target_meta is not None:
+        elif target_meta :
             dest = np.zeros(suma_total.shape, dtype='float32')
 
             reproject(source=out_image[0].astype('float32'), destination=dest,
@@ -141,8 +141,7 @@ def Fhist(input_folder=Path('INPUT'), output_folder=Path('OUTPUT'),
 
 
     if suma_total is None:
-        print("No historical data found.")
-        return
+        raise ValueError("Historical data unable to be calculated.")
 
     # Reclasificación final
     vmax = np.max(suma_total)
@@ -169,7 +168,7 @@ def Fhist(input_folder=Path('INPUT'), output_folder=Path('OUTPUT'),
     if export_image:
 
         if not target_meta:
-            return
+            raise ValueError("Metadata is missing; cannot save output files.")
 
         # Guardar suma_total como float tif
         tmeta = target_meta.copy()

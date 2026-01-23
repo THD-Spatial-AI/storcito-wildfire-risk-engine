@@ -14,37 +14,52 @@ from scipy.interpolate import griddata
 
 
 def f_w_index(input_folder:str|Path,file_name:str='FWI_Risk_Map',output_folder:Path|str=Path('OUTPUT'),
-    expoort_image:bool=False,crs:str="EPSG:4326")->None:
+    export_image:bool=False,crs:str="EPSG:4326")->np.ndarray:
+
+    """Calculates Canadian Forest Fire Weather Index (FWI) from netCDF climate data.
+    
+    Reads daily netCDF files with meteorological data (temperature, humidity, wind, 
+    precipitation), interpolates to 360x360 grid, calculates FWI indices sequentially
+    maintaining state between days, and reclassifies into 5 risk levels.
+    
+    Args:
+        input_folder: Path to folder containing daily .nc files
+        file_name: Identifier for output files. Defaults to 'FWI_Risk_Map'
+        output_folder: Output folder for saving results. Defaults to 'OUTPUT'
+        export_image: Whether to save GeoTIFF/PNG files. Defaults to False
+        crs: Coordinate reference system. Defaults to "EPSG:4326"
+        
+    Returns:
+        Reclassified FWI array (int32) with values 1-5 for risk levels
+        
+    Raises:
+        ValueError: If no .nc files found in input_folder
+        
+    Notes:
+        - Uses Van Wagner FWI system (Canadian Forest Service)
+        - Maintains daily continuity: ffmc → dmc → dc across iterations
+        - Wind converted from m/s to km/h, temperature from K to °C
+        - Final reclassification: 1=low, 2=moderate, 3=high, 4=very high, 5=extreme
+    """
 
     input_folder = Path(input_folder)
     output_folder = Path(output_folder)
 
-
-
     print("Fire Weather Index Layer processing...")
-
-    # # ⬅️ Preguntar si guardar imágenes (AL PRINCIPIO DEL TODO)
-    # guardar = input("¿Quieres guardar las imágenes generadas? (y/n): ").strip().lower()
-    # guardar_imagen = True if guardar == "y" else False
-
-    # Rutas de guardado
-    tif_dirs = output_folder/'TIFFs'
-    png_dirs = output_folder/'PNGs'
-
-    # Crear carpetas si no existen
-    if expoort_image:
-        tif_dirs.mkdir(parents=True, exist_ok=True)
-        png_dirs.mkdir(parents=True, exist_ok=True)
 
     # --------------------------------------------------------
     # LECTURA DE ARCHIVOS .NC
     # --------------------------------------------------------
     lista_nc = [file for file in input_folder.iterdir() if file.suffix == '.nc']
 
-    # Inicialización de condiciones previas
+    if not lista_nc:
+        raise ValueError("No netCDF files found in input folder")
+
     GRID_SIZE = 360
     VERTICAL_LEVEL = 15  
 
+    # --------------------------------------------------------
+    # PROCESAMIENTO DE CADA ARCHIVO .NC
     for id_file, file in enumerate(lista_nc):
         
         with nc.Dataset(file) as dataset:  
@@ -86,35 +101,38 @@ def f_w_index(input_folder:str|Path,file_name:str='FWI_Risk_Map',output_folder:P
             d0 = np.full_like(hum_m, 15.0)
         
         # Cálculo de índices FWI
-        f = Fwi.ffmc(temp_m, hum_m, wind_m, rain_m, f0)
-        p = Fwi.dmc(temp_m, hum_m, rain_m, p0, mes)
-        d = Fwi.dc(temp_m, rain_m, mes, d0)
-        
-        ISI = Fwi.isi(wind_m, f)
-        BUI = Fwi.bui(p, d)
+        f = Fwi.ffmc(temp_m, hum_m, wind_m, rain_m, f0) # type: ignore[name-defined]
+        p = Fwi.dmc(temp_m, hum_m, rain_m, p0, mes) # type: ignore[name-defined]
+        d = Fwi.dc(temp_m, rain_m, mes, d0) # type: ignore[name-defined]
         
         # Actualización de condiciones previas para el siguiente día
         f0, p0, d0 = f, p, d
         
         print(f"Día {id_file+1} procesado. Mes: {mes}")
-        print(f"  FFMC max: {np.max(f):.2f}")
-        print(f"  DMC max:  {np.max(p):.2f}")
-        print(f"  DC max:   {np.max(d):.2f}\n")
+        print(f"\t FFMC max: {np.max(f):.2f}")
+        print(f"\t DMC max:  {np.max(p):.2f}")
+        print(f"\t DC max:   {np.max(d):.2f}\n")
+
+
+            
 
 
 
     # --------------------------------------------------------
     # FWI final - procesar directamente en memoria
     # --------------------------------------------------------
-    FWI = Fwi.fwi(ISI, BUI)
+    
+    ISI = Fwi.isi(wind_m, f)# type: ignore[name-defined]
+    BUI = Fwi.bui(p, d)# type: ignore[name-defined]
+    FWI = Fwi.fwi(ISI, BUI)# type: ignore[name-defined]
     
     # Invertir eje Y (flip) sin guardar a disco
     data = FWI[::-1, :]
 
     # Calcular parámetros de transformación
-    pixel_size_x = (xf.max() - xf.min()) / (data.shape[1] - 1)
-    pixel_size_y = (yf.max() - yf.min()) / (data.shape[0] - 1)
-    transform = from_origin(xf.min(), yf.max(), pixel_size_x, pixel_size_y)
+    pixel_size_x = (xf.max() - xf.min()) / (data.shape[1] - 1) # type: ignore[name-defined]
+    pixel_size_y = (yf.max() - yf.min()) / (data.shape[0] - 1) # type: ignore[name-defined]
+    transform = from_origin(xf.min(), yf.max(), pixel_size_x, pixel_size_y) # type: ignore[name-defined]
     # crs = "EPSG:4326"
 
     # --------------------------------------------------------
@@ -158,7 +176,7 @@ def f_w_index(input_folder:str|Path,file_name:str='FWI_Risk_Map',output_folder:P
 
     plt.show()
 
-    if expoort_image:
+    if export_image:
 
         save_file(fwi_clas, file_name, output_folder, meta, extensions=['tif','png'], fig=fig1, meta_intact=True)
 

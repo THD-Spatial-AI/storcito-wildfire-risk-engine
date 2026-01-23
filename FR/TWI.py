@@ -26,21 +26,16 @@ def twi(input_folder:str='INPUT',output_folder:str="OUTPUT",export_image:bool=Fa
           
           for i in range(len(info['id'])) ]
 
-    tiff_dir=Path(output_folder)/'TIFFs'/'TWI'
-    png_dir=Path(output_folder)/'PNGs'/'TWI'
 
-    tiff_dir.mkdir(parents=True, exist_ok=True); png_dir.mkdir(parents=True, exist_ok=True)
-    
     if export_image:
 
         for twi_i,meta_ref_i,extra_info in zip(twi,info['meta_ref'],info['id']):
             # print(meta_ref_i)
             fig,ax=default_imshow(twi_i,'TWI')
-            save_file(twi_i, extra_info, tiff_dir, meta_ref_i, 'TWI')
+            save_file(twi_i, extra_info, output_folder, meta_ref_i, 'TWI',extensions=['tif','png'],meta_intact=True ,fig=fig)
 
-            fig.savefig(png_dir/f'{extra_info}_(TWI).png', **DEFAULT_PLOT['save']); plt.close()
 
-        print(f"Imágenes guardadas en:\n - Rasters: {tiff_dir}\n - PNGs: {png_dir}")
+
 
 if __name__ == "__main__":
     twi(export_image=True)  
