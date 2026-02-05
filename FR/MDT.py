@@ -9,7 +9,7 @@ def mdt(ruta_mdt, ruta_slope, ruta_aspect, salida_mdt, salida_slope, salida_aspe
 
     # preguntar si guardar rasters .tif y PNGs
     while True:
-        ans = input("定Guardar rasters .tif y PNGs al terminar? (y/n): ").strip().lower()
+        ans = input("Guardar rasters .tif y PNGs al terminar? (y/n): ").strip().lower()
         if ans in ('y','n'):
             save = (ans == 'y')
             break
