@@ -1,0 +1,17 @@
+*.tif
+*.tiff
+*.TIF
+*.TIFF
+*.nc
+*.hdf
+*.h5
+*.cpg
+*.dbf
+*.prj
+*.shp
+*.shx
+*.qmd
+*.prof
+
+*.png
+*.jpg

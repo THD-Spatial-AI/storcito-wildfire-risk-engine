@@ -1,102 +1,196 @@
 import os
 import rasterio
+
 import numpy as np
-from rasterio.warp import calculate_default_transform, reproject, Resampling
 import matplotlib.pyplot as plt
 import geopandas as gpd
+
+from FR.rutinas.setup import (
+    sort_time_comparative,
+    band_date_sort,
+    parse_filename,
+    reproject_raster,
+    default_imshow,
+    save_file,
+)
+from itertools import groupby
+from pathlib import Path
+from rasterio.warp import reproject, Resampling
 from rasterio.mask import mask
+from rasterio.io import MemoryFile
 
-def Fhist(folder_pre, folder_post, output_fhist):
-    print('Historical Burned Areas Layer processing...')
-    save = input("¿Deseas guardar el mapa reclasificado y los rasters? (y/n): ").strip().lower() in ('y','yes')
+BUFFER_SIZE=660
+BURNED_THRESHOLD=0.27
 
-    def reproyectar_a_epsg_32629(src_path):
-        """Reproyecta raster sin guardar a disco - retorna array en memoria"""
-        dst_crs = "EPSG:32629"
-        with rasterio.open(src_path) as src:
-            transform, width, height = calculate_default_transform(src.crs, dst_crs, src.width, src.height, *src.bounds)
-            kwargs = src.meta.copy()
-            kwargs.update({'crs': dst_crs, 'transform': transform, 'width': width, 'height': height})
-            dest_array = np.empty((height, width), dtype=src.dtypes[0])
-            reproject(source=rasterio.band(src, 1), destination=dest_array,
-                      src_transform=src.transform, src_crs=src.crs,
-                      dst_transform=transform, dst_crs=dst_crs, resampling=Resampling.nearest)
-            return dest_array, kwargs
+def fire_history(input_folder:str|Path=Path('INPUT'), output_folder:str|Path = Path('OUTPUT'),export_image: bool=False,show_plots:bool=False) -> tuple[np.ndarray, np.ndarray]:
+    """Analyze historical fire events using dNBR (differenced Normalized Burn Ratio).
 
-    def calcular_dnbr(b8_may, b12_may, b8_oct, b12_oct, idx):
-        year = 2016 + idx
-        
-        # Reproyectar todo en memoria sin guardar intermedios
-        nir_m, meta_m = reproyectar_a_epsg_32629(b8_may)
-        swir_m, _ = reproyectar_a_epsg_32629(b12_may)
-        nir_o, _ = reproyectar_a_epsg_32629(b8_oct)
-        swir_o, meta_o = reproyectar_a_epsg_32629(b12_oct)
+    Compares pre-fire and post-fire Sentinel-2 imagery to detect burned areas,
+    accumulates changes across multiple fire events, and reclassifies into risk levels.
 
-        # Calcular NBR e dNBR en memoria
-        nir_m = nir_m.astype('float32')
-        swir_m = swir_m.astype('float32')
-        nir_o = nir_o.astype('float32')
-        swir_o = swir_o.astype('float32')
-        
+    Args:
+        input_folder: Directory containing pre/post fire Sentinel-2 TIFF files
+        output_folder: Output directory for results. Defaults to 'OUTPUT'
+        export_image: Whether to save results as GeoTIFF/PNG. Defaults to False
+        show_plots: Whether to display matplotlib plots. Defaults to False
+
+    Returns:
+        Tuple of (cumulative_burn_sum, reclassified_risk_array) with risk scaled 1-5
+
+    Raises:
+        ValueError: If historical data cannot be calculated or metadata is missing
+    """
+    input_folder = Path(input_folder)
+    output_folder = Path(output_folder)
+
+    reference_folder = Path('REFERENCE') / 'HIST'
+    sort_time_comparative(input_folder)
+    
+    prev_folder = input_folder / 'PRE_FIRE'
+    post_folder = input_folder / 'POST_FIRE'
+    prev_folder.mkdir(parents=True, exist_ok=True)
+    post_folder.mkdir(parents=True, exist_ok=True)
+    
+    # Cargar archivos
+    prev_files = sorted(
+        [f.name for f in prev_folder.glob('*.tiff') if f.is_file()],
+        key=band_date_sort
+    )
+    post_files = sorted(
+        [f.name for f in post_folder.glob('*.tiff') if f.is_file()],
+        key=band_date_sort
+    )
+    
+    # ✅ CACHE: Parse una sola vez
+    prev_cache = {f: parse_filename(f) for f in prev_files}
+    post_cache = {f: parse_filename(f) for f in post_files}
+    
+    # Agrupar usando cache (sin re-parsing)
+    prev_by_band = {
+        k: list(v) for k, v in groupby(prev_files, key=lambda x: prev_cache[x].banda)
+    }
+    post_by_band = {
+        k: list(v) for k, v in groupby(post_files, key=lambda x: post_cache[x].banda)
+    }
+    # print(prev_files_dict)
+
+    def _calculate_nbr(nir: np.ndarray, swir: np.ndarray) -> np.ndarray:
+        """Calculate Normalized Burn Ratio (NBR) from NIR and SWIR bands.
+
+        Args:
+            nir: Near-infrared band array (B8A)
+            swir: Short-wave infrared band array (B12)
+
+        Returns:
+            NBR array with values in range [-1, 1]
+        """
         np.seterr(divide='ignore', invalid='ignore')
-        nbr_pre = (nir_m - swir_m) / (nir_m + swir_m)
-        nbr_post = (nir_o - swir_o) / (nir_o + swir_o)
-        dnbr = nbr_pre - nbr_post
+        return (nir - swir) / (nir + swir)
+    
+    def _apply_mask_to_raster(raster: np.ndarray, meta: dict, geometries: list) -> tuple[np.ndarray, rasterio.Affine]:
+        """Mask and crop raster to geometry bounds using in-memory processing.
 
-        # Reclasificación directa en memoria
-        recl = np.where(dnbr < 0.27, 0, 1).astype('int32')
-        
-        # Leer geometrías para máscara
-        historico = gpd.read_file(rf'C:\Users\Mateo G\Desktop\STORCITO\Fotos\HIST\Historico_incendios\hist_{year}.shp')
-        buff = historico.geometry.buffer(660)
-        buff_gdf = gpd.GeoDataFrame({'geometry': buff}, crs=historico.crs)
-        mask_gdf = buff_gdf.dissolve()
-        geometries = [g for g in mask_gdf.geometry]
+        Args:
+            raster: 2D array to mask
+            meta: Rasterio metadata with CRS and transform
+            geometries: List of shapely geometries for masking
 
-        # Crear raster enmascarado en memoria usando MemoryFile
-        from rasterio.io import MemoryFile
+        Returns:
+            Tuple of (masked_array, output_transform)
+        """
         with MemoryFile() as memfile:
-            with memfile.open(driver='GTiff', height=recl.shape[0], width=recl.shape[1], count=1,
-                            dtype=recl.dtype, crs=meta_o['crs'], transform=meta_o['transform']) as mem_src:
-                mem_src.write(recl, 1)
+            with memfile.open(driver='GTiff', height=raster.shape[0], width=raster.shape[1], count=1,
+                            dtype=raster.dtype, crs=meta['crs'], transform=meta['transform']) as mem_src:
+                mem_src.write(raster, 1)
             with memfile.open() as mem_src:
                 out_image, out_transform = mask(mem_src, geometries, crop=True)
+        return out_image, out_transform
+    
+    def _load_reference_geometries(year: int) -> list:
+        """Load and buffer historical fire perimeters for a given year.
+
+        Args:
+            year: Year of historical fire data to load
+
+        Returns:
+            List of dissolved buffered geometries for masking
+        """
+        historico = gpd.read_file(reference_folder/f'hist_{year}.shp')
+        buff = historico.geometry.buffer(BUFFER_SIZE)
+        buff_gdf = gpd.GeoDataFrame({'geometry': buff}, crs=historico.crs)
+        return list(buff_gdf.dissolve().geometry)
+
+    def calcular_dnbr(pre_b8, pre_b12, post_b8, post_b12) -> tuple[np.ndarray, rasterio.Affine, dict]:
+        """Calcula dNBR (Differenced NBR) para detección de incendios.
         
-        return out_image, out_transform, meta_o, year
-
-    pre8 = sorted([os.path.join(folder_pre, f) for f in os.listdir(folder_pre) if f.endswith('B8A_(Raw).tiff')])
-    pre12 = sorted([os.path.join(folder_pre, f) for f in os.listdir(folder_pre) if f.endswith('B12_(Raw).tiff')])
-    post8 = sorted([os.path.join(folder_post, f) for f in os.listdir(folder_post) if f.endswith('B8A_(Raw).tiff')])
-    post12 = sorted([os.path.join(folder_post, f) for f in os.listdir(folder_post) if f.endswith('B12_(Raw).tiff')])
-
-    # Procesar todos los años acumulando en memoria
+        Args:
+            pre_b8: Ruta a banda B8A previa al incendio
+            pre_b12: Ruta a banda B12 previa al incendio
+            post_b8: Ruta a banda B8A posterior al incendio
+            post_b12: Ruta a banda B12 posterior al incendio
+        
+        Returns:
+            Tupla (imagen enmascarada, transformada, metadatos)
+        """
+        year = parse_filename(pre_b8.name).fecha_inicio.year
+        
+        # Reproyectar bandas
+        nir_pre, meta_pre = reproject_raster(pre_b8)
+        swir_pre, _ = reproject_raster(pre_b12)
+        nir_post, _ = reproject_raster(post_b8)
+        swir_post, meta_post = reproject_raster(post_b12)
+        
+        # Convertir a float32
+        nir_pre, swir_pre = nir_pre.astype('float32'), swir_pre.astype('float32')
+        nir_post, swir_post = nir_post.astype('float32'), swir_post.astype('float32')
+        
+        # Calcular dNBR = NBR_pre - NBR_post
+        nbr_pre = _calculate_nbr(nir_pre, swir_pre)
+        nbr_post = _calculate_nbr(nir_post, swir_post)
+        dnbr = nbr_pre - nbr_post
+        
+        # Reclasificar: valores < 0.27 = no quemado (0), >= 0.27 = quemado (1)
+        reclassified = np.where(dnbr < BURNED_THRESHOLD, 0, 1).astype('int32')
+        
+        # Aplicar máscara de geometrías
+        geometries = _load_reference_geometries(year)
+        masked_image, masked_transform = _apply_mask_to_raster(reclassified, meta_post, geometries)
+        
+        return masked_image, masked_transform, meta_post
+    
     suma_total = None
     target_meta = None
-    
-    for i in range(min(len(pre8), len(pre12), len(post8), len(post12))):
-        out_image, out_transform, meta, year = calcular_dnbr(pre8[i], pre12[i], post8[i], post12[i], i)
+
+    for pre_b8, pre_b12, post_b8, post_b12 in zip(prev_by_band['B8A'], prev_by_band['B12'],post_by_band['B8A'], post_by_band['B12']):
         
-        if suma_total is None:
+        out_image, out_transform, meta = calcular_dnbr(pre_b8, pre_b12, post_b8, post_b12)
+        
+        if not suma_total:
             # Primera imagen - usar como referencia
             target_shape = out_image.shape[1:]
             suma_total = np.zeros(target_shape, dtype='float32')
-            target_meta = meta.copy()
-            target_meta.update({'transform': out_transform})
+            
+            if meta:
+                target_meta = meta.copy()
+                target_meta.update({'transform': out_transform})
         
         # Remuestrear si es necesario y acumular
         if out_image.shape[1:] == suma_total.shape:
             suma_total += out_image[0].astype('float32')
-        else:
+
+        elif target_meta :
             dest = np.zeros(suma_total.shape, dtype='float32')
+
             reproject(source=out_image[0].astype('float32'), destination=dest,
                       src_transform=out_transform, src_crs=meta['crs'],
                       dst_transform=target_meta['transform'], dst_crs=target_meta['crs'],
                       resampling=Resampling.nearest)
+            
             suma_total += dest
 
+
     if suma_total is None:
-        print("No historical data found.")
-        return
+        raise ValueError("Historical data unable to be calculated.")
 
     # Reclasificación final
     vmax = np.max(suma_total)
@@ -108,73 +202,44 @@ def Fhist(folder_pre, folder_post, output_fhist):
         bins = [0, interval, 2*interval, 3*interval, 4*interval]
         reclas = np.digitize(suma_total, bins=bins).astype('int32')
 
+
+    time_range = f"{parse_filename(prev_files[0]).fecha_inicio.year}-{parse_filename(post_files[-1]).fecha_fin.year}"
+
     # Mostrar imágenes desde datos en memoria
-    plt.figure()
-    plt.imshow(reclas, cmap='Reds', interpolation='none')
-    plt.colorbar(ticks=[1,2,3,4,5], label='Risk')
-    plt.title('Historical Burned Areas Risk Map')
-    plt.show()
-    plt.close()
+    cumulative_figure, ax1 = default_imshow(suma_total,f'Historical Burned Sum ({time_range})')
+
+    reclasified_figure, ax2 = default_imshow(reclas,f'Historical Burned Areas Risk Map ({time_range})',
+                                             colorbar_params={'ticks':[1,2,3,4,5], 'label':'Risk'})
     
-    plt.figure()
-    plt.imshow(suma_total, cmap='Reds')
-    plt.colorbar()
-    plt.title('Suma Total (histórico)')
-    plt.show()
-    plt.close()
+    if show_plots:
+        plt.show()
 
     # Guardar si el usuario lo solicita
-    if save:
-        rasters_dir = r'C:\Users\Mateo G\Desktop\STORCITO\Salida Datos\re'
-        png_dir = r'C:\Users\Mateo G\Desktop\STORCITO\Salida Datos\HIST'
-        os.makedirs(rasters_dir, exist_ok=True)
-        os.makedirs(png_dir, exist_ok=True)
+    if export_image:
 
-        base_out = os.path.splitext(os.path.basename(output_fhist))[0]
-        
+        if not target_meta:
+            raise ValueError("Metadata is missing; cannot save output files.")
+
         # Guardar suma_total como float tif
-        suma_path_tif = os.path.join(rasters_dir, 'suma_total.tif')
         tmeta = target_meta.copy()
         tmeta.update(dtype='float32', count=1)
-        with rasterio.open(suma_path_tif, 'w', **tmeta) as dst:
-            dst.write(suma_total, 1)
-        print(f"Suma total guardada: {suma_path_tif}")
 
-        # Guardar reclasificado como int tif
-        recl_path_tif = os.path.join(rasters_dir, f'{base_out}.tif')
-        recl_meta = target_meta.copy()
-        recl_meta.update(dtype='int32', count=1)
-        with rasterio.open(recl_path_tif, 'w', **recl_meta) as dst:
-            dst.write(reclas, 1)
-        print(f"Reclasificado guardado: {recl_path_tif}")
+        save_file(suma_total,'Fire_History_Sum',output_folder,tmeta,f'{time_range}',extensions=['tif','tiff','png'],fig=cumulative_figure)
+        save_file(reclas,'Fire_History_(Risk_Map)',output_folder,tmeta,f'{time_range}',extensions=['tif','tiff','png'],fig=reclasified_figure)
 
-        # Guardar PNG desde datos en memoria
-        png_reclas = os.path.join(png_dir, f'{base_out}.png')
-        plt.figure()
-        plt.imshow(reclas, cmap='Reds', interpolation='none')
-        plt.colorbar(ticks=[1,2,3,4,5], label='Risk')
-        plt.title('Historical Burned Areas Risk Map')
-        plt.savefig(png_reclas, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        png_sum = os.path.join(png_dir, 'suma_total.png')
-        plt.figure()
-        plt.imshow(suma_total, cmap='Reds')
-        plt.colorbar()
-        plt.title('Suma Total (histórico)')
-        plt.savefig(png_sum, dpi=300, bbox_inches='tight')
-        plt.close()
-        print(f"PNGs guardados en: {png_dir}")
+    return suma_total, reclas
 
-        # Guardar también en output_fhist para compatibilidad
-        try:
-            with rasterio.open(output_fhist, 'w', **recl_meta) as dst:
-                dst.write(reclas, 1)
-        except Exception:
-            pass
 
-        print('Historical Burned Areas Layer completed and saved.')
-    else:
-        print('Historical Burned Areas Layer completed without saving.')
 
-    return
+if __name__ == "__main__":
+
+    import cProfile
+    import pstats
+
+    with cProfile.Profile() as profile:
+        fire_history()
+
+    results = pstats.Stats(profile)
+    results.sort_stats(pstats.SortKey.TIME)
+    results.print_stats(20)
+

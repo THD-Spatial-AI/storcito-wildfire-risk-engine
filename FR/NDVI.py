@@ -3,67 +3,131 @@ import rasterio
 import numpy as np
 import matplotlib.pyplot as plt
 
-def Ndvi(input_band4, input_band8):
-    print(f'NDVI Layer processing...')
+from FR.rutinas.setup import (
+    parse_filename,
+    check_valid_entries,
+    read_and_group,
+    default_imshow,
+    save_file,
+)
+from pathlib import Path
 
-    with rasterio.open(input_band8) as b8_src:
-        nir_band = b8_src.read(1).astype('float32')
-        meta_ref = b8_src.meta.copy()
+def ndvi(b4:str|Path,b8:str|Path,output_folder:str='OUTPUT',export_image:bool=False)->tuple[np.ndarray,np.ndarray]:
+    """Calculate NDVI (Normalized Difference Vegetation Index) from Sentinel-2 bands.
 
-    with rasterio.open(input_band4) as b4_src:
-        red_band = b4_src.read(1).astype('float32')
+    Args:
+        b4: Path to Band 4 (Red) raster file
+        b8: Path to Band 8 (NIR) raster file
+        output_folder: Output directory for exported files. Defaults to 'OUTPUT'
+        export_image: Whether to save results as GeoTIFF/PNG. Defaults to False
+
+    Returns:
+        Tuple of (ndvi_array, reclassified_risk_array) where risk is scaled 1-5
+    """
+
+    b4=Path(b4)
+    b8=Path(b8)
 
     np.seterr(divide='ignore', invalid='ignore')
-    ndvi = (nir_band - red_band) / (nir_band + red_band)
 
-    # Reclasificación
-    reclasificado = np.zeros_like(ndvi, dtype='int32')
-    reclasificado[ndvi <= 0.27] = 5
-    reclasificado[(ndvi > 0.27) & (ndvi <= 0.40)] = 4
-    reclasificado[(ndvi > 0.40) & (ndvi <= 0.54)] = 3
-    reclasificado[(ndvi > 0.54) & (ndvi <= 0.67)] = 2
-    reclasificado[ndvi > 0.67] = 1
+    with rasterio.open(b4) as src_b3:
+        band4 = src_b3.read(1).astype('float32')
+        meta_ref = src_b3.meta.copy()
+    with rasterio.open(b8) as src_b8:
+        band8 = src_b8.read(1).astype('float32')
+    
+    mini_info=parse_filename(b4.name)
+    name_id=mini_info.id
 
-    # Preguntar si guardar imágenes (TIFF/TIF en una carpeta, PNG en otra)
-    while True:
-        choice = input("¿Deseas guardar las imágenes? (y/n): ").lower().strip()
-        if choice in ('y','n'): break
-        print("Entrada no válida. Introduce 'y' o 'n'")
+    ndvi = np.array( (band8 - band4) / (band8 + band4) )
+    
+    condiciones = [
+        ndvi <= 0.27,
+        (ndvi > 0.27) & (ndvi <= 0.40),
+        (ndvi > 0.40) & (ndvi <= 0.54),
+        (ndvi > 0.54) & (ndvi <= 0.67),
+        ndvi > 0.67
+    ]
 
-    if choice == 'y':
-        tiff_dir = r'C:\Users\Mateo G\Desktop\STORCITO\Salida Datos\re'
-        png_dir = r'C:\Users\Mateo G\Desktop\STORCITO\Salida Datos\NDVI'
-        os.makedirs(tiff_dir, exist_ok=True); os.makedirs(png_dir, exist_ok=True)
+    valores = [5, 4, 3, 2, 1]
 
-        # Guardar NDVI como .tiff y .tif (float32)
-        meta_ndvi = meta_ref.copy()
-        meta_ndvi.update(driver='GTiff', dtype='float32', count=1)
-        ndvi_tiff = os.path.join(tiff_dir, 'ndvi.tiff')
-        ndvi_tif  = os.path.join(tiff_dir, 'ndvi.tif')
-        with rasterio.open(ndvi_tiff, 'w', **meta_ndvi) as dst: dst.write(ndvi.astype('float32'), 1)
-        with rasterio.open(ndvi_tif,  'w', **meta_ndvi) as dst: dst.write(ndvi.astype('float32'), 1)
+    reclasificado = np.select(condiciones, valores, default=0).astype('int32')
+    
+    fig1,ax1=default_imshow(ndvi,'NDVI')
+    fig2,ax2=default_imshow(reclasificado,'NDVI Risk Map')
+    
+    if export_image:
+    
+        save_file(ndvi, name_id, output_folder, meta_ref, 
+                  'NDVI',extensions=['tif','tiff','png'], fig=fig1)
+        save_file(reclasificado, name_id, output_folder, meta_ref, 
+                  'NDVI_Risk_Map',extensions=['tif','tiff','png'], fig=fig2)
 
-        # Guardar reclasificado como .tiff y .tif (int32)
-        meta_recl = meta_ref.copy(); meta_recl.update(driver='GTiff', dtype='int32', count=1)
-        recl_tiff = os.path.join(tiff_dir, 'ndvi_risk_map.tiff')
-        recl_tif  = os.path.join(tiff_dir, 'ndvi_risk_map.tif')
-        with rasterio.open(recl_tiff, 'w', **meta_recl) as dst: dst.write(reclasificado.astype('int32'), 1)
-        with rasterio.open(recl_tif,  'w', **meta_recl) as dst: dst.write(reclasificado.astype('int32'), 1)
 
-        # Guardar PNGs en carpeta separada
-        plt.figure(figsize=(8,6)); plt.imshow(ndvi, cmap='RdYlGn'); plt.colorbar(); plt.title('NDVI'); plt.tight_layout()
-        plt.savefig(os.path.join(png_dir, 'ndvi.png'), dpi=300, bbox_inches='tight'); plt.close()
+    return ndvi,reclasificado
 
-        plt.figure(figsize=(8,6)); plt.imshow(reclasificado, cmap='Reds'); plt.colorbar(); plt.title('NDVI Risk Map'); plt.tight_layout()
-        plt.savefig(os.path.join(png_dir, 'ndvi_risk_map.png'), dpi=300, bbox_inches='tight'); plt.close()
+def ndvi_folder(input_folder:str='INPUT',output_folder:str='OUTPUT',indices:list[int]|None=None,export_image:bool=False)->None:
+    """Process multiple Sentinel-2 scenes to calculate NDVI for each.
 
-        print(f"Imágenes guardadas en:\n - Rasters: {tiff_dir}\n - PNGs: {png_dir}")
+    Args:
+        input_folder: Directory containing Sentinel-2 TIFF files. Defaults to 'INPUT'
+        output_folder: Output directory for results. Defaults to 'OUTPUT'
+        indices: List of scene indices to process. None processes all scenes
+        export_image: Whether to save results as GeoTIFF/PNG. Defaults to False
+    """
+    bandas_requeridas=["B04","B08"]
+
+    valids,_=check_valid_entries(bandas_requeridas,input_folder=input_folder)
+  
+    info=read_and_group(valids)
+      
+
+    if indices is None:
+        indices= list(range(len(info['id'])))
+        METAS=info['meta_ref']
+        IDS=info['id']
     else:
-        print("Imágenes no guardadas")
+        METAS=[ info['meta_ref'][i] for i in indices ]
+        IDS=[ info['id'][i] for i in indices ]
 
-    # Mostrar las imágenes siempre (independientemente de la elección)
-    plt.figure(figsize=(8,6)); plt.imshow(ndvi, cmap='RdYlGn'); plt.colorbar(); plt.title('NDVI'); plt.tight_layout(); plt.show()
-    plt.figure(figsize=(8,6)); plt.imshow(reclasificado, cmap='Reds'); plt.colorbar(); plt.title('NDVI Risk Map'); plt.tight_layout(); plt.show()
+    np.seterr(divide='ignore', invalid='ignore')
 
-    print('NDVI Layer completed')
-    return
+    ndvi =np.array([(info['B08'][i] - info['B04'][i]) / (info['B08'][i] + info['B04'][i]) 
+           for i in indices])
+
+    condiciones = [
+        ndvi <= 0.27,
+        (ndvi > 0.27) & (ndvi <= 0.40),
+        (ndvi > 0.40) & (ndvi <= 0.54),
+        (ndvi > 0.54) & (ndvi <= 0.67),
+        ndvi > 0.67
+    ]
+
+    valores = [5, 4, 3, 2, 1]
+
+    reclasificados = np.select(condiciones, valores, default=0).astype('int32')
+
+    if export_image:
+        
+        for ndvi_i,meta_ref_i,extra_info in zip(ndvi,METAS,IDS): 
+
+            fig1,ax1=default_imshow(ndvi_i,'NDVI')
+            save_file(ndvi_i, extra_info, output_folder, meta_ref_i, 'NDVI',extensions=['tif','tiff','png'], fig=fig1)
+           
+        for reclasificado_i,meta_ref_i,extra_info in zip(reclasificados,METAS,IDS):
+
+            fig1,ax1=default_imshow(reclasificado_i,'NDVI Risk Map')
+            save_file(reclasificado_i, extra_info, output_folder, meta_ref_i, 'NDVI_Risk_Map',extensions=['tif','tiff','png'], fig=fig1)
+           
+
+if __name__ == "__main__":
+
+    import cProfile
+    import pstats
+
+    with cProfile.Profile() as profile:
+        ndvi_folder(export_image=True)
+
+    results = pstats.Stats(profile)
+    results.sort_stats(pstats.SortKey.TIME)
+    results.print_stats(20)
