@@ -26,28 +26,8 @@ def mdt(ruta_mdt,output_folder:str|Path=Path('OUTPUT'),
         Tuple of (mdt_risk, slope_risk, aspect_risk) arrays with values 1-5
     """
     
-    # XXX: Hay dos parametros de salida que no se usan: ruta_slope, ruta_aspect
-
-
     print('MDT, SLOPE and ASPECT Layers processing...')
-<<<<<<< HEAD
-
-    # preguntar si guardar rasters .tif y PNGs
-    while True:
-        ans = input("Guardar rasters .tif y PNGs al terminar? (y/n): ").strip().lower()
-        if ans in ('y','n'):
-            save = (ans == 'y')
-            break
-        print("Introduce 'y' o 'n'.")
-
-    rasters_dir = r'C:\Users\Mateo G\Desktop\STORCITO\Salida Datos\re'
-    png_dir = r'C:\Users\Mateo G\Desktop\STORCITO\Salida Datos\MDT'
-    if save:
-        os.makedirs(rasters_dir, exist_ok=True)
-        os.makedirs(png_dir, exist_ok=True)
-=======
-    output_folder=Path(output_folder)
->>>>>>> Dinamic-Map-COdes
+    output_folder = Path(output_folder)
 
     # leer MDT completo (masked to avoid extra nan passes)
     with rasterio.open(ruta_mdt) as src:

@@ -36,8 +36,11 @@ def ndvi(b4:str|Path,b8:str|Path,output_folder:str='OUTPUT',export_image:bool=Fa
     with rasterio.open(b8) as src_b8:
         band8 = src_b8.read(1).astype('float32')
     
-    mini_info=parse_filename(b4.name)
-    name_id=mini_info.id
+    try:
+        mini_info=parse_filename(b4.name)
+        name_id=mini_info.id
+    except ValueError:
+        name_id="estatic"
 
     ndvi = np.array( (band8 - band4) / (band8 + band4) )
     

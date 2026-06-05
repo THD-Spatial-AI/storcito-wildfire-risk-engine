@@ -332,7 +332,7 @@ with rasterio.open(output_path, 'w', **reference_profile) as dst:
 fr_final = r'C:\Users\Mateo G\Desktop\STORCITO\Salida Datos\forest_fire_risk_map_dinamico.tif'
 with rasterio.open(output_path) as mapa_final:
     forest_fire_final = mapa_final.read(1).astype('float32')
-    fr_clasificado = np.zeros_like(forest_fire_final, dtype='int32')
+    fr_clasificado = np.zeros_like(forest_fire_final, dtype='float32')
 
     # Clasificación de 1 a 5
     fr_clasificado[(forest_fire_final > 0) & (forest_fire_final <= 1)] = 1
@@ -359,7 +359,7 @@ with rasterio.open(output_path) as mapa_final:
 
     # Guardar el mapa clasificado final
     meta = mapa_final.profile
-    meta.update(dtype='int32')
+    meta.update(dtype='float32')
     with rasterio.open(fr_final, 'w', **meta) as dst:
         dst.write(fr_clasificado, 1)
 

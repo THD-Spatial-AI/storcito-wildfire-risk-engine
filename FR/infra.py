@@ -13,6 +13,7 @@ from pathlib import Path
 from rasterio.features import rasterize
 from rasterio.transform import from_bounds
 from shapely.geometry.base import BaseGeometry
+from FR.aoi import reproject_geometry
 
 # sys.path.append(r'..\geo_auxy')
 
@@ -46,7 +47,9 @@ def infrastructure(input_infra: str|Path,
                    export_image: bool = False,
                    show_plots: bool = False,
                    simplify: bool = False,
-                   tolerance: int = 10) -> npt.NDArray:
+                   tolerance: int = 10,
+                   aoi_geometry: BaseGeometry | None = None,
+                   aoi_crs: str = "EPSG:32629") -> npt.NDArray:
     """Calculate infrastructure proximity risk from roads and railways.
 
     Creates concentric buffer rings around infrastructure features and assigns
@@ -61,6 +64,8 @@ def infrastructure(input_infra: str|Path,
         show_plots: Whether to display matplotlib plots. Defaults to False
         simplify: Whether to simplify geometries for performance. Defaults to False
         tolerance: Simplification tolerance in meters. Defaults to 10
+        aoi_geometry: Optional AOI geometry used to spatially limit vector processing.
+        aoi_crs: CRS of ``aoi_geometry``. Defaults to EPSG:32629.
 
     Returns:
         Rasterized risk array with values 0-5 (0=no infrastructure nearby)
@@ -83,20 +88,14 @@ def infrastructure(input_infra: str|Path,
     
     # Leer y reproyectar infraestructuras
     road = gpd.read_file(input_infra).to_crs(epsg=epsg)
+    if aoi_geometry is not None:
+        projected_aoi = reproject_geometry(aoi_geometry, aoi_crs, f"EPSG:{epsg}")
+        road = road[road.intersects(projected_aoi.buffer(1250))].copy()
     
     # Simplificar geometrías si se solicita
     if simplify:
         road['geometry'] = road.geometry.simplify(tolerance=tolerance)
 
-    
-    # Unión de todas las infraestructuras en una geometría única
-    road_union = road.geometry.union_all()
-    
-    # Crear anillos de riesgo concéntricos
-    radii = [250, 500, 750, 1000, 1250]
-    risks = [5, 4, 3, 2, 1]
-    anillos = _create_risk_rings(road_union, radii, risks)
-    anillos.crs = road.crs
     
     # Obtener parámetros de rasterización del raster de referencia
     with rasterio.open(ref_raster) as src:
@@ -108,17 +107,29 @@ def infrastructure(input_infra: str|Path,
     transform = from_bounds(x_min, y_min, x_max, y_max, x_res, y_res)
 
     
-    # 6. Rasterizar
+    if road.empty:
+        raster_data = np.zeros((y_res, x_res), dtype=rasterio.uint8)
+        output_crs = f"EPSG:{epsg}"
+    else:
+        # Unión de todas las infraestructuras en una geometría única
+        road_union = road.geometry.union_all()
 
-    geoms = ((geom, val) for geom, val in zip(anillos.geometry, anillos['risk']))
-    raster_data = rasterize(
-        geoms, 
-        out_shape=(y_res, x_res), 
-        transform=transform, 
-        fill=0, 
-        dtype=rasterio.uint8,
-        all_touched=True
-    )
+        # Crear anillos de riesgo concéntricos
+        radii = [250, 500, 750, 1000, 1250]
+        risks = [5, 4, 3, 2, 1]
+        anillos = _create_risk_rings(road_union, radii, risks)
+        anillos.crs = road.crs
+
+        geoms = ((geom, val) for geom, val in zip(anillos.geometry, anillos['risk']))
+        raster_data = rasterize(
+            geoms,
+            out_shape=(y_res, x_res),
+            transform=transform,
+            fill=0,
+            dtype=rasterio.uint8,
+            all_touched=True,
+        )
+        output_crs = anillos.crs
     
     # Configuración de metadatos para guardar
     meta_info = {
@@ -127,7 +138,7 @@ def infrastructure(input_infra: str|Path,
         'width': x_res, 
         'count': 1,
         'dtype': rasterio.uint8, 
-        'crs': anillos.crs, 
+        'crs': output_crs,
         'transform': transform,
         'compress': 'lzw'
     }

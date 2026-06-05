@@ -1,0 +1,21 @@
+name: storcito
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - gdal
+  - rasterio
+  - geopandas
+  - fiona
+  - shapely
+  - pandas
+  - numpy
+  - matplotlib
+  - scipy
+  - netcdf4
+  - rich
+  - questionary
+  - fastapi
+  - uvicorn
+  - gunicorn
+  - httpx

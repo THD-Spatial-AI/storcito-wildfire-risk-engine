@@ -366,11 +366,15 @@ def save_file(array: npt.NDArray, id_name: str, output_folder: Path|str, meta: d
             if not fig:
                 raise ValueError("Figure must be provided to save PNG files.")
 
-            fig.savefig(file, **DEFAULT_PLOT['save']); plt.close()
+            fig.savefig(file, **DEFAULT_PLOT['save'])
 
         else:
             with rasterio.open(file, 'w', **meta_i) as dst:
-                dst.write(array.astype('float32'), 1)
+                target_dtype = np.dtype(meta_i.get('dtype', 'float32'))
+                dst.write(array.astype(target_dtype, copy=False), 1)
+
+    if fig:
+        plt.close(fig)
 
     return files_2_save
 

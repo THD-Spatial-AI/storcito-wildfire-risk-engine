@@ -15,3 +15,8 @@
 
 *.png
 *.jpg
+
+__pycache__/
+INPUT/
+OUTPUT/
+FR/__pycache__/

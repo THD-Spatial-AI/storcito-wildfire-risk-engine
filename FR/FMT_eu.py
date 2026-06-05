@@ -28,6 +28,72 @@ FINAL_MAP = {
     12: 4, 13: 5,
 }
 
+def _print_progress(completed: int, total: int, label: str) -> None:
+    """Print a compact in-place progress bar for long raster passes."""
+    if total <= 0:
+        return
+
+    width = 24
+    filled = round(width * completed / total)
+    bar = "#" * filled + "-" * (width - filled)
+    percent = round(100 * completed / total)
+    end = "\n" if completed >= total else ""
+    print(f"\r[{bar}] {completed}/{total} {percent:>3}% {label}", end=end, flush=True)
+
+
+def _remap_with_lookup(
+    values: np.ndarray,
+    mapping: dict[int, int],
+    label: str,
+    *,
+    nodata: float | None = None,
+    chunk_rows: int = 256,
+) -> tuple[np.ndarray, int, int, int]:
+    """Remap integer raster codes in chunks using a small lookup table."""
+    max_code = max(mapping)
+    lookup = np.zeros(max_code + 1, dtype="int32")
+    mapped_lookup = np.zeros(max_code + 1, dtype=bool)
+
+    for source_code, target_code in mapping.items():
+        lookup[source_code] = target_code
+        mapped_lookup[source_code] = True
+
+    remapped = np.zeros(values.shape, dtype="int32")
+    mapped_pixels = 0
+    unmapped_pixels = 0
+    nodata_pixels = 0
+    total_rows = values.shape[0]
+
+    for row_start in range(0, total_rows, chunk_rows):
+        row_stop = min(row_start + chunk_rows, total_rows)
+        chunk = values[row_start:row_stop]
+        chunk_result = remapped[row_start:row_stop]
+
+        finite_mask = np.isfinite(chunk)
+        nodata_mask = np.zeros(chunk.shape, dtype=bool)
+        if nodata is not None:
+            nodata_mask = chunk == nodata
+
+        candidate_mask = finite_mask & ~nodata_mask & (chunk >= 0) & (chunk <= max_code)
+        chunk_codes = np.zeros(chunk.shape, dtype="int32")
+        chunk_codes[candidate_mask] = chunk[candidate_mask].astype("int32")
+        exact_integer_mask = candidate_mask & (chunk == chunk_codes)
+
+        chunk_result[exact_integer_mask] = lookup[chunk_codes[exact_integer_mask]]
+
+        mapped_mask = np.zeros(chunk.shape, dtype=bool)
+        mapped_mask[exact_integer_mask] = mapped_lookup[chunk_codes[exact_integer_mask]]
+
+        mapped_pixels += int(mapped_mask.sum())
+        nodata_pixels += int(nodata_mask.sum())
+        unmapped_pixels += int((finite_mask & ~nodata_mask & ~mapped_mask).sum())
+        unmapped_pixels += int((~finite_mask).sum())
+
+        _print_progress(row_stop, total_rows, label)
+
+    return remapped, mapped_pixels, unmapped_pixels, nodata_pixels
+
+
 def fmt(input_file:str|Path,output_folder=Path('OUTPUT') ,file_name:str='FMT',
         export_image:bool=False,show_plots:bool=True) -> np.ndarray:
     
@@ -59,22 +125,24 @@ def fmt(input_file:str|Path,output_folder=Path('OUTPUT') ,file_name:str='FMT',
         fmt_eu = src.read(1).astype('float32')
         meta = src.meta.copy()
 
-    fmt_rothermel = np.select(
-        [fmt_eu == k for k in ROTHERMEL_MAP.keys()],
-        list(ROTHERMEL_MAP.values()),
-        default=0
-    ).astype('int32')
-    
-    fmt_final = np.select(
-        [fmt_rothermel == k for k in FINAL_MAP.keys()],
-        list(FINAL_MAP.values()),
-        default=0
-    ).astype('int32')
-    
-    # unmapped data 
-    unmapped = np.sum(~np.isin(fmt_eu, list(ROTHERMEL_MAP.keys())))
+    nodata = meta.get("nodata")
+    fmt_rothermel, mapped, unmapped, nodata_pixels = _remap_with_lookup(
+        fmt_eu,
+        ROTHERMEL_MAP,
+        "ROTHERMEL_MAP",
+        nodata=nodata,
+    )
+    fmt_final, _, _, _ = _remap_with_lookup(
+        fmt_rothermel.astype("float32", copy=False),
+        FINAL_MAP,
+        "Clasificando riesgo FMT",
+    )
+
+    print(f"{mapped} pixels mapped in ROTHERMEL_MAP")
+    if nodata_pixels > 0:
+        print(f"{nodata_pixels} nodata pixels skipped")
     if unmapped > 0:
-        print(f"{unmapped} pixels unmapped in ROTHERMEL_MAP")
+        print(f"{unmapped} valid pixels unmapped in ROTHERMEL_MAP")
     
 
     

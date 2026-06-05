@@ -43,7 +43,7 @@ def fire_history(input_folder:str|Path=Path('INPUT'), output_folder:str|Path = P
     input_folder = Path(input_folder)
     output_folder = Path(output_folder)
 
-    reference_folder = Path('REFERENCE') / 'HIST'
+    reference_folder = input_folder / 'Historico_incendios'
     sort_time_comparative(input_folder)
     
     prev_folder = input_folder / 'PRE_FIRE'
@@ -132,13 +132,13 @@ def fire_history(input_folder:str|Path=Path('INPUT'), output_folder:str|Path = P
         Returns:
             Tupla (imagen enmascarada, transformada, metadatos)
         """
-        year = parse_filename(pre_b8.name).fecha_inicio.year
+        year = parse_filename(pre_b8).fecha_inicio.year
         
         # Reproyectar bandas
-        nir_pre, meta_pre = reproject_raster(pre_b8)
-        swir_pre, _ = reproject_raster(pre_b12)
-        nir_post, _ = reproject_raster(post_b8)
-        swir_post, meta_post = reproject_raster(post_b12)
+        nir_pre, meta_pre = reproject_raster(prev_folder / pre_b8)
+        swir_pre, _ = reproject_raster(prev_folder / pre_b12)
+        nir_post, _ = reproject_raster(post_folder / post_b8)
+        swir_post, meta_post = reproject_raster(post_folder / post_b12)
         
         # Convertir a float32
         nir_pre, swir_pre = nir_pre.astype('float32'), swir_pre.astype('float32')
@@ -165,7 +165,7 @@ def fire_history(input_folder:str|Path=Path('INPUT'), output_folder:str|Path = P
         
         out_image, out_transform, meta = calcular_dnbr(pre_b8, pre_b12, post_b8, post_b12)
         
-        if not suma_total:
+        if suma_total is None:
             # Primera imagen - usar como referencia
             target_shape = out_image.shape[1:]
             suma_total = np.zeros(target_shape, dtype='float32')

@@ -6,6 +6,7 @@ from shapely.geometry import shape, mapping
 from shapely.ops import unary_union
 from shapely.geometry import Polygon
 import geopandas as gpd
+from pathlib import Path
 
 
 def cropped(input_folder, output_folder, infra_layer, distance):
@@ -94,10 +95,10 @@ def cropped(input_folder, output_folder, infra_layer, distance):
         create_buffered_mask(shapefile_for_buffer, buffer_distance, buffered_mask_shapefile)
 
         # Procesar cada archivo TIFF en la carpeta
-        for file_name in os.listdir(input_folder):
-            if file_name.lower().endswith(".tif") or file_name.lower().endswith(".tiff"):
-                input_path = os.path.join(input_folder, file_name)
-                output_name = os.path.splitext(file_name)[0] + "_cropped.tif"
+        for path in Path(input_folder).rglob("*"):
+            if path.is_file() and path.suffix.lower() in [".tif", ".tiff"]:
+                input_path = str(path)
+                output_name = path.stem + "_cropped" + path.suffix.lower()
                 output_path = os.path.join(output_folder, output_name)
 
                 print(f"Recortando: {input_path}")

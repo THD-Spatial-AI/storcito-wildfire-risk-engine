@@ -1,0 +1,38 @@
+services:
+  storcito:
+    build: .
+    image: storcito:latest
+    user: root
+    stdin_open: true
+    tty: true
+    ports:
+      - "8090:8090"
+    environment:
+      MPLBACKEND: Agg
+      TERM: xterm-256color
+      PYTHONPATH: /app:/app/FR
+      PYTHONUNBUFFERED: "1"
+      GDAL_DATA: /opt/conda/envs/storcito/share/gdal
+      GDAL_DRIVER_PATH: /opt/conda/envs/storcito/lib/gdalplugins
+      CPL_ZIP_ENCODING: UTF-8
+      PROJ_LIB: /opt/conda/envs/storcito/share/proj
+      PROJ_DATA: /opt/conda/envs/storcito/share/proj
+      PROJ_NETWORK: "ON"
+      # Optional: external URL used to build download links returned to wildfire.
+      # Leave unset to infer from the inbound request.
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+    volumes:
+      # Bind-mount the entire project so code edits are reflected live
+      # (use `make restart` to pick up Python changes — uvicorn --reload is
+      # incompatible with pyogrio's GDAL_DATA probe inside this image).
+      - .:/app
+      - ./INPUT:/app/INPUT
+      - ./OUTPUT:/app/OUTPUT
+    extra_hosts:
+      # Allow the container to reach services running on the Docker host
+      # (e.g. wildfire backend on http://host.docker.internal:8000) on Linux.
+      - "host.docker.internal:host-gateway"
+    command: >
+      uvicorn api:app
+      --host 0.0.0.0
+      --port 8090

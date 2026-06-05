@@ -5,16 +5,54 @@ import netCDF4 as nc
 import numpy as np
 import numpy.ma as ma
 import matplotlib.pyplot as plt
-import rutinas.FWI_Equations as Fwi
+import FR.rutinas.FWI_Equations as Fwi
 # import tifffile as tif
 from FR.rutinas.setup import default_imshow, save_file
+from datetime import date, datetime
 from pathlib import Path
 from rasterio.transform import from_origin
 from scipy.interpolate import griddata
+import re
+
+
+FWI_DATE_RE = re.compile(r"_(\d{8})_\d{4}\.nc4\.nc$")
+
+
+def _fwi_file_date(file: Path) -> date:
+    """Extract the forecast/history date encoded in an FWI filename."""
+    match = FWI_DATE_RE.search(file.name)
+    if not match:
+        raise ValueError(f"Unable to parse FWI date from filename: {file.name}")
+    return datetime.strptime(match.group(1), "%Y%m%d").date()
+
+
+def available_fwi_dates(input_folder: str | Path) -> list[date]:
+    """Return the sorted dates available in the FWI input folder."""
+    input_folder = Path(input_folder)
+    return sorted(_fwi_file_date(file) for file in input_folder.iterdir() if file.suffix == ".nc")
+
+
+def _select_fwi_files(input_folder: Path, target_date: date | None) -> list[Path]:
+    """Select sorted FWI files, optionally ending at an exact target date."""
+    if target_date is None:
+        return [file for file in input_folder.iterdir() if file.suffix == ".nc"]
+
+    files = sorted(
+        (file for file in input_folder.iterdir() if file.suffix == ".nc"),
+        key=_fwi_file_date,
+    )
+
+    available_dates = [_fwi_file_date(file) for file in files]
+    if target_date not in available_dates:
+        available = ", ".join(day.isoformat() for day in available_dates)
+        raise ValueError(f"FWI date {target_date.isoformat()} is not available. Available dates: {available}")
+
+    return [file for file in files if _fwi_file_date(file) <= target_date]
 
 
 def f_w_index(input_folder:str|Path,file_name:str='FWI_Risk_Map',output_folder:Path|str=Path('OUTPUT'),
-    export_image:bool=False,show_plots:bool=False,crs:str="EPSG:4326")->np.ndarray:
+    export_image:bool=False,show_plots:bool=False,crs:str="EPSG:4326",
+    target_date: date | str | None = None)->np.ndarray:
 
     """Calculates Canadian Forest Fire Weather Index (FWI) from netCDF climate data.
     
@@ -29,6 +67,7 @@ def f_w_index(input_folder:str|Path,file_name:str='FWI_Risk_Map',output_folder:P
         export_image: Whether to save GeoTIFF/PNG files. Defaults to False
         show_plots (bool, optional): _description_. Defaults to False.
         crs: Coordinate reference system. Defaults to "EPSG:4326"
+        target_date: Optional exact day to stop the running FWI calculation at.
         
     Returns:
         Reclassified FWI array (int32) with values 1-5 for risk levels
@@ -45,13 +84,15 @@ def f_w_index(input_folder:str|Path,file_name:str='FWI_Risk_Map',output_folder:P
 
     input_folder = Path(input_folder)
     output_folder = Path(output_folder)
+    if isinstance(target_date, str):
+        target_date = date.fromisoformat(target_date)
 
     print("Fire Weather Index Layer processing...")
 
     # --------------------------------------------------------
     # LECTURA DE ARCHIVOS .NC
     # --------------------------------------------------------
-    lista_nc = [file for file in input_folder.iterdir() if file.suffix == '.nc']
+    lista_nc = _select_fwi_files(input_folder, target_date)
 
     if not lista_nc:
         raise ValueError("No netCDF files found in input folder")

@@ -1,7 +1,3 @@
-import sys
-# Asegúrate de que la ruta a tus módulos sea la correcta
-sys.path.append(r'C:\Users\Mateo G\Desktop\STORCITO\Codigos\FR_Gal\FR')
-
 import numpy as np
 import shutil
 import os
@@ -33,35 +29,34 @@ from FR.ahp import normalize_matrix, calculate_weights, consistency_ratio
 # 1.1. RUTAS DE ENTRADA
 # ---------------------------
 
+base_dir = os.path.dirname(os.path.abspath(__file__))
+
 # Modelo digital del terreno
-input_mdt = r'C:\Users\Mateo G\Desktop\STORCITO\Fotos\DTM\DTM.tif'
-input_slope = r'C:\Users\Mateo G\Desktop\STORCITO\Fotos\DTM\SLOPE.tif'
-input_aspect = r'C:\Users\Mateo G\Desktop\STORCITO\Fotos\DTM\ASPECT.tif'
+input_mdt = os.path.join(base_dir, 'INPUT', 'DTM', 'DTM.tif')
 
 # Sentinel para NDVI
-input_b4_ndvi = r'C:\Users\Mateo G\Desktop\STORCITO\Fotos\Sentinel\B4.tiff'
-input_b8_ndvi = r'C:\Users\Mateo G\Desktop\STORCITO\Fotos\Sentinel\B8.tiff'
+input_b4_ndvi = os.path.join(base_dir, 'INPUT', 'Sentinel', 'B4.tiff')
+input_b8_ndvi = os.path.join(base_dir, 'INPUT', 'Sentinel', 'B8.tiff')
 
 # Histórico
-input_hist_pre = r'C:\Users\Mateo G\Desktop\STORCITO\Fotos\HIST\Bandas_pre'
-input_hist_post = r'C:\Users\Mateo G\Desktop\STORCITO\Fotos\HIST\Bandas_post'
+input_hist_folder = os.path.join(base_dir, 'INPUT', 'HIST')
 
 # Combustibles
-input_fmt = r'C:\Users\Mateo G\Desktop\STORCITO\Fotos\FUELS\FMT_NationalScenario_2019.tif'
+input_fmt = os.path.join(base_dir, 'INPUT', 'FUELS', 'FUELS.tif')
 
 # Infraestructura y WUI
-input_infra = r'C:\Users\Mateo G\Desktop\STORCITO\Fotos\INFRA\galicia_entera.shp'
-input_clc = r'C:\Users\Mateo G\Desktop\STORCITO\Fotos\IUF\CLC_galicia.shp'
+input_infra = os.path.join(base_dir, 'INPUT', 'INFRA', 'galicia_entera.shp')
+input_clc = os.path.join(base_dir, 'INPUT', 'IUF', 'CLC_galicia.shp')
 
 # Meteorología
-input_fwi_folder = r'C:\Users\Mateo G\Desktop\STORCITO\Fotos\FWI'
+input_fwi_folder = os.path.join(base_dir, 'INPUT', 'FWI')
 
 # ---------------------------
 # 1.2. CARPETAS DE SALIDA
 # ---------------------------
 
-output_folder_re = r'C:\Users\Mateo G\Desktop\STORCITO\Salida Datos\re'
-output_folder_cropped = r'C:\Users\Mateo G\Desktop\STORCITO\Salida Datos\Cropped'
+output_folder_re = os.path.join(base_dir, 'OUTPUT', 're')
+output_folder_cropped = os.path.join(base_dir, 'OUTPUT', 'Cropped')
 
 os.makedirs(output_folder_re, exist_ok=True)
 os.makedirs(output_folder_cropped, exist_ok=True)
@@ -85,13 +80,13 @@ output_fwi = os.path.join(output_folder_re, 'FWI.tif')
 # 1.4. CONTROL DE EJECUCIÓN
 # ---------------------------
 # Pon True o False según quieras regenerar cada capa.
-run_mdt = False
+run_mdt = True
 run_ndvi = True
-run_fhist = False
-run_fmt = False
-run_infra = False
-run_wui = False
-run_fwi = False
+run_fhist = True
+run_fmt = True
+run_infra = True
+run_wui = True
+run_fwi = True
 
 # ---------------------------
 # 1.5. GENERACIÓN DE CAPAS
@@ -100,51 +95,62 @@ run_fwi = False
 if run_mdt:
     Mdt.mdt(
         input_mdt,
-        input_slope,
-        input_aspect,
-        output_mdt,
-        output_slope,
-        output_aspect
+        output_folder=output_folder_re,
+        export_image=True,
+        show_plots=False
     )
 
 if run_ndvi:
     # Requiere versión unificada del módulo NDVI:
     # Ndvi(input_band4, input_band8, output_ndvi)
-    Ndvi.Ndvi(
+    Ndvi.ndvi(
         input_b4_ndvi,
         input_b8_ndvi,
+        output_folder=output_folder_re,
+        export_image=True
     )
 
 if run_fhist:
-    Fhist.Fhist(
-        input_hist_pre,
-        input_hist_post,
-        output_fhist
+    Fhist.fire_history(
+        input_folder=input_hist_folder,
+        output_folder=output_folder_re,
+        export_image=True,
+        show_plots=False
     )
 
 if run_fmt:
     Fmt.fmt(
         input_fmt,
-        output_fmt
+        output_folder=output_folder_re,
+        export_image=True,
+        show_plots=False
     )
 
 if run_infra:
     Infra.infrastructure(
         input_infra,
-        output_infra
+        output_folder=output_folder_re,
+        ref_raster=os.path.join(output_folder_re, 'TIFs', 'MDT_RISK_MAP.tif'),
+        export_image=True,
+        show_plots=False
     )
 
 if run_wui:
     Wui.wui(
         input_infra,
         input_clc,
-        output_wui
+        output_folder=output_folder_re,
+        reference_file=os.path.join(output_folder_re, 'TIFs', 'MDT_RISK_MAP.tif'),
+        export_image=True,
+        show_plots=False
     )
 
 if run_fwi:
     Fwi.f_w_index(
         input_fwi_folder,
-        output_fwi
+        output_folder=output_folder_re,
+        export_image=True,
+        show_plots=False
     )
 
 print("Todas las capas base del caso estático generadas/disponibles en 're\\'.")
@@ -153,9 +159,9 @@ print("Todas las capas base del caso estático generadas/disponibles en 're\\'."
 # 2. RECORTE CON BUFFER (Carpeta Cropped)
 # ==========================================
 print("\nIniciando recorte de capas a la zona de estudio...")
-output_folder_re      = r'C:\Users\Mateo G\Desktop\STORCITO\Salida Datos\re'
-output_folder_cropped = r'C:\Users\Mateo G\Desktop\STORCITO\Salida Datos\Cropped'
-shapefile_for_buffer  = r'C:\Users\Mateo G\Desktop\STORCITO\Fotos\shapefile\Galicia.shp'
+output_folder_re      = os.path.join(base_dir, 'OUTPUT', 're')
+output_folder_cropped = os.path.join(base_dir, 'OUTPUT', 'Cropped')
+shapefile_for_buffer  = input_clc
 buffer_distance = 3000
 
 Cropped.cropped(output_folder_re, output_folder_cropped, shapefile_for_buffer, buffer_distance)
@@ -169,8 +175,8 @@ def align_raster_with_resampling(source_path, reference_path):
     with rasterio.open(source_path) as src, rasterio.open(reference_path) as ref:
         if (src.width == ref.width and src.height == ref.height and
                 src.transform == ref.transform and src.crs == ref.crs):
-            return src.read(1)
-        src_data = src.read(1)
+            return src.read(1, out_dtype='float32')
+        src_data = src.read(1, out_dtype='float32')
         aligned_data = np.zeros((ref.height, ref.width), dtype=np.float32)
         reproject(
             src_data, aligned_data,
@@ -184,15 +190,15 @@ def align_raster_with_resampling(source_path, reference_path):
         return aligned_data
 
 raster_paths = {
-    "mdt":   os.path.join(output_folder_cropped, 'MDT_cropped.tif'),
-    "slope": os.path.join(output_folder_cropped, 'SLOPE_cropped.tif'),
-    "aspect":os.path.join(output_folder_cropped, 'ASPECT_cropped.tif'),
+    "mdt":   os.path.join(output_folder_cropped, 'MDT_RISK_MAP_cropped.tif'),
+    "slope": os.path.join(output_folder_cropped, 'SLOPE_RISK_MAP_cropped.tif'),
+    "aspect":os.path.join(output_folder_cropped, 'ASPECT_RISK_MAP_cropped.tif'),
     "ftm":   os.path.join(output_folder_cropped, 'FMT_cropped.tif'),
-    "ndvi":  os.path.join(output_folder_cropped, 'ndvi_cropped.tif'),
-    "wui":   os.path.join(output_folder_cropped, 'WUI_cropped.tif'),
-    "infra": os.path.join(output_folder_cropped, 'infra_layer_cropped.tif'),
-    "fhist": os.path.join(output_folder_cropped, 'HIST_cropped.tif'),
-    "meteo": os.path.join(output_folder_cropped, 'FWI_cropped.tif'),
+    "ndvi":  os.path.join(output_folder_cropped, 'estatic_(NDVI_Risk_Map)_cropped.tif'),
+    "wui":   os.path.join(output_folder_cropped, 'IUF_Risk_Map_cropped.tif'),
+    "infra": os.path.join(output_folder_cropped, 'galicia_entera_(INFRA Risk_Map)_cropped.tif'),
+    "fhist": os.path.join(output_folder_cropped, 'Fire_History_(Risk_Map)_(2016-2024)_cropped.tif'),
+    "meteo": os.path.join(output_folder_cropped, 'FWI_Risk_Map_cropped.tif'),
 }
 
 reference_path = raster_paths['mdt']
@@ -201,61 +207,89 @@ reference_path = raster_paths['mdt']
 with rasterio.open(reference_path) as ref:
     ref_data = ref.read(1)
     master_mask = ref_data > 0
+del ref_data
 
-aligned_layers = {}
+# Precompute weights once and accumulate topics as layers are read so we do not
+# keep every full-resolution raster in memory at the same time.
+vegetation_matrix = np.array([[1, 3], [1/3, 1]], dtype=np.float32)
+we_veg = calculate_weights(normalize_matrix(vegetation_matrix)).astype(np.float32)
+veg_weights = dict(zip(["ftm", "ndvi"], we_veg))
+
+ai_matrix = np.array([[1, 3], [1/3, 1]], dtype=np.float32)
+we_ai = calculate_weights(normalize_matrix(ai_matrix)).astype(np.float32)
+ai_weights = dict(zip(["infra", "wui"], we_ai))
+
+topography_matrix = np.array([[1, 2, 3], [1/2, 1, 2], [1/3, 1/2, 1]], dtype=np.float32)
+we_topo = calculate_weights(normalize_matrix(topography_matrix)).astype(np.float32)
+topo_weights = dict(zip(["mdt", "slope", "aspect"], we_topo))
+
+veg_topic = np.zeros(master_mask.shape, dtype=np.float32)
+ai_topic = np.zeros(master_mask.shape, dtype=np.float32)
+topo_topic = np.zeros(master_mask.shape, dtype=np.float32)
+meteo_layer = None
+fhist_layer = None
+
 for key, path in raster_paths.items():
-    data = align_raster_with_resampling(path, reference_path)
+    data = align_raster_with_resampling(path, reference_path).astype(np.float32, copy=False)
 
     # 1. Estandarizar qué significa un "hueco" (pasarlos todos a np.nan temporalmente)
     if key in ['infra', 'fhist']:
-        data_clean = np.where(data == -9999, np.nan, data)
+        data[data == -9999] = np.nan
     else:
-        data_clean = np.where(data <= 0, np.nan, data)
+        data[data <= 0] = np.nan
 
     # 2. Lógica de relleno según el tipo de capa
     if key in ['ndvi', 'meteo', 'aspect']:
         # Son huecos por error (nubes, bordes de malla). Interpolamos rápidamente.
-        valid_mask = ~np.isnan(data_clean)
-        data_filled = fillnodata(
-            data_clean,
+        valid_mask = ~np.isnan(data)
+        data = fillnodata(
+            data,
             mask=valid_mask,
             max_search_distance=25.0, 
             smoothing_iterations=0
-        )
+        ).astype(np.float32, copy=False)
+        del valid_mask
         # Asegurar que no queden NaNs residuales
-        data_filled = np.nan_to_num(data_filled, nan=0.0)
+        np.nan_to_num(data, copy=False, nan=0.0)
     else:
         # Son huecos de realidad (no hay WUI, no hay combustible). Riesgo 0.
-        data_filled = np.nan_to_num(data_clean, nan=0.0)
+        np.nan_to_num(data, copy=False, nan=0.0)
 
     # 3. Cortar estrictamente a la máscara maestra
-    data_final = np.where(master_mask, data_filled, 0)
-    aligned_layers[key] = data_final
-    print(f" - Capa '{key}' procesada. Dimensiones: {data_final.shape}")
+    data[~master_mask] = 0
+
+    if key in veg_weights:
+        data *= veg_weights[key]
+        veg_topic += data
+    elif key in ai_weights:
+        data *= ai_weights[key]
+        ai_topic += data
+    elif key in topo_weights:
+        data *= topo_weights[key]
+        topo_topic += data
+    elif key == "meteo":
+        meteo_layer = data
+    elif key == "fhist":
+        fhist_layer = data
+
+    print(f" - Capa '{key}' procesada. Dimensiones: {data.shape}")
+    if key not in {"meteo", "fhist"}:
+        del data
 
 # ==========================================
 # 4. AHP (Proceso de Análisis Jerárquico)
 # ==========================================
 print("\nCalculando pesos AHP y sumando capas...")
-vegetation_matrix = np.array([[1, 3], [1/3, 1]])
-we_veg = calculate_weights(normalize_matrix(vegetation_matrix))
-veg_topic = sum(aligned_layers[k] * w for k, w in zip(["ftm", "ndvi"], we_veg))
-
-ai_matrix = np.array([[1, 3], [1/3, 1]])
-we_ai = calculate_weights(normalize_matrix(ai_matrix))
-ai_topic = sum(aligned_layers[k] * w for k, w in zip(["infra", "wui"], we_ai))
-
-topography_matrix = np.array([[1, 2, 3], [1/2, 1, 2], [1/3, 1/2, 1]])
-we_topo = calculate_weights(normalize_matrix(topography_matrix))
-topo_topic = sum(aligned_layers[k] * w for k, w in zip(["mdt", "slope", "aspect"], we_topo))
+if meteo_layer is None or fhist_layer is None:
+    raise RuntimeError("Missing meteo or historical layer after preprocessing.")
 
 # Con FWI (agosto 2021 en adelante)
-final_layers = [veg_topic, topo_topic, aligned_layers["meteo"], ai_topic, aligned_layers["fhist"]]
+final_layers = [veg_topic, topo_topic, meteo_layer, ai_topic, fhist_layer]
 comparison_matrix = np.array([[1,   3,   2,   2,   5],
                               [1/3, 1,   1/3, 1/3, 3],
                               [1/2, 3,   1,   3,   5],
                               [1/2, 3,   1/3, 1,   3],
-                              [1/5, 1/3, 1/5, 1/3, 1]])
+                              [1/5, 1/3, 1/5, 1/3, 1]], dtype=np.float32)
 r'''
 # Sin FWI (2016 - mayo 2021)
 final_layers = [veg_topic, topo_topic, ai_topic, aligned_layers["fhist"]]
@@ -274,20 +308,26 @@ print("La matriz es consistente." if cr < 0.1 else "La matriz no es consistente.
 # 5. MAPA DE RIESGO FINAL Y GUARDADO
 # ==========================================
 print("\nGenerando y clasificando el mapa final...")
-fr_map = sum(layer * weight for layer, weight in zip(final_layers, final_weights))
+fr_map = np.zeros(master_mask.shape, dtype=np.float32)
+scaled_layer = np.empty_like(fr_map)
+for layer, weight in zip(final_layers, final_weights.astype(np.float32)):
+    np.multiply(layer, weight, out=scaled_layer)
+    np.add(fr_map, scaled_layer, out=fr_map)
+del scaled_layer, final_layers, veg_topic, topo_topic, meteo_layer, ai_topic, fhist_layer
 
-reference_profile = rasterio.open(reference_path).profile
+with rasterio.open(reference_path) as ref:
+    reference_profile = ref.profile
 reference_profile.update(dtype='float32', count=1)
-output_path = r'C:\Users\Mateo G\Desktop\STORCITO\Salida Datos\mapa_final.tif'
+output_path = os.path.join(base_dir, 'OUTPUT', 'mapa_final.tif')
 
 # Guardar temporalmente el mapa en valores flotantes (riesgo continuo)
 with rasterio.open(output_path, 'w', **reference_profile) as dst:
-    dst.write(fr_map.astype('float32'), 1)
+    dst.write(fr_map, 1)
 
-fr_final = r'C:\Users\Mateo G\Desktop\STORCITO\Salida Datos\forest_fire_risk_map.tif'
+fr_final = os.path.join(base_dir, 'OUTPUT', 'forest_fire_risk_map.tif')
 with rasterio.open(output_path) as mapa_final:
     forest_fire_final = mapa_final.read(1).astype('float32')
-    fr_clasificado = np.zeros_like(forest_fire_final, dtype='int32')
+    fr_clasificado = np.zeros_like(forest_fire_final, dtype='float32')
 
     # Clasificación de 1 a 5
     fr_clasificado[(forest_fire_final > 0) & (forest_fire_final <= 1)] = 1
@@ -300,7 +340,8 @@ with rasterio.open(output_path) as mapa_final:
     fr_clasificado[~master_mask] = 0
 
     # Forzamos los valores 0 (fuera del mapa) a que sean transparentes para la visualización
-    plot_data = np.where(fr_clasificado == 0, np.nan, fr_clasificado)
+    plot_data = fr_clasificado.astype('float32')
+    plot_data[fr_clasificado == 0] = np.nan
 
     # Mostrar la imagen
     plt.figure(figsize=(10, 8))
@@ -314,7 +355,7 @@ with rasterio.open(output_path) as mapa_final:
 
     # Guardar el mapa clasificado final
     meta = mapa_final.profile
-    meta.update(dtype='int32')
+    meta.update(dtype='float32')
     with rasterio.open(fr_final, 'w', **meta) as dst:
         dst.write(fr_clasificado, 1)
 
