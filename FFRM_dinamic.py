@@ -19,7 +19,8 @@ import FR.NDVI as Ndvi
 import FR.NDMI as Ndmi
 import FR.TWI as Twi
 import FR.FWI as Fwi
-import FR.LST as Lst 
+import FR.FWI_excel as Fwi_excel
+import FR.LST as Lst
 import FR.cropped as Cropped
 from FR.ahp import normalize_matrix, calculate_weights, consistency_ratio
 
@@ -56,6 +57,7 @@ input_clc = os.path.join(base_dir, 'INPUT', 'IUF', 'CLC_galicia.shp')
 
 # Meteorology
 input_fwi_folder = os.path.join(base_dir, 'INPUT', 'FWI')
+input_fwi_excel = os.path.join(base_dir, 'INPUT', 'FWI', 'FWI_station_data.xlsx')
 input_lst = os.path.join(base_dir, 'INPUT', 'LST', 'LST.tiff')
 
 # ---------------------------
@@ -96,6 +98,7 @@ run_fmt = False
 run_infra = False
 run_wui = False
 run_fwi = False
+run_fwi_excel = True
 run_lst = True
 
 # ---------------------------
@@ -153,6 +156,15 @@ if run_fwi:
     Fwi.f_w_index(
         input_fwi_folder,
         output_fwi
+    )
+
+if run_fwi_excel:
+    # FWI from weather-station Excel/CSV
+    Fwi_excel.f_w_index_excel(
+        input_fwi_excel,
+        input_mdt,
+        output_fwi,
+        output_folder=os.path.join(base_dir, 'OUTPUT')
     )
 
 if run_lst:

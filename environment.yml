@@ -9,6 +9,7 @@ dependencies:
   - fiona
   - shapely
   - pandas
+  - openpyxl
   - numpy
   - matplotlib
   - scipy
