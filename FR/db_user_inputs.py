@@ -21,6 +21,8 @@ KIND_DTM = "dtm"
 KIND_STATION_DATA = "station_data"
 VALID_KINDS = {KIND_DTM, KIND_STATION_DATA}
 USER_INPUT_TABLE = "public.user_input_files"
+USER_INPUT_CHUNK_TABLE = "public.user_input_file_chunks"
+DTM_CHUNK_SIZE = int(os.environ.get("USER_INPUT_DTM_CHUNK_SIZE", str(8 * 1024 * 1024)))
 
 
 def _log(message: str) -> None:
@@ -77,6 +79,17 @@ ALTER TABLE public.user_input_files
 
 CREATE INDEX IF NOT EXISTS user_input_files_footprint_gix
     ON public.user_input_files USING gist (footprint);
+
+CREATE TABLE IF NOT EXISTS public.user_input_file_chunks (
+    user_input_id bigint NOT NULL REFERENCES public.user_input_files(id) ON DELETE CASCADE,
+    chunk_index   integer NOT NULL,
+    data          bytea NOT NULL,
+    nbytes        integer NOT NULL,
+    PRIMARY KEY (user_input_id, chunk_index)
+);
+
+CREATE INDEX IF NOT EXISTS user_input_file_chunks_input_idx
+    ON public.user_input_file_chunks (user_input_id, chunk_index);
 """
 
 
@@ -206,6 +219,113 @@ def _upsert_user_input(
     return result
 
 
+def _upsert_dtm_chunks(
+    *,
+    user_id: str,
+    model_id: str,
+    path: Path,
+    filename: str,
+    source_filename: str | None,
+    content_type: str | None,
+    raster_srid: int | None,
+    footprint_geojson: dict[str, Any],
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    import psycopg2
+    from psycopg2.extras import Json
+
+    footprint_text = json.dumps(footprint_geojson)
+    file_size = path.stat().st_size
+    chunk_size = max(1024 * 1024, DTM_CHUNK_SIZE)
+    chunk_metadata = {
+        **metadata,
+        "storage_mode": "chunks",
+        "chunk_size": chunk_size,
+    }
+
+    with _connect() as conn, conn.cursor() as cur:
+        _ensure_schema(cur)
+        _log(
+            f"upserting chunked dtm metadata into {USER_INPUT_TABLE} "
+            f"user_id={user_id} model_id={model_id} filename={filename} "
+            f"source_filename={source_filename or '-'} bytes={file_size} "
+            f"chunk_size={chunk_size} raster_srid={raster_srid or 'none'}"
+        )
+        cur.execute(
+            """
+            INSERT INTO public.user_input_files
+                (user_id, model_id, kind, filename, source_filename, content_type,
+                 data, nbytes, raster_srid, footprint, metadata)
+            VALUES
+                (%s, %s, 'dtm', %s, %s, %s, %s, %s, %s,
+                 ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326),
+                 %s)
+            ON CONFLICT (user_id, model_id, kind)
+            DO UPDATE SET
+                filename = EXCLUDED.filename,
+                source_filename = EXCLUDED.source_filename,
+                content_type = EXCLUDED.content_type,
+                data = EXCLUDED.data,
+                nbytes = EXCLUDED.nbytes,
+                raster_srid = EXCLUDED.raster_srid,
+                footprint = EXCLUDED.footprint,
+                metadata = EXCLUDED.metadata,
+                updated_at = now()
+            RETURNING id, kind, filename, source_filename, nbytes, raster_srid,
+                      ST_AsGeoJSON(footprint), metadata, updated_at
+            """,
+            (
+                user_id,
+                model_id,
+                filename,
+                source_filename,
+                content_type,
+                psycopg2.Binary(b""),
+                file_size,
+                raster_srid,
+                footprint_text,
+                Json(chunk_metadata),
+            ),
+        )
+        row = cur.fetchone()
+        user_input_id = row[0]
+        cur.execute(
+            "DELETE FROM public.user_input_file_chunks WHERE user_input_id = %s",
+            (user_input_id,),
+        )
+
+        uploaded = 0
+        chunk_count = 0
+        with path.open("rb") as fh:
+            while True:
+                chunk = fh.read(chunk_size)
+                if not chunk:
+                    break
+                cur.execute(
+                    """
+                    INSERT INTO public.user_input_file_chunks
+                        (user_input_id, chunk_index, data, nbytes)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (user_input_id, chunk_count, psycopg2.Binary(chunk), len(chunk)),
+                )
+                uploaded += len(chunk)
+                chunk_count += 1
+                _log(
+                    f"DTM database chunk upload progress user_id={user_id} "
+                    f"model_id={model_id} uploaded_bytes={uploaded} "
+                    f"total_bytes={file_size} chunks={chunk_count}"
+                )
+
+    result = _row_to_metadata(row[1:])
+    _log(
+        f"stored chunked dtm in {USER_INPUT_TABLE}/{USER_INPUT_CHUNK_TABLE} "
+        f"user_id={user_id} model_id={model_id} bytes={result['nbytes']} "
+        f"updated_at={result['updated_at']}"
+    )
+    return result
+
+
 def _row_to_metadata(row) -> dict[str, Any]:
     kind, filename, source_filename, nbytes, raster_srid, footprint_json, metadata, updated_at = row
     return {
@@ -234,19 +354,17 @@ def store_dtm_file(
         f"source_filename={source_filename or path.name}"
     )
     raster_srid, footprint_geojson, metadata = _dtm_metadata(path)
-    data = path.read_bytes()
     _log(
-        f"DTM bytes ready for table {USER_INPUT_TABLE} "
-        f"filename={path.name} bytes={len(data)}"
+        f"DTM bytes ready for chunked table storage filename={path.name} "
+        f"bytes={path.stat().st_size}"
     )
-    return _upsert_user_input(
+    return _upsert_dtm_chunks(
         user_id=user_id,
         model_id=model_id,
-        kind=KIND_DTM,
+        path=path,
         filename="dtm.tif",
         source_filename=source_filename or path.name,
         content_type=content_type,
-        data=data,
         raster_srid=raster_srid,
         footprint_geojson=footprint_geojson,
         metadata=metadata,
@@ -295,22 +413,54 @@ def materialize_user_input(
         )
         cur.execute(
             """
-            SELECT data
+            SELECT id, data, metadata
             FROM public.user_input_files
             WHERE user_id = %s AND model_id = %s AND kind = %s
             """,
             (user_id, model_id, kind),
         )
         row = cur.fetchone()
-    if row is None:
-        _log(
-            f"no stored {kind} found in {USER_INPUT_TABLE} "
-            f"user_id={user_id} model_id={model_id}"
-        )
-        return None
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
-    dest_path.write_bytes(bytes(row[0]))
-    _log(f"materialized stored {kind} from {USER_INPUT_TABLE} -> {dest_path}")
+        if row is None:
+            _log(
+                f"no stored {kind} found in {USER_INPUT_TABLE} "
+                f"user_id={user_id} model_id={model_id}"
+            )
+            return None
+
+        user_input_id, data, metadata = row
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(metadata, dict) and metadata.get("storage_mode") == "chunks":
+            cur.execute(
+                """
+                SELECT chunk_index, data
+                FROM public.user_input_file_chunks
+                WHERE user_input_id = %s
+                ORDER BY chunk_index
+                """,
+                (user_input_id,),
+            )
+            chunk_count = 0
+            written = 0
+            with dest_path.open("wb") as fh:
+                for _, chunk_data in cur:
+                    chunk = bytes(chunk_data)
+                    fh.write(chunk)
+                    written += len(chunk)
+                    chunk_count += 1
+            if chunk_count == 0:
+                _log(
+                    f"stored {kind} has chunk metadata but no chunks "
+                    f"user_id={user_id} model_id={model_id}"
+                )
+                return None
+            _log(
+                f"materialized chunked stored {kind} from {USER_INPUT_CHUNK_TABLE} "
+                f"-> {dest_path} bytes={written} chunks={chunk_count}"
+            )
+            return dest_path
+
+        dest_path.write_bytes(bytes(data))
+        _log(f"materialized stored {kind} from {USER_INPUT_TABLE} -> {dest_path}")
     return dest_path
 
 

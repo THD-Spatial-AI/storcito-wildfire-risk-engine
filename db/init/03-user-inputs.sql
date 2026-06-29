@@ -25,3 +25,14 @@ CREATE INDEX IF NOT EXISTS user_input_files_user_model_idx
 
 CREATE INDEX IF NOT EXISTS user_input_files_footprint_gix
     ON public.user_input_files USING gist (footprint);
+
+CREATE TABLE IF NOT EXISTS public.user_input_file_chunks (
+    user_input_id bigint NOT NULL REFERENCES public.user_input_files(id) ON DELETE CASCADE,
+    chunk_index   integer NOT NULL,
+    data          bytea NOT NULL,
+    nbytes        integer NOT NULL,
+    PRIMARY KEY (user_input_id, chunk_index)
+);
+
+CREATE INDEX IF NOT EXISTS user_input_file_chunks_input_idx
+    ON public.user_input_file_chunks (user_input_id, chunk_index);

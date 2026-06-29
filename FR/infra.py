@@ -5,6 +5,7 @@ import time
 import pandas as pd
 import geopandas as gpd
 import matplotlib.pyplot as plt
+import numpy as np
 import rasterio
 
 from FR.rutinas.setup import default_imshow, save_file

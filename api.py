@@ -287,12 +287,32 @@ def _wildfire_user_inputs(payload: WildfireCalculationRequest, dest_dir: Path) -
     paths: dict[str, Path] = {}
     requested_kinds: set[str] = set()
 
+    if isinstance(raw, dict) and raw:
+        _log_user_input(
+            "calculation payload includes user input references "
+            f"user_id={payload.user_id} model_id={model_id} keys={sorted(raw.keys())}"
+        )
+    else:
+        _log_user_input(
+            "calculation payload has no user input references; "
+            f"user_id={payload.user_id} model_id={model_id} "
+            "using bundled/default DTM and weather inputs unless stored files exist"
+        )
+
     if isinstance(raw, dict):
         for kind, url in raw.items():
             if kind not in {KIND_DTM, KIND_STATION_DATA}:
+                _log_user_input(
+                    f"ignoring unsupported user input kind={kind} "
+                    f"user_id={payload.user_id} model_id={model_id}"
+                )
                 continue
             requested_kinds.add(kind)
             if not isinstance(url, str) or not url:
+                _log_user_input(
+                    f"user input reference missing URL kind={kind} "
+                    f"user_id={payload.user_id} model_id={model_id}"
+                )
                 continue
             try:
                 _log_user_input(
@@ -392,6 +412,11 @@ def _wildfire_user_inputs(payload: WildfireCalculationRequest, dest_dir: Path) -
 
     if paths:
         _log_user_input(f"resolved user inputs for run: {', '.join(sorted(paths))}")
+    else:
+        _log_user_input(
+            "no user inputs resolved for run; "
+            f"user_id={payload.user_id} model_id={model_id}"
+        )
     return paths
 
 
