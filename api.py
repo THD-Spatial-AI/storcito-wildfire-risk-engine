@@ -217,8 +217,13 @@ def _wildfire_user_inputs(payload: WildfireCalculationRequest, dest_dir: Path) -
                     for chunk in resp.iter_bytes():
                         fh.write(chunk)
             paths[kind] = target
+            size = target.stat().st_size if target.exists() else 0
+            print(f"[FFRM] downloaded user input '{kind}' -> {target} ({size} bytes)", flush=True)
         except Exception as exc:  # noqa: BLE001 - optional; fall back to bundled
             logger.warning("Failed to download user input %s from %s: %s", kind, url, exc)
+            print(f"[FFRM] user input '{kind}' download failed: {exc}", flush=True)
+    if paths:
+        print(f"[FFRM] using uploaded inputs: {', '.join(sorted(paths))}", flush=True)
     return paths
 
 

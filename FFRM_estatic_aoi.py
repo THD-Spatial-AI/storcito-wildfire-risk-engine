@@ -341,6 +341,7 @@ def run_static_aoi_for_geometry(
     write_aoi_geojson(processing_aoi, job_dir / "processing_aoi.geojson")
 
     dtm_source = Path(dtm_path) if dtm_path else INPUT_DIR / "DTM" / "DTM.tif"
+    print(f"[FFRM] DTM source: {'UPLOADED' if dtm_path else 'bundled'} -> {dtm_source}")
     cropped_dtm = crop_raster_to_geometry(dtm_source, inputs_dir / "DTM.tif", processing_aoi)
     cropped_b4 = crop_raster_to_geometry(INPUT_DIR / "Sentinel" / "B4.tiff", inputs_dir / "B4.tiff", processing_aoi)
     cropped_b8 = crop_raster_to_geometry(INPUT_DIR / "Sentinel" / "B8.tiff", inputs_dir / "B8.tiff", processing_aoi)
@@ -374,8 +375,10 @@ def run_static_aoi_for_geometry(
     )
     if "meteo" in active_top_levels:
         if station_data_path:
+            print(f"[FFRM] FWI source: UPLOADED station file -> {station_data_path}")
             _fwi_from_station_file(station_data_path, processing_reference, base_output_dir, inputs_dir)
         else:
+            print("[FFRM] FWI source: bundled netCDF series")
             Fwi.f_w_index(
                 INPUT_DIR / "FWI",
                 output_folder=base_output_dir,

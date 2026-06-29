@@ -16,15 +16,25 @@ def convert_station_file_to_csv(input_path, output_csv):
     as ``f_w_index_excel`` expects. Returns the output CSV path.
     """
     ext = os.path.splitext(str(input_path))[1].lower()
+    # Uploaded files are stored without an extension, so fall back to sniffing
+    # the content: .xlsx/.xls are ZIP/OLE containers, everything else is CSV.
+    if ext not in (".xlsx", ".xls", ".csv", ".txt"):
+        with open(input_path, "rb") as fh:
+            head = fh.read(8)
+        if head[:2] == b"PK" or head[:4] == b"\xd0\xcf\x11\xe0":
+            ext = ".xlsx"
+        else:
+            ext = ".csv"
+        print(f"[FFRM] station file has no extension; detected format: {ext}")
+
     if ext in (".xlsx", ".xls"):
         raw = pd.read_excel(input_path, engine="openpyxl", header=None)
-    elif ext in (".csv", ".txt"):
-        raw = pd.read_csv(input_path, header=None, dtype=str)
     else:
-        raise ValueError(f"Unsupported station file format: {ext}")
+        raw = pd.read_csv(input_path, header=None, dtype=str)
 
     os.makedirs(os.path.dirname(os.path.abspath(output_csv)), exist_ok=True)
     raw.to_csv(output_csv, index=False, header=False, encoding="utf-8")
+    print(f"[FFRM] converted station file -> {output_csv} ({len(raw)} rows)")
     return output_csv
 
 
@@ -175,14 +185,15 @@ def f_w_index_excel(
         rh_arr = np.array([rh], dtype=float)
         wind_arr = np.array([wind], dtype=float)
         rain_arr = np.array([rain], dtype=float)
-        month_arr = np.array([month], dtype=int)
         f0_arr = np.array([f0], dtype=float)
         p0_arr = np.array([p0], dtype=float)
         d0_arr = np.array([d0], dtype=float)
 
+        # dmc/dc expect a scalar month (they do int(month)); the netCDF path
+        # passes a scalar too, so pass the int here rather than a 1-element array.
         f_arr = Fwi.ffmc(temp_arr, rh_arr, wind_arr, rain_arr, f0_arr)
-        p_arr = Fwi.dmc(temp_arr, rh_arr, rain_arr, p0_arr, month_arr)
-        d_arr = Fwi.dc(temp_arr, rain_arr, month_arr, d0_arr)
+        p_arr = Fwi.dmc(temp_arr, rh_arr, rain_arr, p0_arr, month)
+        d_arr = Fwi.dc(temp_arr, rain_arr, month, d0_arr)
         isi_arr = Fwi.isi(wind_arr, f_arr)
         bui_arr = Fwi.bui(p_arr, d_arr)
         fwi_arr = Fwi.fwi(isi_arr, bui_arr)
