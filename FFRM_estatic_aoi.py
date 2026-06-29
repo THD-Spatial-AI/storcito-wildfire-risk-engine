@@ -265,24 +265,64 @@ def _resolve_active_top_levels(optional_layers: dict[str, bool] | None) -> set[s
     return active
 
 
+def _fwi_from_station_file(station_data_path, reference_raster, base_output_dir: Path, inputs_dir: Path) -> None:
+    """Compute the FWI risk layer from an uploaded station file (Excel/CSV) and
+    place the classified raster where the layer combination step expects it
+    (``base_output_dir/TIFs/FWI_Risk_Map.tif``).
+    """
+    from FR.FWI_excel import convert_station_file_to_csv, f_w_index_excel
+
+    csv_path = convert_station_file_to_csv(station_data_path, inputs_dir / "station_data.csv")
+    re_dir = base_output_dir / "re"
+    out_fwi = re_dir / "FWI_Risk_Map.tif"
+    f_w_index_excel(
+        csv_path,
+        str(reference_raster),
+        str(out_fwi),
+        output_folder=str(base_output_dir),
+        show_plots=False,
+        save=True,
+    )
+
+    classified = re_dir / "FWI_Risk_Map_risk_map.tif"
+    target = base_output_dir / "TIFs" / "FWI_Risk_Map.tif"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(classified, target)
+
+
 def run_static_aoi_for_geometry(
     output_aoi: BaseGeometry,
     target_date: date | str,
     *,
+    start_date: date | str | None = None,
     context_buffer_m: float = 3000,
     output_root: str | Path = BASE_DIR / "OUTPUT" / "aoi",
     keep_intermediate: bool = False,
     request_metadata: dict | None = None,
     optional_layers: dict[str, bool] | None = None,
+    dtm_path: str | Path | None = None,
+    station_data_path: str | Path | None = None,
 ) -> dict[str, str]:
-    """Run the static workflow for one projected AOI geometry and one selected FWI date."""
+    """Run the static workflow for one projected AOI geometry and one selected FWI date.
+
+    Optional user-supplied inputs override the bundled regional data: ``dtm_path``
+    replaces the terrain raster, and ``station_data_path`` (Excel/CSV) drives the
+    FWI from local station measurements instead of the bundled netCDF series.
+    """
     active_top_levels = _resolve_active_top_levels(optional_layers)
 
     if isinstance(target_date, str):
         target_date = date.fromisoformat(target_date)
+    if isinstance(start_date, str):
+        start_date = date.fromisoformat(start_date)
+    if start_date is not None and start_date > target_date:
+        raise ValueError("FWI start date must be before or equal to the end date.")
 
     if "meteo" in active_top_levels:
         available_dates = Fwi.available_fwi_dates(INPUT_DIR / "FWI")
+        if start_date is not None and start_date not in available_dates:
+            available = ", ".join(day.isoformat() for day in available_dates)
+            raise ValueError(f"FWI start date {start_date.isoformat()} is not available. Available dates: {available}")
         if target_date not in available_dates:
             available = ", ".join(day.isoformat() for day in available_dates)
             raise ValueError(f"FWI date {target_date.isoformat()} is not available. Available dates: {available}")
@@ -300,7 +340,8 @@ def run_static_aoi_for_geometry(
     write_aoi_geojson(output_aoi, job_dir / "aoi.geojson")
     write_aoi_geojson(processing_aoi, job_dir / "processing_aoi.geojson")
 
-    cropped_dtm = crop_raster_to_geometry(INPUT_DIR / "DTM" / "DTM.tif", inputs_dir / "DTM.tif", processing_aoi)
+    dtm_source = Path(dtm_path) if dtm_path else INPUT_DIR / "DTM" / "DTM.tif"
+    cropped_dtm = crop_raster_to_geometry(dtm_source, inputs_dir / "DTM.tif", processing_aoi)
     cropped_b4 = crop_raster_to_geometry(INPUT_DIR / "Sentinel" / "B4.tiff", inputs_dir / "B4.tiff", processing_aoi)
     cropped_b8 = crop_raster_to_geometry(INPUT_DIR / "Sentinel" / "B8.tiff", inputs_dir / "B8.tiff", processing_aoi)
     cropped_fuels = crop_raster_to_geometry(INPUT_DIR / "FUELS" / "FUELS.tif", inputs_dir / "FUELS.tif", processing_aoi)
@@ -332,13 +373,17 @@ def run_static_aoi_for_geometry(
         aoi_crs=DEFAULT_PROJECTED_CRS,
     )
     if "meteo" in active_top_levels:
-        Fwi.f_w_index(
-            INPUT_DIR / "FWI",
-            output_folder=base_output_dir,
-            export_image=True,
-            show_plots=False,
-            target_date=target_date,
-        )
+        if station_data_path:
+            _fwi_from_station_file(station_data_path, processing_reference, base_output_dir, inputs_dir)
+        else:
+            Fwi.f_w_index(
+                INPUT_DIR / "FWI",
+                output_folder=base_output_dir,
+                export_image=True,
+                show_plots=False,
+                target_date=target_date,
+                start_date=start_date,
+            )
 
     output_reference = crop_raster_to_geometry(
         processing_reference,
@@ -373,7 +418,9 @@ def run_static_aoi_for_geometry(
     metadata = {
         "request_id": request_id,
         "context_buffer_m": context_buffer_m,
+        "fwi_start_date": start_date.isoformat() if start_date else None,
         "fwi_date": target_date.isoformat(),
+        "fwi_end_date": target_date.isoformat(),
         "crs": DEFAULT_PROJECTED_CRS,
         "keep_intermediate": keep_intermediate,
         "active_top_levels": sorted(active_top_levels),
@@ -397,6 +444,7 @@ def run_static_aoi(
     latitude: float,
     target_date: date | str,
     *,
+    start_date: date | str | None = None,
     buffer_m: float = 3000,
     context_buffer_m: float = 3000,
     output_root: str | Path = BASE_DIR / "OUTPUT" / "aoi",
@@ -408,6 +456,7 @@ def run_static_aoi(
     return run_static_aoi_for_geometry(
         output_aoi,
         target_date,
+        start_date=start_date,
         context_buffer_m=context_buffer_m,
         output_root=output_root,
         keep_intermediate=keep_intermediate,

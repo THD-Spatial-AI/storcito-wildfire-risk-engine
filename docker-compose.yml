@@ -32,7 +32,14 @@ services:
       # Allow the container to reach services running on the Docker host
       # (e.g. wildfire backend on http://host.docker.internal:8000) on Linux.
       - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - spatialhub-net
     command: >
       uvicorn api:app
       --host 0.0.0.0
       --port 8090
+
+networks:
+  spatialhub-net:
+    external: true

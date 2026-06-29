@@ -94,6 +94,18 @@ def _remap_with_lookup(
     return remapped, mapped_pixels, unmapped_pixels, nodata_pixels
 
 
+def _integer_codes(values: np.ndarray, nodata: float | None) -> set[int]:
+    finite_mask = np.isfinite(values)
+    if nodata is not None:
+        finite_mask &= values != nodata
+    if not finite_mask.any():
+        return set()
+
+    valid = values[finite_mask]
+    integer_values = valid[valid == valid.astype("int32")]
+    return set(int(code) for code in np.unique(integer_values))
+
+
 def fmt(input_file:str|Path,output_folder=Path('OUTPUT') ,file_name:str='FMT',
         export_image:bool=False,show_plots:bool=True) -> np.ndarray:
     
@@ -126,12 +138,23 @@ def fmt(input_file:str|Path,output_folder=Path('OUTPUT') ,file_name:str='FMT',
         meta = src.meta.copy()
 
     nodata = meta.get("nodata")
-    fmt_rothermel, mapped, unmapped, nodata_pixels = _remap_with_lookup(
-        fmt_eu,
-        ROTHERMEL_MAP,
-        "ROTHERMEL_MAP",
-        nodata=nodata,
-    )
+    source_codes = _integer_codes(fmt_eu, nodata)
+    if source_codes and source_codes.issubset(FINAL_MAP):
+        valid_mask = np.isfinite(fmt_eu)
+        if nodata is not None:
+            valid_mask &= fmt_eu != nodata
+        fmt_rothermel = fmt_eu
+        mapped = int(valid_mask.sum())
+        unmapped = 0
+        nodata_pixels = int((fmt_eu == nodata).sum()) if nodata is not None else 0
+        print("Input fuel raster already uses Rothermel codes; skipping European-code remap.")
+    else:
+        fmt_rothermel, mapped, unmapped, nodata_pixels = _remap_with_lookup(
+            fmt_eu,
+            ROTHERMEL_MAP,
+            "ROTHERMEL_MAP",
+            nodata=nodata,
+        )
     fmt_final, _, _, _ = _remap_with_lookup(
         fmt_rothermel.astype("float32", copy=False),
         FINAL_MAP,

@@ -7,6 +7,27 @@ import matplotlib.pyplot as plt
 import FR.rutinas.FWI_Equations as Fwi
 
 
+def convert_station_file_to_csv(input_path, output_csv):
+    """Normalize an uploaded weather-station file to the engine's CSV layout.
+
+    Excel (.xlsx/.xls) is converted to CSV; an existing CSV is re-written through
+    the same path. The raw cell layout is preserved verbatim (no header collapse,
+    no column reordering) so the two-row header and column positions stay exactly
+    as ``f_w_index_excel`` expects. Returns the output CSV path.
+    """
+    ext = os.path.splitext(str(input_path))[1].lower()
+    if ext in (".xlsx", ".xls"):
+        raw = pd.read_excel(input_path, engine="openpyxl", header=None)
+    elif ext in (".csv", ".txt"):
+        raw = pd.read_csv(input_path, header=None, dtype=str)
+    else:
+        raise ValueError(f"Unsupported station file format: {ext}")
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_csv)), exist_ok=True)
+    raw.to_csv(output_csv, index=False, header=False, encoding="utf-8")
+    return output_csv
+
+
 def _to_numeric_series(series):
     s = series.astype(str).str.strip()
     s = s.replace(
@@ -44,12 +65,9 @@ def f_w_index_excel(
     output_folder="OUTPUT",
     target_hour=13,
     show_plots=True,
+    save=True,
 ):
     """FWI from a weather-station Excel/CSV file.
-
-    - Asks whether to save TIF/PNG.
-    - Always shows the FWI class map if show_plots=True.
-    - Saves CSV, FWI.tif, FWI_risk_map.tif and a single PNG if you answer 'y'.
 
     Args:
         input_excel: Path to the station Excel/CSV file.
@@ -59,19 +77,10 @@ def f_w_index_excel(
             and rasters to ``<output_folder>/re``. Defaults to 'OUTPUT'.
         target_hour: Hour of day used to pick midday conditions. Defaults to 13.
         show_plots: Whether to display the FWI class map. Defaults to True.
+        save: Whether to write CSV/TIF/PNG outputs. Defaults to True.
     """
 
     print("FWI - calculation from the weather-station Excel file...")
-
-    # MDT-style prompt
-    while True:
-        ans = input(
-            "Do you want to save the FWI rasters (.tif) and PNGs when finished? (y/n): "
-        ).strip().lower()
-        if ans in ("y", "n"):
-            save = (ans == "y")
-            break
-        print("Invalid input. Please enter 'y' or 'n'.")
 
     # Output directories derived from the project output folder
     csv_dir = os.path.join(output_folder, "FWI")

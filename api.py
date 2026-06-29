@@ -32,7 +32,7 @@ from shapely.geometry import box, mapping, shape
 
 from FFRM_estatic_aoi import run_static_aoi, run_static_aoi_for_geometry
 from FR.aoi import build_geojson_aoi
-from FR.FWI import available_fwi_dates
+from FR.FWI import available_fwi_dates, highest_temperature_fwi_dates
 
 app = FastAPI(title="STORCITO API")
 BASE_DIR = Path(__file__).resolve().parent
@@ -112,14 +112,18 @@ def _to_berlin_time(value: datetime) -> datetime:
     return value.astimezone(BERLIN_TZ)
 
 
-def _wildfire_target_date(payload: WildfireCalculationRequest) -> date:
+def _wildfire_date_range(payload: WildfireCalculationRequest, calculation_mode: str) -> tuple[date | None, date]:
     start_local = _to_berlin_time(payload.start_date)
     end_local = _to_berlin_time(payload.end_date)
 
-    if start_local.date() != end_local.date():
+    start_day = start_local.date()
+    end_day = end_local.date()
+    if calculation_mode == "static" and start_day != end_day:
         raise ValueError("start_date and end_date must be on the same Europe/Berlin local date.")
+    if start_day > end_day:
+        raise ValueError("start_date must be before or equal to end_date.")
 
-    return start_local.date()
+    return (start_day if calculation_mode == "dynamic" else None, end_day)
 
 
 def _unwrap_geojson_geometry(node: Any) -> dict | None:
@@ -189,6 +193,33 @@ def _wildfire_optional_layers(payload: WildfireCalculationRequest) -> dict[str, 
             raise ValueError("parameters.optional_layers keys must be strings.")
         result[key] = bool(value)
     return result
+
+
+def _wildfire_user_inputs(payload: WildfireCalculationRequest, dest_dir: Path) -> dict[str, Path]:
+    """Download optional user-supplied inputs (DTM, station data) advertised in
+    parameters.user_inputs as URLs, returning local paths keyed by kind. Absent
+    or unreachable inputs are skipped so the run falls back to bundled data.
+    """
+    raw = payload.parameters.get("user_inputs")
+    if not isinstance(raw, dict) or not raw:
+        return {}
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    paths: dict[str, Path] = {}
+    for kind, url in raw.items():
+        if not isinstance(kind, str) or not isinstance(url, str) or not url:
+            continue
+        try:
+            with httpx.stream("GET", url, timeout=120.0, follow_redirects=True) as resp:
+                resp.raise_for_status()
+                target = dest_dir / kind
+                with target.open("wb") as fh:
+                    for chunk in resp.iter_bytes():
+                        fh.write(chunk)
+            paths[kind] = target
+        except Exception as exc:  # noqa: BLE001 - optional; fall back to bundled
+            logger.warning("Failed to download user input %s from %s: %s", kind, url, exc)
+    return paths
 
 
 def _public_base_url(request: Request | None) -> str:
@@ -457,17 +488,18 @@ def _post_result_callback(callback_url: str, zip_path: Path, session_id: str | N
 
 def _run_wildfire_payload(payload: WildfireCalculationRequest, request: Request | None = None):
     calculation_mode = _wildfire_calculation_mode(payload)
-    if calculation_mode == "dynamic":
-        raise ValueError("Dynamic wildfire payloads are not supported by this AOI endpoint yet.")
-
-    target_date = _wildfire_target_date(payload)
+    start_date, target_date = _wildfire_date_range(payload, calculation_mode)
     output_aoi = _wildfire_geometry(payload)
     optional_layers = _wildfire_optional_layers(payload)
+    user_inputs = _wildfire_user_inputs(payload, AOI_OUTPUT_ROOT / "_user_inputs" / payload.model_id)
     outputs = run_static_aoi_for_geometry(
         output_aoi,
         target_date,
+        start_date=start_date,
         context_buffer_m=_wildfire_context_buffer(payload),
         optional_layers=optional_layers,
+        dtm_path=user_inputs.get("dtm"),
+        station_data_path=user_inputs.get("station_data"),
         request_metadata={
             "request_type": "wildfire_payload",
             "user_id": payload.user_id,
@@ -589,6 +621,14 @@ def run_static():
 
 @app.get("/available-static-dates")
 def available_static_dates():
+    # One representative day per year: the available FWI day with the highest
+    # air temperature in that year.
+    dates = highest_temperature_fwi_dates(BASE_DIR / "INPUT" / "FWI")
+    return {"dates": [day.isoformat() for day in dates]}
+
+
+@app.get("/available-dynamic-dates")
+def available_dynamic_dates():
     dates = available_fwi_dates(BASE_DIR / "INPUT" / "FWI")
     return {"dates": [day.isoformat() for day in dates]}
 
