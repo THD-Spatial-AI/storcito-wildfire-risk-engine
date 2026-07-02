@@ -1,0 +1,152 @@
+x-storcito-env: &storcito-env
+  STORCITO_HOST: 0.0.0.0
+  STORCITO_PORT: "8085"
+  MPLBACKEND: Agg
+  TERM: xterm-256color
+  PYTHONPATH: /app:/app/FR
+  PYTHONUNBUFFERED: "1"
+  GDAL_DATA: /opt/conda/envs/storcito/share/gdal
+  GDAL_DRIVER_PATH: /opt/conda/envs/storcito/lib/gdalplugins
+  CPL_ZIP_ENCODING: UTF-8
+  PROJ_LIB: /opt/conda/envs/storcito/share/proj
+  PROJ_DATA: /opt/conda/envs/storcito/share/proj
+  PROJ_NETWORK: "ON"
+  PGHOST: postgis
+  PGPORT: "5432"
+  PGDATABASE: ${POSTGRES_DB:-gis}
+  PGUSER: ${POSTGRES_USER:-gis}
+  PGPASSWORD: ${POSTGRES_PASSWORD:-gis}
+  DATABASE_URL: postgresql://${POSTGRES_USER:-gis}:${POSTGRES_PASSWORD:-gis}@postgis:5432/${POSTGRES_DB:-gis}
+  PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+
+x-storcito-api: &storcito-api
+  build: .
+  image: storcito:latest
+  user: root
+  stdin_open: true
+  tty: true
+  volumes:
+    # Bind-mount the entire project so code edits are reflected live
+    # (use `make restart` to pick up Python changes — uvicorn --reload is
+    # incompatible with pyogrio's GDAL_DATA probe inside this image).
+    - .:/app
+    - ./INPUT:/app/INPUT
+    - ./OUTPUT:/app/OUTPUT
+  extra_hosts:
+    # Allow the container to reach services running on the Docker host
+    # (e.g. wildfire backend on http://host.docker.internal:8000) on Linux.
+    - "host.docker.internal:host-gateway"
+  depends_on:
+    postgis:
+      condition: service_healthy
+  healthcheck:
+    test:
+      [
+        "CMD-SHELL",
+        "micromamba run -n storcito python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8085/health', timeout=5).read()\"",
+      ]
+    interval: 10s
+    timeout: 10s
+    retries: 12
+    start_period: 30s
+  restart: unless-stopped
+  command: >
+    uvicorn api:app
+    --host 0.0.0.0
+    --port 8085
+
+services:
+  postgis:
+    # pgRouting image is built on top of PostGIS, so it bundles
+    # postgis, postgis_raster, postgis_topology and pgrouting.
+    image: pgrouting/pgrouting:16-3.5-3.7
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-gis}
+      POSTGRES_USER: ${POSTGRES_USER:-gis}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gis}
+    ports:
+      - "${STORCITO_POSTGRES_PORT:-5435}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Runs once on first init (empty data dir) to enable extensions.
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gis} -d ${POSTGRES_DB:-gis}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  geotools:
+    # QGIS + GDAL (raster2pgsql) + unzip/unrar/wget/curl utilities.
+    build:
+      context: .
+      dockerfile: Dockerfile.geotools
+    image: geotools:latest
+    stdin_open: true
+    tty: true
+    environment:
+      # Connection details for the bundled PostGIS service, for raster2pgsql piping.
+      PGHOST: postgis
+      PGPORT: "5432"
+      PGDATABASE: ${POSTGRES_DB:-gis}
+      PGUSER: ${POSTGRES_USER:-gis}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-gis}
+    volumes:
+      - .:/data
+      - ./INPUT:/data/INPUT
+      - ./OUTPUT:/data/OUTPUT
+    depends_on:
+      postgis:
+        condition: service_healthy
+    command: ["sleep", "infinity"]
+
+  haproxy:
+    image: haproxy:2.9-alpine
+    container_name: storcito-haproxy
+    ports:
+      - "${STORCITO_PORT:-8085}:80"
+      - "${STORCITO_HAPROXY_STATS_PORT:-8406}:8404"
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      storcito-api-1:
+        condition: service_healthy
+      storcito-api-2:
+        condition: service_healthy
+      storcito-api-3:
+        condition: service_healthy
+      storcito-api-4:
+        condition: service_healthy
+    restart: unless-stopped
+
+  storcito-api-1:
+    <<: *storcito-api
+    container_name: storcito-api-1
+    environment:
+      <<: *storcito-env
+      STORCITO_WORKER_ID: "1"
+
+  storcito-api-2:
+    <<: *storcito-api
+    container_name: storcito-api-2
+    environment:
+      <<: *storcito-env
+      STORCITO_WORKER_ID: "2"
+
+  storcito-api-3:
+    <<: *storcito-api
+    container_name: storcito-api-3
+    environment:
+      <<: *storcito-env
+      STORCITO_WORKER_ID: "3"
+
+  storcito-api-4:
+    <<: *storcito-api
+    container_name: storcito-api-4
+    environment:
+      <<: *storcito-env
+      STORCITO_WORKER_ID: "4"
+
+volumes:
+  pgdata:

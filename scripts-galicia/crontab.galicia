@@ -1,0 +1,23 @@
+# Galicia recurring data pipeline -- cron schedule
+#
+# Runs the Python pipeline inside the geotools container. Install with:
+#   crontab scripts-galicia/crontab.galicia
+# or append to an existing crontab:
+#   crontab -l | cat - scripts-galicia/crontab.galicia | crontab -
+#
+# Requirements:
+#   - Edit REPO below to the absolute path of this checkout
+#   - geotools image rebuilt with the Python deps (docker compose build geotools)
+#   - scripts-galicia/.env.galicia present (Copernicus creds); read by galicia.py
+#   - The cron user must be able to run `docker compose` (docker group or sudo);
+#     if using sudo, prefix the docker commands with sudo.
+#
+# Times are in the system timezone.
+
+REPO=/home/aweber/Dokumente/Work/wild-fire-risk-engine
+
+# Daily meteo (MeteoGalicia WRF) at 03:30 -- loads yesterday into fwi_*
+30 3 * * *   cd $REPO && docker compose exec -T geotools python3 /data/scripts-galicia/galicia.py meteo    >> $REPO/OUTPUT/logs/galicia-meteo.log 2>&1
+
+# Weekly Sentinel-2 (B04/B08/B8A/B11) Mondays at 04:30 -- last 7 days into s2_*
+30 4 * * 1   cd $REPO && docker compose exec -T geotools python3 /data/scripts-galicia/galicia.py sentinel >> $REPO/OUTPUT/logs/galicia-sentinel.log 2>&1

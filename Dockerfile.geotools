@@ -1,0 +1,24 @@
+# Geospatial tools container: QGIS + GDAL (incl. raster2pgsql) + archive/download utils.
+# Based on the official QGIS image (Ubuntu-based, ships QGIS desktop/server + GDAL).
+FROM qgis/qgis:latest
+
+# raster2pgsql ships with the postgis package; unrar lives in the multiverse repo.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        gdal-bin \
+        postgis \
+        postgresql-client \
+        unzip \
+        unrar \
+        p7zip-full \
+        wget \
+        curl \
+        ca-certificates \
+        python3-psycopg2 \
+        python3-requests \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /data
+
+# Keep the container alive so you can `docker compose exec` into it.
+CMD ["sleep", "infinity"]

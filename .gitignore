@@ -1,7 +1,25 @@
-# Add files and directories to ignore in Git
-# You can find some language specific templates at https://github.com/github/gitignore
+*.tif
+*.tiff
+*.TIF
+*.TIFF
+*.nc
+*.hdf
+*.h5
+*.cpg
+*.dbf
+*.prj
+*.shp
+*.shx
+*.qmd
+*.prof
 
-site/
-.venv/
+*.png
+*.jpg
+
 __pycache__/
+.venv/
 venv/
+site/
+INPUT/
+OUTPUT/
+FR/__pycache__/
