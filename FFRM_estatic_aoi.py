@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -94,6 +95,21 @@ TOP_LEVEL_COMPARISON_MATRIX = np.array(
     dtype=np.float32,
 )
 
+# Weights fitted against FIRMS fire history (scripts/fit_weights.py);
+# inverse-signal components carry zero weight, meteo/fhist keep the AHP share.
+# Scheme via FFRM_WEIGHT_SCHEME=fitted|ahp (default: fitted).
+FITTED_SUB_WEIGHTS = {
+    "veg": {"ftm": 0.0, "ndvi": 1.0},
+    "topo": {"mdt": 0.181, "slope": 0.819, "aspect": 0.0},
+    "ai": {"infra": 0.5, "wui": 0.5},
+}
+FITTED_TOP_WEIGHTS = {"veg": 0.1577, "topo": 0.4898, "meteo": 0.2981, "ai": 0.0, "fhist": 0.0544}
+
+
+def _weight_scheme() -> str:
+    scheme = os.environ.get("FFRM_WEIGHT_SCHEME", "fitted").strip().lower()
+    return scheme if scheme in {"fitted", "ahp"} else "fitted"
+
 
 def _combine_layers(
     raw_layer_paths: dict[str, Path],
@@ -115,26 +131,32 @@ def _combine_layers(
         master_mask = ref_data > 0
     del ref_data
 
-    vegetation_matrix = np.array([[1, 3], [1 / 3, 1]], dtype=np.float32)
-    veg_weights = dict(
-        zip(["ftm", "ndvi"], calculate_weights(normalize_matrix(vegetation_matrix)).astype(np.float32))
-    )
-
-    ai_matrix = np.array([[1, 3], [1 / 3, 1]], dtype=np.float32)
-    ai_weights = dict(
-        zip(["infra", "wui"], calculate_weights(normalize_matrix(ai_matrix)).astype(np.float32))
-    )
-
-    topography_matrix = np.array(
-        [[1, 2, 3], [1 / 2, 1, 2], [1 / 3, 1 / 2, 1]],
-        dtype=np.float32,
-    )
-    topo_weights = dict(
-        zip(
-            ["mdt", "slope", "aspect"],
-            calculate_weights(normalize_matrix(topography_matrix)).astype(np.float32),
+    scheme = _weight_scheme()
+    if scheme == "fitted":
+        veg_weights = {k: np.float32(v) for k, v in FITTED_SUB_WEIGHTS["veg"].items()}
+        ai_weights = {k: np.float32(v) for k, v in FITTED_SUB_WEIGHTS["ai"].items()}
+        topo_weights = {k: np.float32(v) for k, v in FITTED_SUB_WEIGHTS["topo"].items()}
+    else:
+        vegetation_matrix = np.array([[1, 3], [1 / 3, 1]], dtype=np.float32)
+        veg_weights = dict(
+            zip(["ftm", "ndvi"], calculate_weights(normalize_matrix(vegetation_matrix)).astype(np.float32))
         )
-    )
+
+        ai_matrix = np.array([[1, 3], [1 / 3, 1]], dtype=np.float32)
+        ai_weights = dict(
+            zip(["infra", "wui"], calculate_weights(normalize_matrix(ai_matrix)).astype(np.float32))
+        )
+
+        topography_matrix = np.array(
+            [[1, 2, 3], [1 / 2, 1, 2], [1 / 3, 1 / 2, 1]],
+            dtype=np.float32,
+        )
+        topo_weights = dict(
+            zip(
+                ["mdt", "slope", "aspect"],
+                calculate_weights(normalize_matrix(topography_matrix)).astype(np.float32),
+            )
+        )
 
     veg_topic = np.zeros(master_mask.shape, dtype=np.float32)
     ai_topic = np.zeros(master_mask.shape, dtype=np.float32)
@@ -200,8 +222,13 @@ def _combine_layers(
     active_indices = [i for i, key in enumerate(TOP_LEVEL_KEYS) if key in active_top_levels]
     active_keys = [TOP_LEVEL_KEYS[i] for i in active_indices]
     comparison_matrix = TOP_LEVEL_COMPARISON_MATRIX[np.ix_(active_indices, active_indices)].astype(np.float32)
-    final_weights = calculate_weights(normalize_matrix(comparison_matrix)).astype(np.float32)
-    cr = consistency_ratio(comparison_matrix, final_weights)
+    ahp_weights = calculate_weights(normalize_matrix(comparison_matrix)).astype(np.float32)
+    cr = consistency_ratio(comparison_matrix, ahp_weights)
+    if scheme == "fitted":
+        fitted = np.array([FITTED_TOP_WEIGHTS[key] for key in active_keys], dtype=np.float32)
+        final_weights = fitted / fitted.sum()
+    else:
+        final_weights = ahp_weights
     final_layers = [topic_pool[key] for key in active_keys]
 
     fr_map = np.zeros(master_mask.shape, dtype=np.float32)
@@ -238,6 +265,13 @@ def _combine_layers(
     metadata_path.write_text(
         json.dumps(
             {
+                "weight_scheme": scheme,
+                "top_level_weights": {k: float(w) for k, w in zip(active_keys, final_weights)},
+                "sub_weights": {
+                    "veg": {k: float(v) for k, v in veg_weights.items()},
+                    "topo": {k: float(v) for k, v in topo_weights.items()},
+                    "ai": {k: float(v) for k, v in ai_weights.items()},
+                },
                 "comparison_matrix_consistency_ratio": float(cr),
                 "comparison_matrix_consistent": bool(cr < 0.1),
                 "active_top_levels": sorted(active_top_levels),
@@ -440,6 +474,45 @@ def run_static_aoi_for_geometry(
         active_top_levels=active_top_levels,
     )
 
+    daily_risk_dates: list[str] = []
+    if (
+        start_date is not None
+        and start_date < target_date
+        and "meteo" in active_top_levels
+        and not station_data_path
+    ):
+        daily_scratch = job_dir / "daily_scratch"
+        day = start_date
+        while day <= target_date:
+            if day not in available_dates:
+                print(f"[FFRM] daily risk map: skipping {day.isoformat()} (no FWI data)", flush=True)
+                day += timedelta(days=1)
+                continue
+            print(f"[FFRM] daily risk map: computing {day.isoformat()}", flush=True)
+            # export_image=True: the combine reads the exported FWI_Risk_Map.tif.
+            Fwi.f_w_index(
+                input_dir / "FWI",
+                output_folder=base_output_dir,
+                export_image=True,
+                show_plots=False,
+                target_date=day,
+                start_date=None,
+            )
+            day_dir = daily_scratch / day.isoformat()
+            day_dir.mkdir(parents=True, exist_ok=True)
+            day_outputs = _combine_layers(
+                raw_layer_paths,
+                output_reference,
+                day_dir,
+                day_dir / "risk.tif",
+                day_dir / "risk.png",
+                active_top_levels=active_top_levels,
+            )
+            shutil.copyfile(day_outputs["final_map"], layers_dir / f"risk_{day.isoformat()}.tif")
+            daily_risk_dates.append(day.isoformat())
+            day += timedelta(days=1)
+        shutil.rmtree(daily_scratch, ignore_errors=True)
+
     metadata = {
         "request_id": request_id,
         "context_buffer_m": context_buffer_m,
@@ -450,6 +523,7 @@ def run_static_aoi_for_geometry(
         "keep_intermediate": keep_intermediate,
         "active_top_levels": sorted(active_top_levels),
         "optional_layers": optional_layers or {},
+        "daily_risk_dates": daily_risk_dates,
     }
     if request_metadata:
         metadata.update(request_metadata)

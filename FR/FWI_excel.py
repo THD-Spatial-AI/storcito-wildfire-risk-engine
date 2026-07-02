@@ -5,6 +5,7 @@ import rasterio
 import matplotlib.pyplot as plt
 
 import FR.rutinas.FWI_Equations as Fwi
+from FR.FWI import FWI_CLASS_BOUNDS, rh_to_percent
 
 
 def convert_station_file_to_csv(input_path, output_csv):
@@ -56,16 +57,10 @@ def _to_numeric_series(series):
 def _classify_fwi(fwi_value):
     if pd.isna(fwi_value):
         return np.nan
-    if fwi_value <= 3:
-        return 1
-    elif fwi_value <= 13:
-        return 2
-    elif fwi_value <= 23:
-        return 3
-    elif fwi_value <= 28:
-        return 4
-    else:
-        return 5
+    for cls, bound in enumerate(FWI_CLASS_BOUNDS, start=1):
+        if fwi_value <= bound:
+            return cls
+    return 5
 
 
 def f_w_index_excel(
@@ -182,7 +177,8 @@ def f_w_index_excel(
         month = int(pd.to_datetime(row["date"]).month)
 
         temp_arr = np.array([temp], dtype=float)
-        rh_arr = np.array([rh], dtype=float)
+        # Station files use percent already; the guard only converts fractions.
+        rh_arr = rh_to_percent(np.array([rh], dtype=float))
         wind_arr = np.array([wind], dtype=float)
         rain_arr = np.array([rain], dtype=float)
         f0_arr = np.array([f0], dtype=float)

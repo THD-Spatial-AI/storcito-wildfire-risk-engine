@@ -17,6 +17,45 @@ import re
 
 FWI_DATE_RE = re.compile(r"_(\d{8})_\d{4}\.nc4\.nc$")
 
+# Moisture-code initialization for the FWI
+FWI_INIT_DEFAULTS = (85.0, 6.0, 15.0)
+
+
+def fwi_init_codes() -> tuple[float, float, float]:
+    try:
+        from FR.db_reconstruct import _pg_connect
+
+        with _pg_connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT ffmc, dmc, dc FROM fwi_init ORDER BY updated_at DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+        if row is not None:
+            ffmc, dmc, dc = (float(v) for v in row)
+            print(f"[FWI] init codes from fwi_init table: FFMC={ffmc} DMC={dmc} DC={dc}")
+            return ffmc, dmc, dc
+    except Exception:
+        # Missing table / no database (e.g. station-file offline runs): use standards.
+        pass
+    return FWI_INIT_DEFAULTS
+
+
+def rh_to_percent(rh):
+    """Normalize RH to percent: the WRF NetCDFs store a fraction, the FWI
+    equations expect percent; converts only clearly fractional data."""
+    import numpy as _np
+
+    arr = _np.asarray(rh, dtype=float)
+    finite = arr[_np.isfinite(arr)]
+    if finite.size and _np.nanmax(finite) <= 1.5:
+        return arr * 100.0
+    return arr
+
+
+# EFFIS pan-European danger-class upper bounds (classes 1-4; >38 = class 5,
+# EFFIS "extreme" merged in). Region-independent; validated vs EFFIS (Galicia).
+FWI_CLASS_BOUNDS = (5.2, 11.2, 21.3, 38.0)
+
 
 def _fwi_file_date(file: Path) -> date:
     """Extract the forecast/history date encoded in an FWI filename."""
@@ -147,14 +186,8 @@ def f_w_index(input_folder:str|Path,file_name:str='FWI_Risk_Map',output_folder:P
 
     print("Fire Weather Index Layer processing...")
 
-    # --------------------------------------------------------
-    # SCORING WINDOW vs RUN-UP
-    # --------------------------------------------------------
-    # The scoring window is the day(s) whose risk we report: a single target day
-    # (static) or the selected [start, target] range (dynamic). Earlier available
-    # days are processed only to spin up the FWI moisture codes (run-up) and are
-    # not scored. The reported map is the highest-FWI day within the window
-    # (peak-of-range), so a single day in either mode yields the same result.
+    # Scoring window = reported day(s); earlier days only spin up the moisture
+    # codes. The map is the highest-FWI day in the window (peak-of-range).
     score_end = target_date
     score_start = start_date if start_date is not None else target_date
 
@@ -165,9 +198,7 @@ def f_w_index(input_folder:str|Path,file_name:str='FWI_Risk_Map',output_folder:P
         raise ValueError("No netCDF files found in input folder")
 
     GRID_SIZE = 360
-    # The netCDF time dimension is hourly (step 0 = 01:00). Index 15 = 16:00, the
-    # single assessment hour (16:00–17:00 window) used for every variable so the
-    # run matches the static convention instead of averaging the whole day.
+    # Hourly steps start at 01:00; index 15 = the 16:00 assessment hour.
     HOUR_1600 = 15
 
     # Peak-of-range tracking: keep the scoring-window day with the highest mean FWI.
@@ -175,6 +206,9 @@ def f_w_index(input_folder:str|Path,file_name:str='FWI_Risk_Map',output_folder:P
     peak_mean = float("-inf")
     peak_date = None
     xf = yf = None
+    # FWI convention: rain = 24 h accumulation up to the assessment hour
+    # (previous day's post-16:00 tail + today through 16:00).
+    prev_rain_tail = None
 
     # --------------------------------------------------------
     # PROCESAMIENTO DE CADA ARCHIVO .NC
@@ -194,9 +228,16 @@ def f_w_index(input_folder:str|Path,file_name:str='FWI_Risk_Map',output_folder:P
             y_coord = ma.getdata(dataset["lat"])
 
             wind = ma.getdata(dataset["mod"][HOUR_1600])
-            rain = ma.getdata(dataset["prec"][HOUR_1600])  # 16:00–17:00 window only
             humidity = ma.getdata(dataset["rh"][HOUR_1600])
             temperature = ma.getdata(dataset["temp"][HOUR_1600])
+
+            # 24 h rain: today's hours through 16:00 + previous day's tail.
+            day_hours = min(n_hours, 24)
+            prec_day = ma.getdata(dataset["prec"][:day_hours])
+            rain = prec_day[: HOUR_1600 + 1].sum(axis=0)
+            if prev_rain_tail is not None:
+                rain = rain + prev_rain_tail
+            prev_rain_tail = prec_day[HOUR_1600 + 1 : day_hours].sum(axis=0)
 
             mes = nc.num2date(dataset["time"][0], dataset["time"].units).month
 
@@ -217,14 +258,15 @@ def f_w_index(input_folder:str|Path,file_name:str='FWI_Risk_Map',output_folder:P
         # Interpolación con conversión de unidades
         wind_m = griddata(coords, wind.flatten() * 3.6, grid_coords, method='nearest')  # m/s -> km/h
         rain_m = griddata(coords, rain.flatten(), grid_coords, method='nearest')
-        hum_m = griddata(coords, humidity.flatten(), grid_coords, method='nearest')
+        hum_m = griddata(coords, rh_to_percent(humidity).flatten(), grid_coords, method='nearest')
         temp_m = griddata(coords, temperature.flatten() - 273.15, grid_coords, method='nearest')  # K -> °C
 
         # Inicialización en el primer paso
         if id_file == 0:
-            f0 = np.full_like(hum_m, 85.0)
-            p0 = np.full_like(hum_m, 6.0)
-            d0 = np.full_like(hum_m, 15.0)
+            init_f, init_p, init_d = fwi_init_codes()
+            f0 = np.full_like(hum_m, init_f)
+            p0 = np.full_like(hum_m, init_p)
+            d0 = np.full_like(hum_m, init_d)
 
         # Cálculo de índices FWI
         f = Fwi.ffmc(temp_m, hum_m, wind_m, rain_m, f0) # type: ignore[name-defined]
@@ -277,11 +319,12 @@ def f_w_index(input_folder:str|Path,file_name:str='FWI_Risk_Map',output_folder:P
 
     fwi_clas = np.zeros_like(fwi_final, dtype="int32")
 
-    selection =[fwi_final <= 3,
-                (fwi_final > 3) & (fwi_final <= 13),
-                (fwi_final > 13) & (fwi_final <= 23),
-                (fwi_final > 23) & (fwi_final <= 28),
-                fwi_final > 28]
+    b1, b2, b3, b4 = FWI_CLASS_BOUNDS
+    selection =[fwi_final <= b1,
+                (fwi_final > b1) & (fwi_final <= b2),
+                (fwi_final > b2) & (fwi_final <= b3),
+                (fwi_final > b3) & (fwi_final <= b4),
+                fwi_final > b4]
 
     choices=[1, 2, 3, 4, 5]
 

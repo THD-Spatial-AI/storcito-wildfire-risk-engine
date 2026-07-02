@@ -60,8 +60,9 @@ def ffmc(temp, hum, wind, rain, f0) -> np.ndarray:
     ed = 0.942 * (hum**0.679) + 11.0 * np.exp((hum - 100.0) / 10.0) + \
          0.18 * (21.1 - temp) * (1.0 - np.exp(-0.115 * hum))
     
+    # Van Wagner eq. 5: exponent must be negative.
     ew = 0.618 * (hum**0.753) + 10.0 * np.exp((hum - 100.0) / 10.0) + \
-         0.18 * (21.1 - temp) * (1.0 - np.exp(0.115 * hum))
+         0.18 * (21.1 - temp) * (1.0 - np.exp(-0.115 * hum))
 
     m = np.copy(mr)
     

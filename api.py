@@ -137,6 +137,12 @@ class WildfireCalculationRequest(BaseModel):
     parameters: dict[str, Any] = Field(default_factory=dict)
 
 
+class FWIAreaSummaryRequest(BaseModel):
+    date: date
+    aoi: dict[str, Any]
+    hour_index: int = Field(default=15, ge=0, le=95)
+
+
 def _to_berlin_time(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=BERLIN_TZ)
@@ -720,6 +726,18 @@ def _run_wildfire_payload(payload: WildfireCalculationRequest, request: Request 
             "optional_layers": optional_layers or {},
         },
     )
+    weather_summary_path = _write_model_weather_summary(
+        Path(outputs["job_dir"]),
+        payload=payload,
+        target_date=target_date,
+        output_aoi=output_aoi,
+        start_date=start_date,
+        optional_layers=optional_layers,
+        user_inputs=user_inputs,
+    )
+    if weather_summary_path is not None:
+        outputs["weather_summary"] = str(weather_summary_path)
+
     enriched_outputs = _augment_with_urls(outputs, request)
 
     db_info, db_error = _store_results_to_db(
@@ -864,6 +882,7 @@ def _run_engine_job(
     """Reconstruct inputs from PostGIS into a per-request folder and run an engine."""
     cfg = ENGINE_SCRIPTS[engine]
     target_date = _wildfire_target_date(payload)
+    output_aoi = _wildfire_geometry(payload)
     clip_geom = _wildfire_clip_geometry_wgs84(payload)
 
     job_id, job_dir = _create_job_dir(payload)
@@ -912,6 +931,16 @@ def _run_engine_job(
         "continuous_map": str(output_dir / continuous),
         "job_dir": str(job_dir),
     }
+    weather_summary_path = _write_model_weather_summary(
+        output_dir,
+        payload=payload,
+        target_date=target_date,
+        output_aoi=output_aoi,
+        start_date=None,
+        optional_layers=_wildfire_optional_layers(payload),
+    )
+    if weather_summary_path is not None:
+        outputs["weather_summary"] = str(weather_summary_path)
     enriched = _augment_with_urls(outputs, request, root=JOBS_OUTPUT_ROOT, url_prefix="jobs")
 
     response: dict[str, Any] = {
@@ -939,7 +968,7 @@ def _run_engine_job(
             "lkr": payload.lkr,
         },
         aoi_wgs84=reproject_geometry(
-            _wildfire_geometry(payload), DEFAULT_PROJECTED_CRS, "EPSG:4326"
+            output_aoi, DEFAULT_PROJECTED_CRS, "EPSG:4326"
         ),
     )
     if db_info is not None:
@@ -1122,6 +1151,384 @@ def download_job_result(job_id: str, file_path: str):
     return FileResponse(target, media_type=media_type, filename=target.name)
 
 
+def _nanmean_float(values) -> float | None:
+    import numpy as np
+
+    arr = np.asarray(values, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return None
+    return float(np.nanmean(arr))
+
+
+def _circular_mean_degrees(values) -> float | None:
+    import numpy as np
+
+    arr = np.asarray(values, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return None
+    radians = np.deg2rad(arr)
+    sin_mean = float(np.nanmean(np.sin(radians)))
+    cos_mean = float(np.nanmean(np.cos(radians)))
+    if sin_mean == 0.0 and cos_mean == 0.0:
+        return None
+    return float((np.degrees(np.arctan2(sin_mean, cos_mean)) + 360.0) % 360.0)
+
+
+def _fwi_area_grid_indices(dataset, aoi_wgs84):
+    import numpy as np
+    from shapely.geometry import Point
+
+    lon_grid = np.asarray(dataset["lon"][:], dtype=float)
+    lat_grid = np.asarray(dataset["lat"][:], dtype=float)
+    minx, miny, maxx, maxy = aoi_wgs84.bounds
+    candidate_mask = (
+        (lon_grid >= minx)
+        & (lon_grid <= maxx)
+        & (lat_grid >= miny)
+        & (lat_grid <= maxy)
+    )
+    candidate_y, candidate_x = np.where(candidate_mask)
+
+    selected_y: list[int] = []
+    selected_x: list[int] = []
+    for grid_y, grid_x in zip(candidate_y, candidate_x):
+        point = Point(float(lon_grid[grid_y, grid_x]), float(lat_grid[grid_y, grid_x]))
+        if aoi_wgs84.covers(point):
+            selected_y.append(int(grid_y))
+            selected_x.append(int(grid_x))
+
+    reference_point = aoi_wgs84.representative_point()
+    if selected_y:
+        return (
+            np.asarray(selected_y, dtype=int),
+            np.asarray(selected_x, dtype=int),
+            {
+                "method": "aoi_grid_mean",
+                "sample_lon": float(reference_point.x),
+                "sample_lat": float(reference_point.y),
+                "sample_count": len(selected_y),
+            },
+        )
+
+    grid_y, grid_x, grid_lon, grid_lat = _nearest_fwi_grid_point(
+        dataset,
+        float(reference_point.x),
+        float(reference_point.y),
+    )
+    return (
+        np.asarray([grid_y], dtype=int),
+        np.asarray([grid_x], dtype=int),
+        {
+            "method": "nearest_grid_fallback",
+            "sample_lon": float(reference_point.x),
+            "sample_lat": float(reference_point.y),
+            "sample_count": 1,
+            "grid_lon": grid_lon,
+            "grid_lat": grid_lat,
+        },
+    )
+
+
+def _sample_fwi_area_from_db(
+    *,
+    target_date: date,
+    aoi_wgs84,
+    hour_index: int = 15,
+) -> dict[str, Any]:
+    """Summarise WRF/FWI weather over the model AOI from fwi_files.data."""
+    import numpy as np
+    import netCDF4 as nc
+    import FR.rutinas.FWI_Equations as Fwi
+    import FR.FWI as FwiModule
+    from FR.db_reconstruct import _pg_connect
+
+    f0 = None
+    dmc0 = None
+    dc0 = None
+    sample: dict[str, Any] | None = None
+    rows_seen = 0
+    grid_y_idx = None
+    grid_x_idx = None
+    area_info: dict[str, Any] | None = None
+    prev_rain_tail = None
+
+    with _pg_connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT fdate, filename, data FROM fwi_files "
+            "WHERE fdate IS NOT NULL AND fdate <= %s ORDER BY fdate",
+            (target_date,),
+        )
+        for fdate, filename, data in cur:
+            rows_seen += 1
+            with nc.Dataset("fwi_from_db.nc", memory=bytes(data)) as dataset:
+                n_hours = int(dataset["time"].shape[0])
+                if hour_index < 0 or hour_index >= n_hours:
+                    raise ValueError(f"hour_index must be between 0 and {n_hours - 1} for {filename}.")
+
+                if grid_y_idx is None or grid_x_idx is None:
+                    grid_y_idx, grid_x_idx, area_info = _fwi_area_grid_indices(dataset, aoi_wgs84)
+
+                selected_time = nc.num2date(dataset["time"][hour_index], dataset["time"].units)
+                month = int(nc.num2date(dataset["time"][0], dataset["time"].units).month)
+
+                temperature_k = np.asarray(dataset["temp"][hour_index, :, :], dtype=float)[grid_y_idx, grid_x_idx]
+                temperature_c = temperature_k - 273.15
+                relative_humidity = np.asarray(dataset["rh"][hour_index, :, :], dtype=float)[grid_y_idx, grid_x_idx]
+                wind_speed_mps = np.asarray(dataset["mod"][hour_index, :, :], dtype=float)[grid_y_idx, grid_x_idx]
+                wind_direction_deg = np.asarray(dataset["dir"][hour_index, :, :], dtype=float)[grid_y_idx, grid_x_idx]
+                # 24 h rain accumulation up to the assessment hour.
+                day_hours = min(n_hours, 24)
+                prec_day = np.asarray(dataset["prec"][:day_hours, :, :], dtype=float)[:, grid_y_idx, grid_x_idx]
+                precipitation_mm = np.nansum(prec_day[: hour_index + 1], axis=0)
+                if prev_rain_tail is not None:
+                    precipitation_mm = precipitation_mm + prev_rain_tail
+                prev_rain_tail = np.nansum(prec_day[hour_index + 1 : day_hours], axis=0)
+
+            if f0 is None:
+                init_f, init_p, init_d = FwiModule.fwi_init_codes()
+                f0 = np.full(relative_humidity.shape, init_f, dtype=float)
+                dmc0 = np.full(relative_humidity.shape, init_p, dtype=float)
+                dc0 = np.full(relative_humidity.shape, init_d, dtype=float)
+
+            wind_kmh = wind_speed_mps * 3.6
+            # FWI equations expect RH in percent; the NetCDF stores a fraction.
+            rh_pct = FwiModule.rh_to_percent(relative_humidity)
+            ffmc = Fwi.ffmc(temperature_c, rh_pct, wind_kmh, precipitation_mm, f0)
+            dmc = Fwi.dmc(temperature_c, rh_pct, precipitation_mm, dmc0, month)
+            dc = Fwi.dc(temperature_c, precipitation_mm, month, dc0)
+            isi = Fwi.isi(wind_kmh, ffmc)
+            bui = Fwi.bui(dmc, dc)
+            fwi = Fwi.fwi(isi, bui)
+
+            f0, dmc0, dc0 = ffmc, dmc, dc
+
+            if fdate == target_date:
+                sample = {
+                    "date": fdate.isoformat(),
+                    "filename": filename,
+                    "time": str(selected_time),
+                    "hour_index": hour_index,
+                    "method": area_info.get("method") if area_info else "aoi_grid_mean",
+                    "sample_count": area_info.get("sample_count") if area_info else int(relative_humidity.size),
+                    "sample_lon": area_info.get("sample_lon") if area_info else None,
+                    "sample_lat": area_info.get("sample_lat") if area_info else None,
+                    "grid_lon": area_info.get("grid_lon") if area_info else None,
+                    "grid_lat": area_info.get("grid_lat") if area_info else None,
+                    "temperature_k": _nanmean_float(temperature_k),
+                    "temperature_c": _nanmean_float(temperature_c),
+                    "relative_humidity": _nanmean_float(relative_humidity),
+                    "relative_humidity_pct": _nanmean_float(relative_humidity * 100.0),
+                    "wind_speed_mps": _nanmean_float(wind_speed_mps),
+                    "wind_speed_kmh": _nanmean_float(wind_kmh),
+                    "wind_direction_deg": _circular_mean_degrees(wind_direction_deg),
+                    "precipitation_mm": _nanmean_float(precipitation_mm),
+                    "ffmc": _nanmean_float(ffmc),
+                    "dmc": _nanmean_float(dmc),
+                    "dc": _nanmean_float(dc),
+                    "isi": _nanmean_float(isi),
+                    "bui": _nanmean_float(bui),
+                    "fwi": _nanmean_float(fwi),
+                    "runup_days": rows_seen,
+                    "source": "database:fwi_files.data",
+                }
+                break
+
+    if sample is None:
+        with _pg_connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT min(fdate), max(fdate) FROM fwi_files")
+            lo, hi = cur.fetchone()
+        raise ValueError(f"FWI date {target_date.isoformat()} is not available. Available range: {lo} .. {hi}.")
+
+    return sample
+
+
+def _weather_layer_enabled(optional_layers: dict[str, bool] | None) -> bool:
+    if optional_layers is None:
+        return True
+    return bool(optional_layers.get("weather_overlay", False))
+
+
+def _write_model_weather_summary(
+    job_dir: Path,
+    *,
+    payload: WildfireCalculationRequest,
+    target_date: date,
+    output_aoi,
+    start_date: date | None,
+    optional_layers: dict[str, bool] | None,
+    user_inputs: dict[str, Path] | None = None,
+) -> Path | None:
+    """Write model-scoped fire-weather metadata into the result package."""
+    if not _weather_layer_enabled(optional_layers):
+        return None
+    if user_inputs and user_inputs.get("station_data"):
+        # Uploaded station data replaces DB weather for FWI; avoid labeling DB
+        # weather as the model's actual weather input.
+        return None
+
+    try:
+        aoi_wgs84 = reproject_geometry(output_aoi, DEFAULT_PROJECTED_CRS, "EPSG:4326")
+        summary = _sample_fwi_area_from_db(target_date=target_date, aoi_wgs84=aoi_wgs84)
+        summary.update(
+            {
+                "summary_type": "model_fire_weather",
+                "model_id": payload.model_id,
+                "source_model_id": str(payload.parameters.get("source_model_id", payload.model_id)),
+                "session_id": payload.session_id,
+                "calculation_mode": _wildfire_calculation_mode(payload),
+                "fwi_start_date": start_date.isoformat() if start_date else None,
+                "fwi_end_date": target_date.isoformat(),
+                "included_in_risk": True,
+            }
+        )
+        job_dir.mkdir(parents=True, exist_ok=True)
+        path = job_dir / "weather_summary.json"
+        path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        return path
+    except Exception as exc:  # noqa: BLE001 - result should still complete
+        logger.warning("STORCITO weather summary failed: %s", exc)
+        try:
+            (job_dir / "weather_summary_error.json").write_text(
+                json.dumps({"error": str(exc), "source": "database:fwi_files.data"}, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+        return None
+
+
+def _nearest_fwi_grid_point(dataset, lon: float, lat: float) -> tuple[int, int, float, float]:
+    import numpy as np
+
+    lon_grid = np.asarray(dataset["lon"][:])
+    lat_grid = np.asarray(dataset["lat"][:])
+    distance = (lon_grid - lon) ** 2 + (lat_grid - lat) ** 2
+    grid_y, grid_x = np.unravel_index(np.nanargmin(distance), distance.shape)
+    return int(grid_y), int(grid_x), float(lon_grid[grid_y, grid_x]), float(lat_grid[grid_y, grid_x])
+
+
+def _fwi_scalar(value) -> float:
+    import numpy as np
+
+    return float(np.asarray(value).squeeze())
+
+
+def _sample_fwi_point_from_db(
+    *,
+    target_date: date,
+    lon: float,
+    lat: float,
+    hour_index: int = 15,
+    include_runup: bool = True,
+) -> dict[str, Any]:
+    """Sample one WRF/FWI point from the fwi_files DB blob table.
+
+    The engine uses hour index 15 (16:00) and spins up FFMC/DMC/DC over all
+    available prior days. This follows the same DB-backed source path and avoids
+    reading the mounted INPUT/FWI directory directly.
+    """
+    import numpy as np
+    import netCDF4 as nc
+    import FR.rutinas.FWI_Equations as Fwi
+    import FR.FWI as FwiModule
+    from FR.db_reconstruct import _pg_connect
+
+    query = (
+        "SELECT fdate, filename, data FROM fwi_files "
+        "WHERE fdate IS NOT NULL AND fdate <= %s ORDER BY fdate"
+        if include_runup
+        else "SELECT fdate, filename, data FROM fwi_files WHERE fdate = %s ORDER BY fdate"
+    )
+
+    init_f, init_p, init_d = FwiModule.fwi_init_codes()
+    f0 = np.array([init_f], dtype=float)
+    dmc0 = np.array([init_p], dtype=float)
+    dc0 = np.array([init_d], dtype=float)
+    sample: dict[str, Any] | None = None
+    rows_seen = 0
+    prev_rain_tail = 0.0
+
+    with _pg_connect() as conn, conn.cursor() as cur:
+        cur.execute(query, (target_date,))
+        for fdate, filename, data in cur:
+            rows_seen += 1
+            with nc.Dataset("fwi_from_db.nc", memory=bytes(data)) as dataset:
+                n_hours = int(dataset["time"].shape[0])
+                if hour_index < 0 or hour_index >= n_hours:
+                    raise ValueError(f"hour_index must be between 0 and {n_hours - 1} for {filename}.")
+
+                grid_y, grid_x, grid_lon, grid_lat = _nearest_fwi_grid_point(dataset, lon, lat)
+                selected_time = nc.num2date(dataset["time"][hour_index], dataset["time"].units)
+                month = int(nc.num2date(dataset["time"][0], dataset["time"].units).month)
+
+                temperature_k = float(dataset["temp"][hour_index, grid_y, grid_x])
+                temperature_c = temperature_k - 273.15
+                relative_humidity = float(dataset["rh"][hour_index, grid_y, grid_x])
+                wind_speed_mps = float(dataset["mod"][hour_index, grid_y, grid_x])
+                wind_direction_deg = float(dataset["dir"][hour_index, grid_y, grid_x])
+                # 24 h rain accumulation up to the assessment hour.
+                day_hours = min(n_hours, 24)
+                prec_day = np.asarray(dataset["prec"][:day_hours, grid_y, grid_x], dtype=float)
+                precipitation_mm = float(np.nansum(prec_day[: hour_index + 1])) + prev_rain_tail
+                prev_rain_tail = float(np.nansum(prec_day[hour_index + 1 : day_hours]))
+
+            temperature_arr = np.array([temperature_c], dtype=float)
+            # FWI equations expect RH in percent; the NetCDF stores a fraction.
+            humidity_arr = FwiModule.rh_to_percent(np.array([relative_humidity], dtype=float))
+            wind_arr = np.array([wind_speed_mps * 3.6], dtype=float)
+            rain_arr = np.array([precipitation_mm], dtype=float)
+
+            ffmc = Fwi.ffmc(temperature_arr, humidity_arr, wind_arr, rain_arr, f0)
+            dmc = Fwi.dmc(temperature_arr, humidity_arr, rain_arr, dmc0, month)
+            dc = Fwi.dc(temperature_arr, rain_arr, month, dc0)
+            isi = Fwi.isi(wind_arr, ffmc)
+            bui = Fwi.bui(dmc, dc)
+            fwi = Fwi.fwi(isi, bui)
+
+            f0, dmc0, dc0 = ffmc, dmc, dc
+
+            if fdate == target_date:
+                sample = {
+                    "date": fdate.isoformat(),
+                    "filename": filename,
+                    "time": str(selected_time),
+                    "hour_index": hour_index,
+                    "requested_lon": lon,
+                    "requested_lat": lat,
+                    "grid_lon": grid_lon,
+                    "grid_lat": grid_lat,
+                    "grid_x": grid_x,
+                    "grid_y": grid_y,
+                    "temperature_k": temperature_k,
+                    "temperature_c": temperature_c,
+                    "relative_humidity": relative_humidity,
+                    "relative_humidity_pct": relative_humidity * 100.0,
+                    "wind_speed_mps": wind_speed_mps,
+                    "wind_speed_kmh": wind_speed_mps * 3.6,
+                    "wind_direction_deg": wind_direction_deg,
+                    "precipitation_mm": precipitation_mm,
+                    "ffmc": _fwi_scalar(ffmc),
+                    "dmc": _fwi_scalar(dmc),
+                    "dc": _fwi_scalar(dc),
+                    "isi": _fwi_scalar(isi),
+                    "bui": _fwi_scalar(bui),
+                    "fwi": _fwi_scalar(fwi),
+                    "runup_days": rows_seen if include_runup else 1,
+                    "source": "database:fwi_files.data",
+                }
+                break
+
+    if sample is None:
+        with _pg_connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT min(fdate), max(fdate) FROM fwi_files")
+            lo, hi = cur.fetchone()
+        raise ValueError(f"FWI date {target_date.isoformat()} is not available. Available range: {lo} .. {hi}.")
+
+    return sample
+
+
 def _raise_db_http_error(exc: Exception) -> None:
     """Map db_catalog errors to HTTP responses (no db_catalog import needed here)."""
     if type(exc).__name__ == "UnknownTable":
@@ -1134,6 +1541,46 @@ def _raise_db_http_error(exc: Exception) -> None:
             detail="Database driver unavailable (psycopg2 not installed; rebuild the image).",
         ) from exc
     raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/fwi/area")
+def fwi_area_summary(payload: FWIAreaSummaryRequest):
+    """Return DB-backed WRF/FWI weather and moisture-code values over an AOI."""
+    try:
+        geometry = _unwrap_geojson_geometry(payload.aoi)
+        if geometry is None:
+            raise ValueError("aoi must be a GeoJSON geometry, Feature, or FeatureCollection.")
+        aoi_wgs84 = shape(geometry)
+        if aoi_wgs84.is_empty:
+            raise ValueError("aoi geometry is empty.")
+        return _sample_fwi_area_from_db(
+            target_date=payload.date,
+            aoi_wgs84=aoi_wgs84,
+            hour_index=payload.hour_index,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _raise_db_http_error(exc)
+
+
+@app.get("/fwi/point")
+def fwi_point_sample(
+    fdate: date = Query(..., alias="date"),
+    lon: float = Query(..., ge=-180, le=180),
+    lat: float = Query(..., ge=-90, le=90),
+    hour_index: int = Query(default=15, ge=0, le=95),
+    include_runup: bool = Query(default=True),
+):
+    """Return DB-backed WRF/FWI weather and moisture-code values at one point."""
+    try:
+        return _sample_fwi_point_from_db(
+            target_date=fdate,
+            lon=lon,
+            lat=lat,
+            hour_index=hour_index,
+            include_runup=include_runup,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _raise_db_http_error(exc)
 
 
 @app.get("/db/tables")

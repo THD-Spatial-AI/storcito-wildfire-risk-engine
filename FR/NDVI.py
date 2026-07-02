@@ -44,15 +44,17 @@ def ndvi(b4:str|Path,b8:str|Path,output_folder:str='OUTPUT',export_image:bool=Fa
 
     ndvi = np.array( (band8 - band4) / (band8 + band4) )
     
+    # Data-driven bins (FIRMS fire history): shrub 0.2-0.4 burns most,
+    # bare (<=0.2) and lush (>0.8) least.
     condiciones = [
-        ndvi <= 0.27,
-        (ndvi > 0.27) & (ndvi <= 0.40),
-        (ndvi > 0.40) & (ndvi <= 0.54),
-        (ndvi > 0.54) & (ndvi <= 0.67),
-        ndvi > 0.67
+        ndvi <= 0.2,
+        (ndvi > 0.2) & (ndvi <= 0.4),
+        (ndvi > 0.4) & (ndvi <= 0.6),
+        (ndvi > 0.6) & (ndvi <= 0.8),
+        ndvi > 0.8
     ]
 
-    valores = [5, 4, 3, 2, 1]
+    valores = [1, 5, 3, 4, 2]
 
     reclasificado = np.select(condiciones, valores, default=0).astype('int32')
     
@@ -98,15 +100,17 @@ def ndvi_folder(input_folder:str='INPUT',output_folder:str='OUTPUT',indices:list
     ndvi =np.array([(info['B08'][i] - info['B04'][i]) / (info['B08'][i] + info['B04'][i]) 
            for i in indices])
 
+    # Data-driven bins (FIRMS fire history): shrub 0.2-0.4 burns most,
+    # bare (<=0.2) and lush (>0.8) least.
     condiciones = [
-        ndvi <= 0.27,
-        (ndvi > 0.27) & (ndvi <= 0.40),
-        (ndvi > 0.40) & (ndvi <= 0.54),
-        (ndvi > 0.54) & (ndvi <= 0.67),
-        ndvi > 0.67
+        ndvi <= 0.2,
+        (ndvi > 0.2) & (ndvi <= 0.4),
+        (ndvi > 0.4) & (ndvi <= 0.6),
+        (ndvi > 0.6) & (ndvi <= 0.8),
+        ndvi > 0.8
     ]
 
-    valores = [5, 4, 3, 2, 1]
+    valores = [1, 5, 3, 4, 2]
 
     reclasificados = np.select(condiciones, valores, default=0).astype('int32')
 

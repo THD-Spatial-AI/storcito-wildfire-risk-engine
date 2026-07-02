@@ -48,8 +48,10 @@ def mdt(ruta_mdt,output_folder:str|Path=Path('OUTPUT'),
     
     # reclasificaciones
     print("Reclasificando MDT...")
+    # Data-driven (FIRMS): fires concentrate at mid/upper elevations;
+    # lowlands <=200 m rarely burn.
     mdt_bins = [0, 200, 400, 600, 800]
-    mdt_classes = np.array([0, 5, 4, 3, 2, 1], dtype='int32')
+    mdt_classes = np.array([0, 1, 4, 5, 4, 5], dtype='int32')
     mdt_re = mdt_classes[np.digitize(mdt, mdt_bins, right=True)]
 
     fig_mdt, ax_mdt = default_imshow(mdt_re, 'MDT Risk Map', {'label':'Risk'})
