@@ -1176,12 +1176,10 @@ def _circular_mean_degrees(values) -> float | None:
     return float((np.degrees(np.arctan2(sin_mean, cos_mean)) + 360.0) % 360.0)
 
 
-def _fwi_area_grid_indices(dataset, aoi_wgs84):
+def _fwi_area_grid_indices(lon_grid, lat_grid, aoi_wgs84):
     import numpy as np
     from shapely.geometry import Point
 
-    lon_grid = np.asarray(dataset["lon"][:], dtype=float)
-    lat_grid = np.asarray(dataset["lat"][:], dtype=float)
     minx, miny, maxx, maxy = aoi_wgs84.bounds
     candidate_mask = (
         (lon_grid >= minx)
@@ -1213,7 +1211,8 @@ def _fwi_area_grid_indices(dataset, aoi_wgs84):
         )
 
     grid_y, grid_x, grid_lon, grid_lat = _nearest_fwi_grid_point(
-        dataset,
+        lon_grid,
+        lat_grid,
         float(reference_point.x),
         float(reference_point.y),
     )
@@ -1231,15 +1230,66 @@ def _fwi_area_grid_indices(dataset, aoi_wgs84):
     )
 
 
+def _fwi_slice(cur, fdate, hour_index: int) -> dict[str, Any] | None:
+    """Per-day extract of the FWI NetCDF, cached in the small fwi_slices table
+    so weather sampling never re-reads the ~240 MB blobs after the first pass."""
+    import io
+
+    import numpy as np
+    import netCDF4 as nc
+
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS fwi_slices (
+               fdate date NOT NULL,
+               hour_index int NOT NULL,
+               data bytea NOT NULL,
+               PRIMARY KEY (fdate, hour_index)
+           )"""
+    )
+    cur.execute("SELECT data FROM fwi_slices WHERE fdate = %s AND hour_index = %s", (fdate, hour_index))
+    row = cur.fetchone()
+    if row is not None:
+        loaded = np.load(io.BytesIO(bytes(row[0])), allow_pickle=False)
+        return {key: loaded[key] for key in loaded.files}
+
+    cur.execute("SELECT data FROM fwi_files WHERE fdate = %s ORDER BY filename LIMIT 1", (fdate,))
+    blob = cur.fetchone()
+    if blob is None:
+        return None
+    with nc.Dataset("fwi_from_db.nc", memory=bytes(blob[0])) as dataset:
+        n_hours = int(dataset["time"].shape[0])
+        if hour_index < 0 or hour_index >= n_hours:
+            raise ValueError(f"hour_index must be between 0 and {n_hours - 1} for {fdate}.")
+        day_hours = min(n_hours, 24)
+        payload = {
+            "lon": np.asarray(dataset["lon"][:], dtype=np.float32),
+            "lat": np.asarray(dataset["lat"][:], dtype=np.float32),
+            "temp": np.asarray(dataset["temp"][hour_index], dtype=np.float32),
+            "rh": np.asarray(dataset["rh"][hour_index], dtype=np.float32),
+            "mod": np.asarray(dataset["mod"][hour_index], dtype=np.float32),
+            "dir": np.asarray(dataset["dir"][hour_index], dtype=np.float32),
+            "prec_day": np.asarray(dataset["prec"][:day_hours], dtype=np.float32),
+            "month": np.int32(nc.num2date(dataset["time"][0], dataset["time"].units).month),
+            "time_str": np.str_(str(nc.num2date(dataset["time"][hour_index], dataset["time"].units))),
+        }
+    buf = io.BytesIO()
+    np.savez_compressed(buf, **payload)
+    cur.execute(
+        "INSERT INTO fwi_slices (fdate, hour_index, data) VALUES (%s, %s, %s) "
+        "ON CONFLICT (fdate, hour_index) DO NOTHING",
+        (fdate, hour_index, buf.getvalue()),
+    )
+    return payload
+
+
 def _sample_fwi_area_from_db(
     *,
     target_date: date,
     aoi_wgs84,
     hour_index: int = 15,
 ) -> dict[str, Any]:
-    """Summarise WRF/FWI weather over the model AOI from fwi_files.data."""
+    """Summarise WRF/FWI weather over the model AOI from cached daily slices."""
     import numpy as np
-    import netCDF4 as nc
     import FR.rutinas.FWI_Equations as Fwi
     import FR.FWI as FwiModule
     from FR.db_reconstruct import _pg_connect
@@ -1256,35 +1306,37 @@ def _sample_fwi_area_from_db(
 
     with _pg_connect() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT fdate, filename, data FROM fwi_files "
-            "WHERE fdate IS NOT NULL AND fdate <= %s ORDER BY fdate",
+            "SELECT DISTINCT ON (fdate) fdate, filename FROM fwi_files "
+            "WHERE fdate IS NOT NULL AND fdate <= %s ORDER BY fdate, filename",
             (target_date,),
         )
-        for fdate, filename, data in cur:
+        days = cur.fetchall()
+        for fdate, filename in days:
+            slice_data = _fwi_slice(cur, fdate, hour_index)
+            if slice_data is None:
+                continue
             rows_seen += 1
-            with nc.Dataset("fwi_from_db.nc", memory=bytes(data)) as dataset:
-                n_hours = int(dataset["time"].shape[0])
-                if hour_index < 0 or hour_index >= n_hours:
-                    raise ValueError(f"hour_index must be between 0 and {n_hours - 1} for {filename}.")
 
-                if grid_y_idx is None or grid_x_idx is None:
-                    grid_y_idx, grid_x_idx, area_info = _fwi_area_grid_indices(dataset, aoi_wgs84)
+            if grid_y_idx is None or grid_x_idx is None:
+                grid_y_idx, grid_x_idx, area_info = _fwi_area_grid_indices(
+                    np.asarray(slice_data["lon"], dtype=float),
+                    np.asarray(slice_data["lat"], dtype=float),
+                    aoi_wgs84,
+                )
 
-                selected_time = nc.num2date(dataset["time"][hour_index], dataset["time"].units)
-                month = int(nc.num2date(dataset["time"][0], dataset["time"].units).month)
-
-                temperature_k = np.asarray(dataset["temp"][hour_index, :, :], dtype=float)[grid_y_idx, grid_x_idx]
-                temperature_c = temperature_k - 273.15
-                relative_humidity = np.asarray(dataset["rh"][hour_index, :, :], dtype=float)[grid_y_idx, grid_x_idx]
-                wind_speed_mps = np.asarray(dataset["mod"][hour_index, :, :], dtype=float)[grid_y_idx, grid_x_idx]
-                wind_direction_deg = np.asarray(dataset["dir"][hour_index, :, :], dtype=float)[grid_y_idx, grid_x_idx]
-                # 24 h rain accumulation up to the assessment hour.
-                day_hours = min(n_hours, 24)
-                prec_day = np.asarray(dataset["prec"][:day_hours, :, :], dtype=float)[:, grid_y_idx, grid_x_idx]
-                precipitation_mm = np.nansum(prec_day[: hour_index + 1], axis=0)
-                if prev_rain_tail is not None:
-                    precipitation_mm = precipitation_mm + prev_rain_tail
-                prev_rain_tail = np.nansum(prec_day[hour_index + 1 : day_hours], axis=0)
+            month = int(slice_data["month"])
+            temperature_k = np.asarray(slice_data["temp"], dtype=float)[grid_y_idx, grid_x_idx]
+            temperature_c = temperature_k - 273.15
+            relative_humidity = np.asarray(slice_data["rh"], dtype=float)[grid_y_idx, grid_x_idx]
+            wind_speed_mps = np.asarray(slice_data["mod"], dtype=float)[grid_y_idx, grid_x_idx]
+            wind_direction_deg = np.asarray(slice_data["dir"], dtype=float)[grid_y_idx, grid_x_idx]
+            # 24 h rain accumulation up to the assessment hour.
+            prec_day = np.asarray(slice_data["prec_day"], dtype=float)[:, grid_y_idx, grid_x_idx]
+            day_hours = prec_day.shape[0]
+            precipitation_mm = np.nansum(prec_day[: hour_index + 1], axis=0)
+            if prev_rain_tail is not None:
+                precipitation_mm = precipitation_mm + prev_rain_tail
+            prev_rain_tail = np.nansum(prec_day[hour_index + 1 : day_hours], axis=0)
 
             if f0 is None:
                 init_f, init_p, init_d = FwiModule.fwi_init_codes()
@@ -1308,7 +1360,7 @@ def _sample_fwi_area_from_db(
                 sample = {
                     "date": fdate.isoformat(),
                     "filename": filename,
-                    "time": str(selected_time),
+                    "time": str(slice_data["time_str"]),
                     "hour_index": hour_index,
                     "method": area_info.get("method") if area_info else "aoi_grid_mean",
                     "sample_count": area_info.get("sample_count") if area_info else int(relative_humidity.size),
@@ -1331,7 +1383,7 @@ def _sample_fwi_area_from_db(
                     "bui": _nanmean_float(bui),
                     "fwi": _nanmean_float(fwi),
                     "runup_days": rows_seen,
-                    "source": "database:fwi_files.data",
+                    "source": "database:fwi_slices",
                 }
                 break
 
@@ -1399,11 +1451,9 @@ def _write_model_weather_summary(
         return None
 
 
-def _nearest_fwi_grid_point(dataset, lon: float, lat: float) -> tuple[int, int, float, float]:
+def _nearest_fwi_grid_point(lon_grid, lat_grid, lon: float, lat: float) -> tuple[int, int, float, float]:
     import numpy as np
 
-    lon_grid = np.asarray(dataset["lon"][:])
-    lat_grid = np.asarray(dataset["lat"][:])
     distance = (lon_grid - lon) ** 2 + (lat_grid - lat) ** 2
     grid_y, grid_x = np.unravel_index(np.nanargmin(distance), distance.shape)
     return int(grid_y), int(grid_x), float(lon_grid[grid_y, grid_x]), float(lat_grid[grid_y, grid_x])
@@ -1423,23 +1473,17 @@ def _sample_fwi_point_from_db(
     hour_index: int = 15,
     include_runup: bool = True,
 ) -> dict[str, Any]:
-    """Sample one WRF/FWI point from the fwi_files DB blob table.
-
-    The engine uses hour index 15 (16:00) and spins up FFMC/DMC/DC over all
-    available prior days. This follows the same DB-backed source path and avoids
-    reading the mounted INPUT/FWI directory directly.
-    """
+    """Sample one WRF/FWI point from the cached daily slices (see _fwi_slice)."""
     import numpy as np
-    import netCDF4 as nc
     import FR.rutinas.FWI_Equations as Fwi
     import FR.FWI as FwiModule
     from FR.db_reconstruct import _pg_connect
 
     query = (
-        "SELECT fdate, filename, data FROM fwi_files "
-        "WHERE fdate IS NOT NULL AND fdate <= %s ORDER BY fdate"
+        "SELECT DISTINCT ON (fdate) fdate, filename FROM fwi_files "
+        "WHERE fdate IS NOT NULL AND fdate <= %s ORDER BY fdate, filename"
         if include_runup
-        else "SELECT fdate, filename, data FROM fwi_files WHERE fdate = %s ORDER BY fdate"
+        else "SELECT DISTINCT ON (fdate) fdate, filename FROM fwi_files WHERE fdate = %s ORDER BY fdate, filename"
     )
 
     init_f, init_p, init_d = FwiModule.fwi_init_codes()
@@ -1449,30 +1493,37 @@ def _sample_fwi_point_from_db(
     sample: dict[str, Any] | None = None
     rows_seen = 0
     prev_rain_tail = 0.0
+    grid = None
 
     with _pg_connect() as conn, conn.cursor() as cur:
         cur.execute(query, (target_date,))
-        for fdate, filename, data in cur:
+        days = cur.fetchall()
+        for fdate, filename in days:
+            slice_data = _fwi_slice(cur, fdate, hour_index)
+            if slice_data is None:
+                continue
             rows_seen += 1
-            with nc.Dataset("fwi_from_db.nc", memory=bytes(data)) as dataset:
-                n_hours = int(dataset["time"].shape[0])
-                if hour_index < 0 or hour_index >= n_hours:
-                    raise ValueError(f"hour_index must be between 0 and {n_hours - 1} for {filename}.")
 
-                grid_y, grid_x, grid_lon, grid_lat = _nearest_fwi_grid_point(dataset, lon, lat)
-                selected_time = nc.num2date(dataset["time"][hour_index], dataset["time"].units)
-                month = int(nc.num2date(dataset["time"][0], dataset["time"].units).month)
+            if grid is None:
+                grid = _nearest_fwi_grid_point(
+                    np.asarray(slice_data["lon"], dtype=float),
+                    np.asarray(slice_data["lat"], dtype=float),
+                    lon,
+                    lat,
+                )
+            grid_y, grid_x, grid_lon, grid_lat = grid
 
-                temperature_k = float(dataset["temp"][hour_index, grid_y, grid_x])
-                temperature_c = temperature_k - 273.15
-                relative_humidity = float(dataset["rh"][hour_index, grid_y, grid_x])
-                wind_speed_mps = float(dataset["mod"][hour_index, grid_y, grid_x])
-                wind_direction_deg = float(dataset["dir"][hour_index, grid_y, grid_x])
-                # 24 h rain accumulation up to the assessment hour.
-                day_hours = min(n_hours, 24)
-                prec_day = np.asarray(dataset["prec"][:day_hours, grid_y, grid_x], dtype=float)
-                precipitation_mm = float(np.nansum(prec_day[: hour_index + 1])) + prev_rain_tail
-                prev_rain_tail = float(np.nansum(prec_day[hour_index + 1 : day_hours]))
+            month = int(slice_data["month"])
+            temperature_k = float(slice_data["temp"][grid_y, grid_x])
+            temperature_c = temperature_k - 273.15
+            relative_humidity = float(slice_data["rh"][grid_y, grid_x])
+            wind_speed_mps = float(slice_data["mod"][grid_y, grid_x])
+            wind_direction_deg = float(slice_data["dir"][grid_y, grid_x])
+            # 24 h rain accumulation up to the assessment hour.
+            prec_day = np.asarray(slice_data["prec_day"], dtype=float)[:, grid_y, grid_x]
+            day_hours = prec_day.shape[0]
+            precipitation_mm = float(np.nansum(prec_day[: hour_index + 1])) + prev_rain_tail
+            prev_rain_tail = float(np.nansum(prec_day[hour_index + 1 : day_hours]))
 
             temperature_arr = np.array([temperature_c], dtype=float)
             # FWI equations expect RH in percent; the NetCDF stores a fraction.
@@ -1493,7 +1544,7 @@ def _sample_fwi_point_from_db(
                 sample = {
                     "date": fdate.isoformat(),
                     "filename": filename,
-                    "time": str(selected_time),
+                    "time": str(slice_data["time_str"]),
                     "hour_index": hour_index,
                     "requested_lon": lon,
                     "requested_lat": lat,
@@ -1516,7 +1567,7 @@ def _sample_fwi_point_from_db(
                     "bui": _fwi_scalar(bui),
                     "fwi": _fwi_scalar(fwi),
                     "runup_days": rows_seen if include_runup else 1,
-                    "source": "database:fwi_files.data",
+                    "source": "database:fwi_slices",
                 }
                 break
 
