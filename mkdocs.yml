@@ -13,6 +13,8 @@ edit_uri: edit/main/docs/
 # Theme configuration
 theme:
   name: material
+  favicon: assets/logos/favicon.svg
+  logo: assets/logos/spatialai-mark-blue-dark.svg
   features:
     - announce.dismiss
     - content.action.edit
