@@ -20,7 +20,13 @@ mkdir -p "$OUT_DIR" "$DEM_DIR"
 echo "==> exporting public.$TABLE from PostGIS to $DEM"
 docker compose -f "$ROOT/docker-compose.yml" up -d storcito-api-1 >/dev/null
 docker compose -f "$ROOT/docker-compose.yml" exec -T -w /app storcito-api-1 \
-  micromamba run -n storcito python -c "import FR.db_reconstruct as d; d.export_raster_table('$TABLE', '/app/OUTPUT/terrain/${NAME}_dem.tif')"
+  micromamba run -n storcito python -c "
+import rasterio
+import FR.db_reconstruct as d
+with rasterio.open(d._gdal_raster_dsn('$TABLE')) as src:
+    srs = src.crs.to_string()
+d.export_raster_table('$TABLE', '/app/OUTPUT/terrain/${NAME}_dem.tif', target_srs=srs)
+"
 
 echo "==> generating quantized-mesh tiles (-N: per-vertex normals for lighting)"
 docker run --rm -v "$DEM_DIR":/dem:ro -v "$OUT_DIR":/out "$IMG" \
