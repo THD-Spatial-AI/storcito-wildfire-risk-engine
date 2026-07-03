@@ -30,12 +30,13 @@ docker compose -f "$ROOT/docker-compose.yml" exec -T geotools sh -c '
   set -e
   cd /data/OUTPUT/satellite
   BBOX_3857=$(python3 /data/scripts/satellite_scenes.py --bbox-3857 '"$TABLE"')
+  # gdalwarp reprojects heterogeneous inputs itself (scenes straddle the UTM
+  # 29/30 boundary here; gdalbuildvrt would skip the zone-30 ones).
   xargs -a scene_urls.txt -I{} echo "/vsicurl/{}" > vsicurl_list.txt
-  gdalbuildvrt -q -input_file_list vsicurl_list.txt mosaic.vrt
   gdalwarp -q -overwrite -t_srs EPSG:3857 -te $BBOX_3857 -tr '"$RES"' '"$RES"' \
     -r bilinear -multi -wo NUM_THREADS=4 -co COMPRESS=JPEG -co TILED=YES \
     --config GDAL_HTTP_MAX_RETRY 5 --config GDAL_HTTP_RETRY_DELAY 3 \
-    mosaic.vrt mosaic_3857.tif
+    $(sed 's/^/ /' vsicurl_list.txt | tr -d '\n') mosaic_3857.tif
 '
 
 echo "==> 3/3 tiling (XYZ z$ZOOMS)"
