@@ -15,7 +15,7 @@ LIMIT ?=
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build up down restart logs shell ps clean rebuild seed seed-gis seed-files terrain terrain-up
+.PHONY: help build up down restart logs shell ps clean rebuild seed seed-gis seed-files terrain terrain-up satellite
 
 help:
 	@echo "STORCITO - common targets"
@@ -33,6 +33,7 @@ help:
 	@echo "  make clean     Down + remove volumes and orphans"
 	@echo "  make terrain   Build 3D terrain tiles from the PostGIS dtm and serve them"
 	@echo "  make terrain-up Start only the terrain tile server"
+	@echo "  make satellite Build the self-hosted Sentinel-2 basemap tiles"
 
 seed: seed-gis seed-files
 
@@ -79,4 +80,8 @@ terrain:
 	$(COMPOSE) --profile terrain up -d terrain
 
 terrain-up:
+	$(COMPOSE) --profile terrain up -d terrain
+
+satellite:
+	bash scripts/build-satellite.sh
 	$(COMPOSE) --profile terrain up -d terrain
