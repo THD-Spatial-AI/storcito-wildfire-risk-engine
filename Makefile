@@ -5,7 +5,7 @@ API_SERVICES ?= storcito-api-1 storcito-api-2 storcito-api-3 storcito-api-4
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build up down restart logs shell ps clean rebuild terrain-up publish-tiles borders sentinel clc fwi hist hist-scenes infra dtm lst twi fuels mdt
+.PHONY: help build up down restart logs shell ps clean rebuild terrain-up publish-tiles borders sentinel clc fwi hist hist-scenes infra dtm lst twi fuels mdt iuf
 
 help:
 	@echo "STORCITO - common targets"
@@ -23,6 +23,7 @@ help:
 	@echo "Data pipeline (fetch + seed into PostGIS):"
 	@echo "  make sentinel [YEAR] [MONTH]            Sentinel-2 weekly mosaics (default: current season to date)"
 	@echo "  make clc [YEAR=2023]                CLC+ Backbone 10m land cover"
+	@echo "  make iuf                            CORINE CLC2018 vector -> iuf (WUI input)"
 	@echo "  make fwi [START=] [END=]            MeteoGalicia weather (default: yesterday; START only = through latest)"
 	@echo "  make hist [YEAR]                    NASA FIRMS hotspots (default: current season to date)"
 	@echo "  make hist-scenes PRE=... POST=...   Sentinel B8A/B12 dNBR scene pair into hist_scenes"
@@ -102,6 +103,14 @@ clc:
 	  for z in extracted/Results/*.zip; do unzip -o -q "$$z" "*.tif" -d tiles; done
 	@$(COMPOSE) exec -T geotools python3 /data/scripts/load_localhost.py load-clcplus \
 	  --dir /data/data/OUTPUT/source_data/clc/clcplus-$(YEAR)/raster/tiles --table clcplus_$(YEAR)
+
+iuf:
+	@$(ENV_RUN) python3 scripts/fetch_sources.py clc --dataset clc2018 --format vector \
+	  --bbox "-10.293,41.348,-5.749,44.636"
+	@cd data/OUTPUT/source_data/clc/clc2018/vector && \
+	  zip=$$(ls -t *.zip | head -1) && rm -rf extracted && unzip -o -q $$zip -d extracted
+	@$(COMPOSE) exec -T geotools bash -c 'gdb=$$(find /data/data/OUTPUT/source_data/clc/clc2018/vector/extracted -name "*.gdb" -type d | head -1) && \
+	  python3 /data/scripts/load_localhost.py load-iuf --path $$gdb'
 
 # Fetch MDT elevation
 dtm: RES ?= 25

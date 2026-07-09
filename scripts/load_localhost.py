@@ -71,7 +71,7 @@ def run(cmd: list[str], *, input_bytes: bytes | None = None) -> subprocess.Compl
 
 
 def require_file(path: Path) -> Path:
-    if not path.is_file():
+    if not path.is_file() and not path.is_dir():
         raise LoadError(f"missing file: {path}")
     return path
 
@@ -117,6 +117,8 @@ def ogr_load(path: Path, table: str, *, t_srs: str | None, overwrite: bool) -> N
         str(path),
         "-nln",
         table,
+        "-nlt",
+        "CONVERT_TO_LINEAR",
         "-nlt",
         "PROMOTE_TO_MULTI",
         "-lco",

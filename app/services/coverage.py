@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +61,30 @@ def _coverage_input_signature() -> list[dict[str, Any]]:
     return signature
 
 
+def _coverage_region_geom():
+    """Region polygon (WGS84) that bounds the coverage; None when unavailable.
+
+    Clipping the masked raster to the region keeps hole/bay topology stable:
+    without it, farmland corridors connect out through the raster's wider bbox
+    and render as no-data bays instead of omitted interior holes.
+    """
+    pattern = os.environ.get("STORCITO_COVERAGE_REGION", "%galicia%")
+    try:
+        from shapely.geometry import shape as shapely_shape
+
+        with _pg_connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT ST_AsGeoJSON(geom) FROM spain_autonomous_communities "
+                "WHERE acom_name ILIKE %s LIMIT 1",
+                (pattern,),
+            )
+            row = cur.fetchone()
+        return shapely_shape(json.loads(row[0])) if row else None
+    except Exception as exc:  # noqa: BLE001 - coverage still works unclipped
+        logger.warning("Coverage region clip unavailable: %s", exc)
+        return None
+
+
 def _ensure_coverage_rasters(signature: list[dict[str, Any]]) -> dict[str, Path]:
     """Export the source tables to local GeoTIFFs when the DB content changed."""
     COVERAGE_RASTER_DIR.mkdir(parents=True, exist_ok=True)
@@ -73,7 +98,11 @@ def _ensure_coverage_rasters(signature: list[dict[str, Any]]) -> dict[str, Path]
     for name, table in COVERAGE_SOURCE_TABLES.items():
         dest = COVERAGE_RASTER_DIR / f"{table}.tif"
         if not fresh or not dest.exists():
-            export_raster_table(table, dest)
+            # Only the masked boundary raster gets the region cutline: a
+            # cutline would add nodata masks to the other rasters and break
+            # the single-masked-raster assumption of the boundary tracer.
+            clip = _coverage_region_geom() if table == "fuels" else None
+            export_raster_table(table, dest, clip_geom=clip)
         paths[name] = dest
     marker.write_text(json.dumps(table_signature, separators=(",", ":")))
     return paths
