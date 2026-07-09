@@ -131,22 +131,31 @@ def _fwi_slice(cur, fdate, hour_index: int) -> dict[str, Any] | None:
     blob = cur.fetchone()
     if blob is None:
         return None
-    with nc.Dataset("fwi_from_db.nc", memory=bytes(blob[0])) as dataset:
-        n_hours = int(dataset["time"].shape[0])
-        if hour_index < 0 or hour_index >= n_hours:
-            raise ValueError(f"hour_index must be between 0 and {n_hours - 1} for {fdate}.")
-        day_hours = min(n_hours, 24)
-        payload = {
-            "lon": np.asarray(dataset["lon"][:], dtype=np.float32),
-            "lat": np.asarray(dataset["lat"][:], dtype=np.float32),
-            "temp": np.asarray(dataset["temp"][hour_index], dtype=np.float32),
-            "rh": np.asarray(dataset["rh"][hour_index], dtype=np.float32),
-            "mod": np.asarray(dataset["mod"][hour_index], dtype=np.float32),
-            "dir": np.asarray(dataset["dir"][hour_index], dtype=np.float32),
-            "prec_day": np.asarray(dataset["prec"][:day_hours], dtype=np.float32),
-            "month": np.int32(nc.num2date(dataset["time"][0], dataset["time"].units).month),
-            "time_str": np.str_(str(nc.num2date(dataset["time"][hour_index], dataset["time"].units))),
-        }
+    import os
+    import tempfile
+
+    fd, tmp_name = tempfile.mkstemp(suffix=".nc")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(bytes(blob[0]))
+        with nc.Dataset(tmp_name) as dataset:
+            n_hours = int(dataset["time"].shape[0])
+            if hour_index < 0 or hour_index >= n_hours:
+                raise ValueError(f"hour_index must be between 0 and {n_hours - 1} for {fdate}.")
+            day_hours = min(n_hours, 24)
+            payload = {
+                "lon": np.asarray(dataset["lon"][:], dtype=np.float32),
+                "lat": np.asarray(dataset["lat"][:], dtype=np.float32),
+                "temp": np.asarray(dataset["temp"][hour_index], dtype=np.float32),
+                "rh": np.asarray(dataset["rh"][hour_index], dtype=np.float32),
+                "mod": np.asarray(dataset["mod"][hour_index], dtype=np.float32),
+                "dir": np.asarray(dataset["dir"][hour_index], dtype=np.float32),
+                "prec_day": np.asarray(dataset["prec"][:day_hours], dtype=np.float32),
+                "month": np.int32(nc.num2date(dataset["time"][0], dataset["time"].units).month),
+                "time_str": np.str_(str(nc.num2date(dataset["time"][hour_index], dataset["time"].units))),
+            }
+    finally:
+        os.unlink(tmp_name)
     buf = io.BytesIO()
     np.savez_compressed(buf, **payload)
     cur.execute(
