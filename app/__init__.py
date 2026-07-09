@@ -1,0 +1,1 @@
+"""STORCITO application package."""

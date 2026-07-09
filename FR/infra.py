@@ -42,7 +42,7 @@ def _create_risk_rings(geometry: BaseGeometry, radii: list[int], risks: list[int
     return gpd.GeoDataFrame(anillos_data)
 
 def infrastructure(input_infra: str|Path,
-                   output_folder: str|Path = Path('OUTPUT'),
+                   output_folder: str|Path = Path('data/OUTPUT'),
                    ref_raster: str|Path = Path(r'REFERENCE\MDT\DEM_NationalScenario_2013.tif'),
                    epsg: int = 32629,
                    export_image: bool = False,
@@ -50,7 +50,10 @@ def infrastructure(input_infra: str|Path,
                    simplify: bool = False,
                    tolerance: int = 10,
                    aoi_geometry: BaseGeometry | None = None,
-                   aoi_crs: str = "EPSG:32629") -> npt.NDArray:
+                   aoi_crs: str = "EPSG:32629",
+                   risk_profile: str = "regional",
+                   radii_m: list[int] | None = None,
+                   use_reference_grid: bool | None = None) -> npt.NDArray:
     """Calculate infrastructure proximity risk from roads and railways.
 
     Creates concentric buffer rings around infrastructure features and assigns
@@ -67,6 +70,11 @@ def infrastructure(input_infra: str|Path,
         tolerance: Simplification tolerance in meters. Defaults to 10
         aoi_geometry: Optional AOI geometry used to spatially limit vector processing.
         aoi_crs: CRS of ``aoi_geometry``. Defaults to EPSG:32629.
+        risk_profile: ``regional`` keeps 250-1250 m buffers; ``finca`` uses the
+            old parcel-scale 25-125 m buffers.
+        radii_m: Optional explicit buffer radii in meters.
+        use_reference_grid: Rasterize on the reference raster's native grid.
+            Defaults to true for finca mode and false for regional mode.
 
     Returns:
         Rasterized risk array with values 0-5 (0=no infrastructure nearby)
@@ -80,6 +88,12 @@ def infrastructure(input_infra: str|Path,
     input_infra = Path(input_infra)
     output_folder = Path(output_folder)
     ref_raster = Path(ref_raster)
+    profile = (risk_profile or "regional").strip().lower()
+    if profile not in {"regional", "finca"}:
+        profile = "regional"
+    radii = radii_m or ([25, 50, 75, 100, 125] if profile == "finca" else [250, 500, 750, 1000, 1250])
+    risks = [5, 4, 3, 2, 1]
+    native_grid = (profile == "finca") if use_reference_grid is None else bool(use_reference_grid)
     
     # Validar existencia de archivos
     if not input_infra.exists():
@@ -91,7 +105,7 @@ def infrastructure(input_infra: str|Path,
     road = gpd.read_file(input_infra).to_crs(epsg=epsg)
     if aoi_geometry is not None:
         projected_aoi = reproject_geometry(aoi_geometry, aoi_crs, f"EPSG:{epsg}")
-        road = road[road.intersects(projected_aoi.buffer(1250))].copy()
+        road = road[road.intersects(projected_aoi.buffer(max(radii)))].copy()
     
     # Simplificar geometrías si se solicita
     if simplify:
@@ -100,24 +114,27 @@ def infrastructure(input_infra: str|Path,
     
     # Obtener parámetros de rasterización del raster de referencia
     with rasterio.open(ref_raster) as src:
-        bounds = src.bounds
-        x_min, y_min, x_max, y_max = bounds.left, bounds.bottom, bounds.right, bounds.top
-    
-    x_res = int((x_max - x_min) / 25)
-    y_res = int((y_max - y_min) / 25)
-    transform = from_bounds(x_min, y_min, x_max, y_max, x_res, y_res)
+        if native_grid:
+            transform = src.transform
+            x_res = src.width
+            y_res = src.height
+            ref_crs = src.crs
+        else:
+            bounds = src.bounds
+            x_min, y_min, x_max, y_max = bounds.left, bounds.bottom, bounds.right, bounds.top
+            x_res = int((x_max - x_min) / 25)
+            y_res = int((y_max - y_min) / 25)
+            transform = from_bounds(x_min, y_min, x_max, y_max, x_res, y_res)
+            ref_crs = f"EPSG:{epsg}"
 
     
     if road.empty:
         raster_data = np.zeros((y_res, x_res), dtype=rasterio.uint8)
-        output_crs = f"EPSG:{epsg}"
+        output_crs = ref_crs
     else:
         # Unión de todas las infraestructuras en una geometría única
         road_union = road.geometry.union_all()
 
-        # Crear anillos de riesgo concéntricos
-        radii = [250, 500, 750, 1000, 1250]
-        risks = [5, 4, 3, 2, 1]
         anillos = _create_risk_rings(road_union, radii, risks)
         anillos.crs = road.crs
 
@@ -130,7 +147,7 @@ def infrastructure(input_infra: str|Path,
             dtype=rasterio.uint8,
             all_touched=True,
         )
-        output_crs = anillos.crs
+        output_crs = ref_crs if native_grid else anillos.crs
     
     # Configuración de metadatos para guardar
     meta_info = {
@@ -167,7 +184,7 @@ if __name__=='__main__':
     import pstats
 
     with cProfile.Profile() as profile:
-        infrastructure(r'INPUT\infraestructuras_gal.shp',
+        infrastructure(r'data/INPUT\infraestructuras_gal.shp',
             export_image=False)
 
     results = pstats.Stats(profile)

@@ -12,7 +12,7 @@ from FR.rutinas.setup import (
 )
 from pathlib import Path
 
-def ndvi(b4:str|Path,b8:str|Path,output_folder:str='OUTPUT',export_image:bool=False)->tuple[np.ndarray,np.ndarray]:
+def ndvi(b4:str|Path,b8:str|Path,output_folder:str='data/OUTPUT',export_image:bool=False)->tuple[np.ndarray,np.ndarray]:
     """Calculate NDVI (Normalized Difference Vegetation Index) from Sentinel-2 bands.
 
     Args:
@@ -71,7 +71,70 @@ def ndvi(b4:str|Path,b8:str|Path,output_folder:str='OUTPUT',export_image:bool=Fa
 
     return ndvi,reclasificado
 
-def ndvi_folder(input_folder:str='INPUT',output_folder:str='OUTPUT',indices:list[int]|None=None,export_image:bool=False)->None:
+
+def ndvi_precomputed_finca(
+    input_ndvi_tif: str | Path,
+    output_folder: str | Path = "data/OUTPUT",
+    export_image: bool = False,
+    show_plots: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reclassify a precomputed finca NDVI raster using the old finca bins."""
+    input_ndvi_tif = Path(input_ndvi_tif)
+    with rasterio.open(input_ndvi_tif) as src:
+        ndvi_array = src.read(1).astype("float32")
+        meta_ref = src.meta.copy()
+        nodata = src.nodata
+
+    if nodata is not None:
+        ndvi_array = np.where(ndvi_array == nodata, np.nan, ndvi_array)
+
+    reclassified = np.zeros_like(ndvi_array, dtype="int32")
+    reclassified[ndvi_array <= 0.27] = 5
+    reclassified[(ndvi_array > 0.27) & (ndvi_array <= 0.40)] = 4
+    reclassified[(ndvi_array > 0.40) & (ndvi_array <= 0.54)] = 3
+    reclassified[(ndvi_array > 0.54) & (ndvi_array <= 0.67)] = 2
+    reclassified[ndvi_array > 0.67] = 1
+    reclassified[np.isnan(ndvi_array)] = 0
+
+    fig1, ax1 = default_imshow(ndvi_array, "NDVI")
+    fig2, ax2 = default_imshow(
+        np.where(reclassified == 0, np.nan, reclassified),
+        "NDVI Risk Map",
+    )
+
+    if show_plots:
+        plt.show()
+
+    if export_image:
+        save_file(
+            np.nan_to_num(ndvi_array, nan=0).astype("float32"),
+            "estatic",
+            output_folder,
+            meta_ref,
+            "NDVI",
+            extensions=["tif", "tiff", "png"],
+            fig=fig1,
+        )
+        meta_reclassified = meta_ref.copy()
+        meta_reclassified.update(dtype="int32", nodata=0)
+        save_file(
+            reclassified,
+            "estatic",
+            output_folder,
+            meta_reclassified,
+            "NDVI_Risk_Map",
+            extensions=["tif", "tiff", "png"],
+            meta_intact=True,
+            fig=fig2,
+        )
+    else:
+        plt.close(fig1)
+        plt.close(fig2)
+
+    return ndvi_array, reclassified
+
+
+def ndvi_folder(input_folder:str='data/INPUT',output_folder:str='data/OUTPUT',indices:list[int]|None=None,export_image:bool=False)->None:
     """Process multiple Sentinel-2 scenes to calculate NDVI for each.
 
     Args:

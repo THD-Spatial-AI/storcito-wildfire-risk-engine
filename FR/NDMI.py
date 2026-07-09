@@ -95,3 +95,25 @@ def Ndmi(input_band8, input_band11):
 
     print('NDMI Layer completed')
     return
+
+
+def ndmi_risk(input_band8, input_band11, output_risk):
+    """Non-interactive NDMI risk layer (fixed thresholds, as the original)."""
+    with rasterio.open(input_band8) as b8_src:
+        nir = b8_src.read(1).astype("float32")
+        meta = b8_src.meta.copy()
+    with rasterio.open(input_band11) as b11_src:
+        swir = b11_src.read(1).astype("float32")
+    np.seterr(divide="ignore", invalid="ignore")
+    ndmi = (nir - swir) / (nir + swir)
+    r = np.zeros_like(ndmi, dtype="int32")
+    r[ndmi <= -0.20] = 5
+    r[(ndmi > -0.20) & (ndmi <= 0.00)] = 4
+    r[(ndmi > 0.00) & (ndmi <= 0.20)] = 3
+    r[(ndmi > 0.20) & (ndmi <= 0.40)] = 2
+    r[ndmi > 0.40] = 1
+    meta.update(driver="GTiff", dtype="int32", count=1, nodata=0)
+    os.makedirs(os.path.dirname(str(output_risk)), exist_ok=True)
+    with rasterio.open(output_risk, "w", **meta) as dst:
+        dst.write(r, 1)
+    return output_risk

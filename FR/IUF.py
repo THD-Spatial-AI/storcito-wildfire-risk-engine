@@ -16,12 +16,17 @@ from shapely.geometry.base import BaseGeometry
 from FR.aoi import reproject_geometry
 
 def wui(input_road, input_clc, file_name:str='IUF_Risk_Map',
-        output_folder:Path=Path('OUTPUT'),
+        output_folder:Path=Path('data/OUTPUT'),
         reference_file=Path('REFERENCE')/'MDT'/'DEM_NationalScenario_2013.tif', 
         export_image:bool = False,
         show_plots:bool = False,
         aoi_geometry: BaseGeometry | None = None,
-        aoi_crs: str = "EPSG:32629")->None:
+        aoi_crs: str = "EPSG:32629",
+        risk_profile: str = "regional",
+        road_buffer_m: float | None = None,
+        urban_outer_buffer_m: float | None = None,
+        urban_inner_buffer_m: float | None = None,
+        use_reference_grid: bool | None = None)->None:
     
     """_summary_
 
@@ -35,24 +40,49 @@ def wui(input_road, input_clc, file_name:str='IUF_Risk_Map',
         show_plots (bool, optional): _description_. Defaults to False.
         aoi_geometry: Optional AOI geometry used to spatially limit vector processing.
         aoi_crs: CRS of ``aoi_geometry``. Defaults to EPSG:32629.
+        risk_profile: ``regional`` keeps Galicia WUI buffers; ``finca`` uses the
+            old parcel-scale buffers.
+        road_buffer_m: Optional road search buffer. Defaults to 2000 regional or
+            200 finca.
+        urban_outer_buffer_m: Optional urban mask buffer. Defaults to 400
+            regional or 40 finca.
+        urban_inner_buffer_m: Retained for documenting the legacy finca 5 m
+            inner buffer, though the original mask used only the outer buffer.
+        use_reference_grid: Rasterize on the reference raster's native grid.
+            Defaults to true for finca mode and false for regional mode.
     """
     
     print('Wildland-Urban Interfaces layer processing...')
+
+    profile = (risk_profile or "regional").strip().lower()
+    if profile not in {"regional", "finca"}:
+        profile = "regional"
+    road_buffer = road_buffer_m if road_buffer_m is not None else (200 if profile == "finca" else 2000)
+    urban_outer_buffer = urban_outer_buffer_m if urban_outer_buffer_m is not None else (40 if profile == "finca" else 400)
+    # Kept as an explicit setting because the old finca code documented 5 m,
+    # even though it used the outer mask for rasterization.
+    urban_inner_buffer = urban_inner_buffer_m if urban_inner_buffer_m is not None else (5 if profile == "finca" else 50)
+    native_grid = (profile == "finca") if use_reference_grid is None else bool(use_reference_grid)
 
     # Leer capas una sola vez
     road = gpd.read_file(input_road).to_crs(epsg=32629)
     clc = gpd.read_file(input_clc).to_crs(epsg=32629)
     if aoi_geometry is not None:
         projected_aoi = reproject_geometry(aoi_geometry, aoi_crs, "EPSG:32629")
-        search_area = projected_aoi.buffer(2400)
+        search_area = projected_aoi.buffer(road_buffer + urban_outer_buffer)
         road = road[road.intersects(search_area)].copy()
         clc = clc[clc.intersects(search_area)].copy()
 
     with rasterio.open(reference_file) as src:
-        b = src.bounds
-        x_res = int((b.right - b.left)/25)
-        y_res = int((b.top - b.bottom)/25)
-        transform =from_bounds(b.left, b.bottom, b.right, b.top, x_res, y_res)
+        if native_grid:
+            transform = src.transform
+            x_res = src.width
+            y_res = src.height
+        else:
+            b = src.bounds
+            x_res = int((b.right - b.left)/25)
+            y_res = int((b.top - b.bottom)/25)
+            transform =from_bounds(b.left, b.bottom, b.right, b.top, x_res, y_res)
         crs_str = src.crs.to_string()
 
     def _empty_result() -> np.ndarray:
@@ -80,9 +110,9 @@ def wui(input_road, input_clc, file_name:str='IUF_Risk_Map',
     if road.empty or clc.empty:
         return _save_empty_result()
 
-    # Phase I: Intersectar con buffer de 2000m - sin guardar a disco
-    bf2000 = road.buffer(2000).union_all()
-    poligonos = clc[clc.intersects(bf2000)].copy()
+    # Phase I: Intersectar con buffer de carretera - sin guardar a disco
+    road_buffer_geom = road.buffer(road_buffer).union_all()
+    poligonos = clc[clc.intersects(road_buffer_geom)].copy()
     print("Intersecting polygons found (phase I):", len(poligonos))
     
     if len(poligonos) == 0:
@@ -95,11 +125,12 @@ def wui(input_road, input_clc, file_name:str='IUF_Risk_Map',
     if len(pol1) == 0:
         return _save_empty_result()
     
-    # Crear máscara IUF (buffer 400 - buffer 50) - en memoria, SIN hacer difference
+    # Crear máscara IUF en memoria. The legacy finca script documented an inner
+    # 5 m buffer but used only the outer 40 m mask; keep that exact behavior.
   
-    bf400 = pol1.buffer(400).union_all()
-    # bf50 = pol1.buffer(50).union_all()
-    IUF_mask_geom = bf400 
+    bf_outer = pol1.buffer(urban_outer_buffer).union_all()
+    _bf_inner = pol1.buffer(urban_inner_buffer).union_all()
+    IUF_mask_geom = bf_outer 
 
     # Phase II: Filtrar código >= 200 y < 325, o == 333 + intersección en una pasada
     mask_condition=(((poligonos['Code_18'] < 325) & (poligonos['Code_18'] >= 200)) | 

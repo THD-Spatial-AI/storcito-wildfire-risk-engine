@@ -1,9 +1,9 @@
 """Reconstruct engine input files from the PostGIS database.
 
-The risk engines (FFRM_static.py / FFRM_dinamic.py / FFRM_estatic_aoi.py) read a
-fixed ``INPUT/`` tree of GeoTIFFs and shapefiles. This module materialises that
-tree, per request, from the PostGIS tables that were loaded with raster2pgsql /
-ogr2ogr, optionally clipping every dataset to a request boundary.
+The risk engines in ``app/engines/`` read a fixed ``INPUT/`` tree of GeoTIFFs
+and shapefiles. This module materialises that tree, per request, from the
+PostGIS tables that were loaded with raster2pgsql / ogr2ogr, optionally clipping
+every dataset to a request boundary.
 
 Postgres is reached through GDAL/OGR's built-in PG drivers (which use libpq
 directly) because the conda environment ships no Python Postgres driver. The
@@ -16,7 +16,7 @@ import json
 import os
 import subprocess
 import tempfile
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from shapely.geometry import mapping
@@ -122,11 +122,11 @@ def export_raster_table(
     src = _gdal_raster_dsn(table)
 
     if clip_geom is None:
-        if target_srs is None:
-            _run(["gdal_translate", "-of", "GTiff", src, str(dest_tif)])
-        else:
-            _run(["gdalwarp", "-of", "GTiff", "-t_srs", target_srs,
-                  "-overwrite", src, str(dest_tif)])
+        cmd = ["gdalwarp", "-of", "GTiff", "-co", "TILED=YES", "-overwrite"]
+        if target_srs is not None:
+            cmd += ["-t_srs", target_srs]
+        cmd += [src, str(dest_tif)]
+        _run(cmd)
         return dest_tif
 
     cutline = _write_cutline(clip_geom, clip_geom_crs, dest_tif.parent)
@@ -183,8 +183,10 @@ def export_vector_table(
     return dest_shp
 
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_DATA_ROOT = Path(os.environ.get("STORCITO_DATA_DIR", _REPO_ROOT / "data"))
 _FWI_CACHE_DIR = Path(
-    os.environ.get("FFRM_FWI_CACHE", Path(__file__).resolve().parent.parent / "OUTPUT" / "_fwi_cache")
+    os.environ.get("FFRM_FWI_CACHE", _DATA_ROOT / "OUTPUT" / "_fwi_cache")
 )
 
 
@@ -204,10 +206,14 @@ def reconstruct_fwi(target_date, dest_fwi_dir: str | Path) -> list[Path]:
         target_date = date.fromisoformat(target_date)
 
     with _pg_connect() as conn, conn.cursor() as cur:
+        # Window: FWI_RUNUP_DAYS before the earliest plausible range start.
+        from FR.FWI import FWI_RUNUP_DAYS
+
+        window_start = target_date - timedelta(days=FWI_RUNUP_DAYS + 40)
         cur.execute(
             "SELECT filename FROM fwi_files "
-            "WHERE fdate IS NOT NULL AND fdate <= %s ORDER BY fdate",
-            (target_date,),
+            "WHERE fdate IS NOT NULL AND fdate <= %s AND fdate >= %s ORDER BY fdate",
+            (target_date, window_start),
         )
         names = [r[0] for r in cur.fetchall()]
         if not names:

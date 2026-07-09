@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 import FR.rutinas.FWI_Equations as Fwi
 from FR.FWI import FWI_CLASS_BOUNDS, rh_to_percent
 
+FINCA_FWI_CLASS_BOUNDS = (3.0, 13.0, 23.0, 28.0)
+
 
 def convert_station_file_to_csv(input_path, output_csv):
     """Normalize an uploaded weather-station file to the engine's CSV layout.
@@ -54,10 +56,10 @@ def _to_numeric_series(series):
     return pd.to_numeric(s, errors="coerce")
 
 
-def _classify_fwi(fwi_value):
+def _classify_fwi(fwi_value, class_bounds=FWI_CLASS_BOUNDS):
     if pd.isna(fwi_value):
         return np.nan
-    for cls, bound in enumerate(FWI_CLASS_BOUNDS, start=1):
+    for cls, bound in enumerate(class_bounds, start=1):
         if fwi_value <= bound:
             return cls
     return 5
@@ -67,10 +69,11 @@ def f_w_index_excel(
     input_excel,
     reference_raster,
     output_fwi_raster,
-    output_folder="OUTPUT",
+    output_folder="data/OUTPUT",
     target_hour=13,
     show_plots=True,
     save=True,
+    class_bounds=None,
 ):
     """FWI from a weather-station Excel/CSV file.
 
@@ -83,9 +86,12 @@ def f_w_index_excel(
         target_hour: Hour of day used to pick midday conditions. Defaults to 13.
         show_plots: Whether to display the FWI class map. Defaults to True.
         save: Whether to write CSV/TIF/PNG outputs. Defaults to True.
+        class_bounds: Optional four upper bounds for classes 1-4. Finca mode
+            passes the original finca bounds (3, 13, 23, 28).
     """
 
     print("FWI - calculation from the weather-station Excel file...")
+    class_bounds = tuple(class_bounds or FWI_CLASS_BOUNDS)
 
     # Output directories derived from the project output folder
     csv_dir = os.path.join(output_folder, "FWI")
@@ -200,7 +206,7 @@ def f_w_index_excel(
         isi = float(np.asarray(isi_arr).squeeze())
         bui = float(np.asarray(bui_arr).squeeze())
         fwi_val = float(np.asarray(fwi_arr).squeeze())
-        fwi_class = _classify_fwi(fwi_val)
+        fwi_class = _classify_fwi(fwi_val, class_bounds)
 
         ffmc_list.append(f)
         dmc_list.append(p)

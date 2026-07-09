@@ -107,7 +107,7 @@ def _integer_codes(values: np.ndarray, nodata: float | None) -> set[int]:
     return set(int(code) for code in np.unique(integer_values))
 
 
-def fmt(input_file:str|Path,output_folder=Path('OUTPUT') ,file_name:str='FMT',
+def fmt(input_file:str|Path,output_folder=Path('data/OUTPUT') ,file_name:str='FMT',
         export_image:bool=False,show_plots:bool=True) -> np.ndarray:
     
     """Calculates Fuel Model Type (FMT) remapping with two classification levels.

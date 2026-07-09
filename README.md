@@ -7,7 +7,7 @@ Dockerized Python geospatial CLI app.
 Create local data folders:
 
 ```bash
-mkdir -p INPUT OUTPUT
+mkdir -p data/INPUT data/OUTPUT data/terrain/tilesets
 ```
 
 Start the API stack:
@@ -29,34 +29,36 @@ docker compose exec storcito-api-1 bash
 When the app or scripts ask for folders, use:
 
 ```text
-/app/INPUT
-/app/OUTPUT
+/app/data/INPUT
+/app/data/OUTPUT
 ```
 
-Files placed in local `INPUT/` are available inside the container at `/app/INPUT`.
-Generated files in `/app/OUTPUT` are written back to local `OUTPUT/`.
+Files placed in local `data/INPUT/` are available inside the container at
+`/app/data/INPUT`. Generated files in `/app/data/OUTPUT` are written back to
+local `data/OUTPUT/`.
 
 ## Run another script
 
 ```bash
-docker compose exec storcito-api-1 python FFRM_dinamic.py
-docker compose exec storcito-api-1 python FFRM_estatic.py
+docker compose exec storcito-api-1 python app/engines/FFRM_dinamic.py
+docker compose exec storcito-api-1 python app/engines/FFRM_static.py
 ```
 
-Those scripts currently contain hardcoded Windows paths. To run them in Docker,
-change those paths to mounted container paths such as `/app/INPUT` and
-`/app/OUTPUT`, or add matching volume mounts in `docker-compose.yml`.
+The engine scripts default to mounted container paths under `/app/data/INPUT`
+and `/app/data/OUTPUT`. API requests override those roots per job with `FFRM_BASE_DIR`
+and `FFRM_OUTPUT_DIR`.
 
 ## Coordinate-Limited Static Run
 
-The original full-region static run is still available through `FFRM_estatic.py`.
+The original full-region static run is still available through
+`app/engines/FFRM_static.py`.
 For a request-sized run around one coordinate and one selected FWI date:
 
 ```bash
-python FFRM_estatic_aoi.py --lon -8.41 --lat 43.36 --date 2025-09-05 --buffer-m 3000
+python app/engines/FFRM_estatic_aoi.py --lon -8.41 --lat 43.36 --date 2025-09-05 --buffer-m 3000
 ```
 
-The AOI workflow writes a dedicated job folder under `OUTPUT/aoi/` with:
+The AOI workflow writes a dedicated job folder under `data/OUTPUT/aoi/` with:
 
 - request metadata and AOI geometry
 - AOI-limited intermediate layer TIFFs
@@ -86,7 +88,8 @@ Example request body:
 
 STORCITO stores its geospatial inputs and results in the bundled **PostGIS**
 service (`postgis`, database `gis`). Input rasters are loaded with `raster2pgsql`
-and vectors with `ogr2ogr` (see `scripts/` and `scripts-galicia/`); the API reads
+and vectors with `ogr2ogr` (see `scripts/fetch_sources.py` and
+`scripts/load_localhost.py`); the API reads
 them back through GDAL and writes finished risk maps via `psycopg2`.
 
 ### Schema
@@ -98,20 +101,20 @@ vector tables carry a `geom` (or `ogc_fid`) geometry column.
 | Table | Kind | SRID | Contents |
 |---|---|---|---|
 | `dtm` | raster | 4326 | ASTER GDEM elevation (DTM) |
-| `s2_b04`, `s2_b08`, `s2_b8a`, `s2_b11` | raster | 4326 | Sentinel-2 L2A bands (red, NIR, narrow-NIR, SWIR) |
-| `fwi_<var>` (`temp`, `rh`, `prec`, `mod`, `dir`, `u`, `v`, `lat`, `lon`) | raster | 0 | MeteoGalicia WRF variables (FWI inputs) |
-| `mfe_00_r` | raster | 25830 | Fuel model (MFE) |
+| `sentinel_b4`, `sentinel_b8`, `sentinel_b11` | raster | 4326 | Sentinel-2 L2A bands used for vegetation indices |
+| `fwi_files`, `fwi_slices` | blob/cache | n/a | MeteoGalicia WRF NetCDF files and per-day cached slices |
+| `fuels` | raster | 32629/25830 | Fuel model raster |
+| `infra` | vector | 4326 | Roads/infrastructure |
+| `iuf` | vector | 4326 | CLC/CORINE land-cover input for WUI/IUF |
+| `hist`, `hist_scenes` | vector/blob | 4326/n/a | Fire-history geometry and pre/post Sentinel scene blobs |
+| `mdt`, `twi`, `lst` | raster | varies | Additional terrain/moisture/temperature layers |
 | `spain_autonomous_communities` | vector | 4326 | Admin level 1 (incl. `acom_name='Galicia'`) |
 | `spain_provinces` | vector | 4326 | Admin level 2 |
 | `spain_municipalities` | vector | 4326 | Admin level 3 |
 | `spain_national_boundary` | vector | 4326 | National outline |
-| `wui_u2018_clc2018_v2020_20u1` | vector | 4326 | Wildland-urban interface (CLC/WUI) |
 | `simulation_results` | raster | per-input | Finished risk maps (created on first run) |
 
-**Recurring-load metadata columns** (added by `scripts-galicia/`):
-
-- `s2_*`: `region` (e.g. `Galicia`), `date_from`, `date_to` (acquisition window)
-- `fwi_*`: `region`, `fdate` (source day)
+Data fetch/load is now handled by the two-script workflow in `scripts/`.
 
 **`simulation_results`** (written by the API when a simulation finishes — see
 `FR/db_store.py`) holds one row per output map:
@@ -164,8 +167,15 @@ calculation payload at `/run-static-aoi-wildfire` and `/calliope/start`.
   hour window is validated and recorded as request metadata.
 - If `buffer_distance` is greater than zero, it expands the supplied GeoJSON AOI.
 - `parameters.context_buffer_m` is optional and defaults to `3000`.
-- `parameters.calculation_mode` defaults to `static`. The AOI compatibility
-  endpoint rejects `dynamic` until a date-range dynamic AOI runner is added.
+- `parameters.calculation_mode` defaults to `static`; `dynamic` uses the
+  dynamic AHP layer set and date range from `start_date` to `end_date`.
+- `parameters.risk_profile` may be `regional` or `finca`. `finca` keeps the
+  old parcel behavior: smaller infrastructure/WUI buffers, native DTM grid
+  rasterization, uploaded station FWI class bounds, and uploaded precomputed
+  NDVI support.
+- `parameters.user_inputs` may include signed/downloadable URLs for `dtm`,
+  `ndvi`, and `station_data`. `ndvi` is a precomputed finca NDVI GeoTIFF;
+  `station_data` may be Excel/CSV and is normalized before storage.
 
 Example request body:
 
@@ -194,8 +204,14 @@ Example request body:
     ]
   },
   "parameters": {
-    "context_buffer_m": 3000,
-    "calculation_mode": "static"
+    "context_buffer_m": 0,
+    "calculation_mode": "static",
+    "risk_profile": "finca",
+    "user_inputs": {
+      "dtm": "https://example.invalid/dtm.tif",
+      "ndvi": "https://example.invalid/ndvi_finca.tif",
+      "station_data": "https://example.invalid/station_data.xlsx"
+    }
   }
 }
 ```

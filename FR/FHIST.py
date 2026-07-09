@@ -22,7 +22,7 @@ from rasterio.io import MemoryFile
 BUFFER_SIZE=660
 BURNED_THRESHOLD=0.27
 
-def fire_history(input_folder:str|Path=Path('INPUT'), output_folder:str|Path = Path('OUTPUT'),export_image: bool=False,show_plots:bool=False) -> tuple[np.ndarray, np.ndarray]:
+def fire_history(input_folder:str|Path=Path('data/INPUT'), output_folder:str|Path = Path('data/OUTPUT'),export_image: bool=False,show_plots:bool=False) -> tuple[np.ndarray, np.ndarray]:
     """Analyze historical fire events using dNBR (differenced Normalized Burn Ratio).
 
     Compares pre-fire and post-fire Sentinel-2 imagery to detect burned areas,

@@ -18,6 +18,18 @@ x-storcito-env: &storcito-env
   PGPASSWORD: ${POSTGRES_PASSWORD:-gis}
   DATABASE_URL: postgresql://${POSTGRES_USER:-gis}:${POSTGRES_PASSWORD:-gis}@postgis:5432/${POSTGRES_DB:-gis}
   PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+  SH_CLIENT_ID: ${SH_CLIENT_ID:-}
+  SH_CLIENT_SECRET: ${SH_CLIENT_SECRET:-}
+  ACCESS_TOKEN: ${ACCESS_TOKEN:-}
+  EARTHDATA_USERNAME: ${EARTHDATA_USERNAME:-}
+  EARTHDATA_PASSWORD: ${EARTHDATA_PASSWORD:-}
+  EARTHACCESS_STRATEGY: ${EARTHACCESS_STRATEGY:-environment}
+  CLMS_ACCESS_TOKEN: ${CLMS_ACCESS_TOKEN:-}
+  CLMS_SERVICE_KEY_JSON: ${CLMS_SERVICE_KEY_JSON:-}
+  CNIG_BEARER_TOKEN: ${CNIG_BEARER_TOKEN:-}
+  CNIG_COOKIE: ${CNIG_COOKIE:-}
+  MFE_BEARER_TOKEN: ${MFE_BEARER_TOKEN:-}
+  MFE_COOKIE: ${MFE_COOKIE:-}
 
 x-storcito-api: &storcito-api
   build: .
@@ -30,8 +42,8 @@ x-storcito-api: &storcito-api
     # (use `make restart` to pick up Python changes — uvicorn --reload is
     # incompatible with pyogrio's GDAL_DATA probe inside this image).
     - .:/app
-    - ./INPUT:/app/INPUT
-    - ./OUTPUT:/app/OUTPUT
+    - ./data/INPUT:/app/data/INPUT
+    - ./data/OUTPUT:/app/data/OUTPUT
   extra_hosts:
     # Allow the container to reach services running on the Docker host
     # (e.g. wildfire backend on http://host.docker.internal:8000) on Linux.
@@ -51,7 +63,7 @@ x-storcito-api: &storcito-api
     start_period: 30s
   restart: unless-stopped
   command: >
-    uvicorn api:app
+    uvicorn app.api:app
     --host 0.0.0.0
     --port 8085
 
@@ -92,10 +104,22 @@ services:
       PGDATABASE: ${POSTGRES_DB:-gis}
       PGUSER: ${POSTGRES_USER:-gis}
       PGPASSWORD: ${POSTGRES_PASSWORD:-gis}
+      SH_CLIENT_ID: ${SH_CLIENT_ID:-}
+      SH_CLIENT_SECRET: ${SH_CLIENT_SECRET:-}
+      ACCESS_TOKEN: ${ACCESS_TOKEN:-}
+      EARTHDATA_USERNAME: ${EARTHDATA_USERNAME:-}
+      EARTHDATA_PASSWORD: ${EARTHDATA_PASSWORD:-}
+      EARTHACCESS_STRATEGY: ${EARTHACCESS_STRATEGY:-environment}
+      CLMS_ACCESS_TOKEN: ${CLMS_ACCESS_TOKEN:-}
+      CLMS_SERVICE_KEY_JSON: ${CLMS_SERVICE_KEY_JSON:-}
+      CNIG_BEARER_TOKEN: ${CNIG_BEARER_TOKEN:-}
+      CNIG_COOKIE: ${CNIG_COOKIE:-}
+      MFE_BEARER_TOKEN: ${MFE_BEARER_TOKEN:-}
+      MFE_COOKIE: ${MFE_COOKIE:-}
     volumes:
       - .:/data
-      - ./INPUT:/data/INPUT
-      - ./OUTPUT:/data/OUTPUT
+      - ./data/INPUT:/data/data/INPUT
+      - ./data/OUTPUT:/data/data/OUTPUT
     depends_on:
       postgis:
         condition: service_healthy
@@ -109,8 +133,11 @@ services:
     ports:
       - "${TERRAIN_PORT:-8003}:8000"
     volumes:
-      - ./terrain/tilesets:/data/tilesets:ro
-      - ./terrain/terrain-nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./data/terrain/tilesets:/data/tilesets:ro
+      - ./data/terrain/terrain-nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - default
+      - spatialhub-net
 
   haproxy:
     image: haproxy:2.9-alpine
@@ -161,3 +188,9 @@ services:
 
 volumes:
   pgdata:
+
+networks:
+  # Only referenced by the terrain service (profile "terrain"); created by the
+  # Makefile targets when absent, so the engine stack alone never needs it.
+  spatialhub-net:
+    external: true

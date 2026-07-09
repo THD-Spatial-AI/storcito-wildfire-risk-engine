@@ -8,7 +8,7 @@ from FR.rutinas.setup import default_imshow, save_file
 from osgeo import gdal
 from pathlib import Path
 
-def mdt(ruta_mdt,output_folder:str|Path=Path('OUTPUT'),
+def mdt(ruta_mdt,output_folder:str|Path=Path('data/OUTPUT'),
         export_image=False,
         show_plots=True) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Calculate terrain risk layers from Digital Elevation Model (DEM).

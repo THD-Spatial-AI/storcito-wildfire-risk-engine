@@ -10,7 +10,7 @@ WORKDIR /app
 
 COPY --chown=$MAMBA_USER:$MAMBA_USER . /app
 
-RUN mkdir -p /app/INPUT /app/OUTPUT \
+RUN mkdir -p /app/data/INPUT /app/data/OUTPUT \
     && chown -R $MAMBA_USER:$MAMBA_USER /app
 
 ENV MPLBACKEND=Agg \
@@ -21,4 +21,4 @@ ENV MPLBACKEND=Agg \
 EXPOSE 8090
 
 ENTRYPOINT ["micromamba", "run", "-n", "storcito"]
-CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8090"]
+CMD ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "8090"]

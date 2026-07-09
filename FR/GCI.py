@@ -12,7 +12,7 @@ from FR.rutinas.setup import (
 )
 from pathlib import Path
 
-def gci(b3:str|Path,b8:str|Path,output_folder:str='OUTPUT',
+def gci(b3:str|Path,b8:str|Path,output_folder:str='data/OUTPUT',
         export_image:bool=False,show_plots:bool=False)->np.ndarray:
     """Calculate GCI (Green Chlorophyll Index) from Sentinel-2 bands.
 
@@ -52,7 +52,7 @@ def gci(b3:str|Path,b8:str|Path,output_folder:str='OUTPUT',
 
     return gci
 
-def gci_folder(input_folder:str='INPUT',output_folder:str='OUTPUT',indices:None|list[int]=None,export_image:bool=False)->None:
+def gci_folder(input_folder:str='data/INPUT',output_folder:str='data/OUTPUT',indices:None|list[int]=None,export_image:bool=False)->None:
     """Process multiple Sentinel-2 scenes to calculate GCI for each.
 
     Args:
@@ -97,4 +97,3 @@ if __name__ == "__main__":
     results = pstats.Stats(profile)
     results.sort_stats(pstats.SortKey.TIME)
     results.print_stats(20)
-

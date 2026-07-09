@@ -17,9 +17,19 @@
 *.jpg
 
 __pycache__/
+.env
+.env.*
+!.env.example
+secrets/
 .venv/
 venv/
 site/
-INPUT/
-OUTPUT/
+data/INPUT/
+data/OUTPUT/
 FR/__pycache__/
+
+# Generated 3D terrain tiles (rebuild with make terrain)
+data/terrain/tilesets/
+
+# Upstream reference checkout (read-only comparison)
+original/

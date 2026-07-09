@@ -110,3 +110,30 @@ def Lst(input_lst, output_lst=None, output_lst_risk=None, show_plots=True):
         print("Results not saved. Only displayed on screen.")
 
     print('LST Layer completed')
+
+
+def lst_risk(input_lst, output_risk):
+    """Non-interactive LST risk layer (Kelvin filter + percentile classes, as the original)."""
+    with rasterio.open(input_lst) as src:
+        lst = src.read(1).astype("float32")
+        meta = src.meta.copy()
+        nodata = src.nodata
+    if nodata is not None:
+        lst = np.where(lst == nodata, np.nan, lst)
+    lst = np.where(~np.isfinite(lst), np.nan, lst)
+    valid = np.isfinite(lst) & (lst > 220.0) & (lst < 340.0)
+    if not np.any(valid):
+        raise ValueError("The LST layer does not contain valid values after filtering.")
+    lst_clean = np.where(valid, lst, np.nan)
+    p20, p40, p60, p80 = np.percentile(lst_clean[valid], [20, 40, 60, 80])
+    r = np.zeros_like(lst, dtype="int32")
+    r[(lst_clean <= p20) & valid] = 1
+    r[(lst_clean > p20) & (lst_clean <= p40)] = 2
+    r[(lst_clean > p40) & (lst_clean <= p60)] = 3
+    r[(lst_clean > p60) & (lst_clean <= p80)] = 4
+    r[(lst_clean > p80) & valid] = 5
+    meta.update(driver="GTiff", dtype="int32", count=1, nodata=0)
+    os.makedirs(os.path.dirname(str(output_risk)), exist_ok=True)
+    with rasterio.open(output_risk, "w", **meta) as dst:
+        dst.write(r, 1)
+    return output_risk

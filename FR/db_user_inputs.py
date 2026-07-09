@@ -18,8 +18,9 @@ from shapely.geometry import shape
 
 
 KIND_DTM = "dtm"
+KIND_NDVI = "ndvi"
 KIND_STATION_DATA = "station_data"
-VALID_KINDS = {KIND_DTM, KIND_STATION_DATA}
+VALID_KINDS = {KIND_DTM, KIND_NDVI, KIND_STATION_DATA}
 USER_INPUT_TABLE = "public.user_input_files"
 USER_INPUT_CHUNK_TABLE = "public.user_input_file_chunks"
 DTM_CHUNK_SIZE = int(os.environ.get("USER_INPUT_DTM_CHUNK_SIZE", str(8 * 1024 * 1024)))
@@ -57,7 +58,7 @@ CREATE TABLE IF NOT EXISTS public.user_input_files (
     id              bigserial PRIMARY KEY,
     user_id         text NOT NULL,
     model_id        text NOT NULL,
-    kind            text NOT NULL CHECK (kind IN ('dtm', 'station_data')),
+    kind            text NOT NULL CHECK (kind IN ('dtm', 'ndvi', 'station_data')),
     filename        text NOT NULL,
     source_filename text,
     content_type    text,
@@ -76,6 +77,13 @@ CREATE INDEX IF NOT EXISTS user_input_files_user_model_idx
 
 ALTER TABLE public.user_input_files
     ADD COLUMN IF NOT EXISTS footprint geometry(Polygon, 4326);
+
+ALTER TABLE public.user_input_files
+    DROP CONSTRAINT IF EXISTS user_input_files_kind_check;
+
+ALTER TABLE public.user_input_files
+    ADD CONSTRAINT user_input_files_kind_check
+    CHECK (kind IN ('dtm', 'ndvi', 'station_data'));
 
 CREATE INDEX IF NOT EXISTS user_input_files_footprint_gix
     ON public.user_input_files USING gist (footprint);
@@ -223,6 +231,7 @@ def _upsert_dtm_chunks(
     *,
     user_id: str,
     model_id: str,
+    kind: str,
     path: Path,
     filename: str,
     source_filename: str | None,
@@ -231,6 +240,7 @@ def _upsert_dtm_chunks(
     footprint_geojson: dict[str, Any],
     metadata: dict[str, Any],
 ) -> dict[str, Any]:
+    _validate_kind(kind)
     import psycopg2
     from psycopg2.extras import Json
 
@@ -246,7 +256,7 @@ def _upsert_dtm_chunks(
     with _connect() as conn, conn.cursor() as cur:
         _ensure_schema(cur)
         _log(
-            f"upserting chunked dtm metadata into {USER_INPUT_TABLE} "
+            f"upserting chunked {kind} metadata into {USER_INPUT_TABLE} "
             f"user_id={user_id} model_id={model_id} filename={filename} "
             f"source_filename={source_filename or '-'} bytes={file_size} "
             f"chunk_size={chunk_size} raster_srid={raster_srid or 'none'}"
@@ -257,7 +267,7 @@ def _upsert_dtm_chunks(
                 (user_id, model_id, kind, filename, source_filename, content_type,
                  data, nbytes, raster_srid, footprint, metadata)
             VALUES
-                (%s, %s, 'dtm', %s, %s, %s, %s, %s, %s,
+                (%s, %s, %s, %s, %s, %s, %s, %s, %s,
                  ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326),
                  %s)
             ON CONFLICT (user_id, model_id, kind)
@@ -277,6 +287,7 @@ def _upsert_dtm_chunks(
             (
                 user_id,
                 model_id,
+                kind,
                 filename,
                 source_filename,
                 content_type,
@@ -312,14 +323,14 @@ def _upsert_dtm_chunks(
                 uploaded += len(chunk)
                 chunk_count += 1
                 _log(
-                    f"DTM database chunk upload progress user_id={user_id} "
+                    f"{kind} database chunk upload progress user_id={user_id} "
                     f"model_id={model_id} uploaded_bytes={uploaded} "
                     f"total_bytes={file_size} chunks={chunk_count}"
                 )
 
     result = _row_to_metadata(row[1:])
     _log(
-        f"stored chunked dtm in {USER_INPUT_TABLE}/{USER_INPUT_CHUNK_TABLE} "
+        f"stored chunked {kind} in {USER_INPUT_TABLE}/{USER_INPUT_CHUNK_TABLE} "
         f"user_id={user_id} model_id={model_id} bytes={result['nbytes']} "
         f"updated_at={result['updated_at']}"
     )
@@ -361,8 +372,42 @@ def store_dtm_file(
     return _upsert_dtm_chunks(
         user_id=user_id,
         model_id=model_id,
+        kind=KIND_DTM,
         path=path,
         filename="dtm.tif",
+        source_filename=source_filename or path.name,
+        content_type=content_type,
+        raster_srid=raster_srid,
+        footprint_geojson=footprint_geojson,
+        metadata=metadata,
+    )
+
+
+def store_ndvi_file(
+    user_id: str,
+    model_id: str,
+    path: str | Path,
+    *,
+    source_filename: str | None = None,
+    content_type: str | None = None,
+) -> dict[str, Any]:
+    path = Path(path)
+    _log(
+        f"NDVI database upload started user_id={user_id} model_id={model_id} "
+        f"source_filename={source_filename or path.name}"
+    )
+    raster_srid, footprint_geojson, metadata = _dtm_metadata(path)
+    metadata = {**metadata, "input_role": "precomputed_ndvi"}
+    _log(
+        f"NDVI bytes ready for chunked table storage filename={path.name} "
+        f"bytes={path.stat().st_size}"
+    )
+    return _upsert_dtm_chunks(
+        user_id=user_id,
+        model_id=model_id,
+        kind=KIND_NDVI,
+        path=path,
+        filename="ndvi.tif",
         source_filename=source_filename or path.name,
         content_type=content_type,
         raster_srid=raster_srid,

@@ -138,9 +138,9 @@ def get_output_folder(input_folder:str):
     
     if not identifier:
         date=time.now().strftime("%Y_%m_%d_%H%M%S")
-        output_folder = os.path.join("OUTPUT",file_name,"_OUTPUT_",date)
+        output_folder = os.path.join("data", "OUTPUT", file_name, "_OUTPUT_", date)
     else:
-        output_folder = os.path.join("OUTPUT",file_name,"_OUTPUT_",identifier)
+        output_folder = os.path.join("data", "OUTPUT", file_name, "_OUTPUT_", identifier)
     
     return output_folder
 
@@ -174,7 +174,7 @@ def sort_time_comparative(band_folder:Path|None=None,date_format:str="%Y-%m-%d-%
     """
 
     if not band_folder:
-        band_folder=Path("INPUT")
+        band_folder=Path("data/INPUT")
 
     band_folder.mkdir(parents=True, exist_ok=True)
 
@@ -209,7 +209,7 @@ def sort_time_comparative(band_folder:Path|None=None,date_format:str="%Y-%m-%d-%
 
 def check_valid_entries(
     bands: list[str],
-    input_folder: Path | str = Path("INPUT"),
+    input_folder: Path | str = Path("data/INPUT"),
     satellite: Literal["Sentinel-2"] = "Sentinel-2",
 ) -> tuple[list[SceneEntry], list[SceneEntry]]:
     """

@@ -52,6 +52,11 @@ def rh_to_percent(rh):
     return arr
 
 
+# Moisture-code run-up window (days before the scoring window). Bounds the
+# archive scan so disjoint seasons never bleed into each other (e.g. a summer
+# drought state carrying across winter into the next spring's dates).
+FWI_RUNUP_DAYS = 60
+
 # EFFIS pan-European danger-class upper bounds (classes 1-4; >38 = class 5,
 # EFFIS "extreme" merged in). Region-independent; validated vs EFFIS (Galicia).
 FWI_CLASS_BOUNDS = (5.2, 11.2, 21.3, 38.0)
@@ -143,7 +148,7 @@ def _select_fwi_files(input_folder: Path, start_date: date | None, target_date: 
     return selected_files
 
 
-def f_w_index(input_folder:str|Path,file_name:str='FWI_Risk_Map',output_folder:Path|str=Path('OUTPUT'),
+def f_w_index(input_folder:str|Path,file_name:str='FWI_Risk_Map',output_folder:Path|str=Path('data/OUTPUT'),
     export_image:bool=False,show_plots:bool=False,crs:str="EPSG:4326",
     target_date: date | str | None = None,
     start_date: date | str | None = None)->np.ndarray:
@@ -191,8 +196,12 @@ def f_w_index(input_folder:str|Path,file_name:str='FWI_Risk_Map',output_folder:P
     score_end = target_date
     score_start = start_date if start_date is not None else target_date
 
-    # Read every available day up to score_end (run-up + scoring window).
-    lista_nc = _select_fwi_files(input_folder, None, score_end)
+    # Run-up + scoring window, capped to FWI_RUNUP_DAYS before the window.
+    runup_start = score_start - timedelta(days=FWI_RUNUP_DAYS)
+    lista_nc = [
+        f for f in _select_fwi_files(input_folder, None, score_end)
+        if _fwi_file_date(f) >= runup_start
+    ]
 
     if not lista_nc:
         raise ValueError("No netCDF files found in input folder")
@@ -369,7 +378,7 @@ if __name__ == "__main__":
     import pstats
 
     with cProfile.Profile() as profile:
-        f_w_index(r'INPUT/FWI')
+        f_w_index(r'data/INPUT/FWI')
 
     results = pstats.Stats(profile)
     results.sort_stats(pstats.SortKey.TIME)

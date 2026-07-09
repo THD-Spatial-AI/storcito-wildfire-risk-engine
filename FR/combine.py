@@ -1,8 +1,8 @@
 """Shared AHP layer-combination machinery for the forest-fire risk engines.
 
-Extracted from FFRM_estatic_aoi.py so the static and dynamic engines can combine
-only the layers they actually produced (``active_top_levels``) without duplicating
-the alignment / weighting / classification logic.
+Extracted from the AOI engine so the static and dynamic engines can combine only
+the layers they actually produced (``active_top_levels``) without duplicating the
+alignment / weighting / classification logic.
 """
 from __future__ import annotations
 

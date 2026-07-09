@@ -103,3 +103,25 @@ def Twi(input_twi, output_twi=None, output_twi_risk=None, show_plots=True):
         print("Results not saved. Only displayed on screen.")
 
     print('TWI Layer completed')
+
+
+def twi_risk(input_twi, output_risk):
+    """Non-interactive TWI risk layer (percentile classes 1-5, as the original)."""
+    with rasterio.open(input_twi) as src:
+        twi = src.read(1, masked=True).astype("float32").filled(np.nan)
+        meta = src.meta.copy()
+    valid = np.isfinite(twi)
+    if not np.any(valid):
+        raise ValueError("The TWI layer does not contain valid values.")
+    p20, p40, p60, p80 = np.percentile(twi[valid], [20, 40, 60, 80])
+    r = np.zeros(twi.shape, dtype="int32")
+    r[(twi <= p20) & valid] = 1
+    r[(twi > p20) & (twi <= p40)] = 2
+    r[(twi > p40) & (twi <= p60)] = 3
+    r[(twi > p60) & (twi <= p80)] = 4
+    r[(twi > p80) & valid] = 5
+    meta.update(driver="GTiff", dtype="int32", count=1, nodata=0)
+    os.makedirs(os.path.dirname(str(output_risk)), exist_ok=True)
+    with rasterio.open(output_risk, "w", **meta) as dst:
+        dst.write(r, 1)
+    return output_risk
