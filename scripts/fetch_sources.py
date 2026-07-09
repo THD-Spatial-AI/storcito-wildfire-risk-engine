@@ -1148,11 +1148,18 @@ def m2m_login() -> str:
 
 
 def cmd_lst(args: argparse.Namespace) -> int:
-    """Fetch Sentinel-3 SLSTR L2 land surface temperature (Kelvin) from CDSE."""
+    """Fetch Sentinel-3 SLSTR L2 land surface temperature (Kelvin) from CDSE.
+
+    --date fetches one day; --start [--end] fetches a daily series.
+    """
     bbox = parse_bbox(args.bbox)
-    day = parse_date(args.date) if args.date else datetime.now(timezone.utc).date() - timedelta(days=1)
-    date_from = day - timedelta(days=args.days - 1)
     out_dir = ensure_dir(args.out_dir / "lst")
+    yesterday = datetime.now(timezone.utc).date() - timedelta(days=1)
+    if args.start:
+        series = date_span(parse_date(args.start),
+                           parse_date(args.end) if args.end else yesterday)
+    else:
+        series = [parse_date(args.date) if args.date else yesterday]
 
     # ~1 km native product; size the request to the chosen output resolution.
     lat = (bbox[1] + bbox[3]) / 2.0
@@ -1160,66 +1167,76 @@ def cmd_lst(args: argparse.Namespace) -> int:
     width = max(1, min(2500, round((bbox[2] - bbox[0]) * m_per_deg_lon / args.resolution)))
     height = max(1, min(2500, round((bbox[3] - bbox[1]) * M_PER_DEG_LAT / args.resolution)))
 
-    body = {
-        "input": {
-            "bounds": {
-                "bbox": list(bbox),
-                "properties": {"crs": "http://www.opengis.net/def/crs/OGC/1.3/CRS84"},
-            },
-            "data": [
-                {
-                    "type": S3_SLSTR_COLLECTION,
-                    "dataFilter": {
-                        "timeRange": {
-                            "from": f"{date_from.isoformat()}T00:00:00Z",
-                            "to": f"{day.isoformat()}T23:59:59Z",
-                        },
-                        # Descending node ~10:00 local = daytime temperatures,
-                        # matching the engine's percentile classification.
-                        "orbitDirection": args.orbit,
-                        "mosaickingOrder": "mostRecent",
-                    },
-                }
-            ],
-        },
-        "output": {
-            "width": width,
-            "height": height,
-            "responses": [{"identifier": "default", "format": {"type": "image/tiff"}}],
-        },
-        "evalscript": S3_LST_EVALSCRIPT,
-    }
     token = cdse_access_token()
-    raw = request_bytes(
-        CDSE_PROCESS_URL,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "Accept": "image/tiff",
-        },
-        data=json.dumps(body).encode("utf-8"),
-        timeout=600,
-    )
-    if not raw.startswith((b"II", b"MM")):
-        raise FetchError(f"CDSE did not return a TIFF: {raw[:300]!r}")
-    dest = out_dir / f"LST_{day.isoformat()}.tif"
-    dest.write_bytes(raw)
-    log(f"{dest} ({len(raw)} bytes, {width}x{height}px)")
+    files = []
+    for done, day in enumerate(series, start=1):
+        dest = out_dir / f"LST_{day.isoformat()}.tif"
+        if dest.exists() and dest.stat().st_size > 0:
+            files.append(dest)
+            progress(done, len(series), f"{dest.name} (cached)")
+            continue
+        date_from = day - timedelta(days=args.days - 1)
+        body = {
+            "input": {
+                "bounds": {
+                    "bbox": list(bbox),
+                    "properties": {"crs": "http://www.opengis.net/def/crs/OGC/1.3/CRS84"},
+                },
+                "data": [
+                    {
+                        "type": S3_SLSTR_COLLECTION,
+                        "dataFilter": {
+                            "timeRange": {
+                                "from": f"{date_from.isoformat()}T00:00:00Z",
+                                "to": f"{day.isoformat()}T23:59:59Z",
+                            },
+                            # Descending node ~10:00 local = daytime temperatures,
+                            # matching the engine's percentile classification.
+                            "orbitDirection": args.orbit,
+                            "mosaickingOrder": "mostRecent",
+                        },
+                    }
+                ],
+            },
+            "output": {
+                "width": width,
+                "height": height,
+                "responses": [{"identifier": "default", "format": {"type": "image/tiff"}}],
+            },
+            "evalscript": S3_LST_EVALSCRIPT,
+        }
+        raw = request_bytes(
+            CDSE_PROCESS_URL,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "Accept": "image/tiff",
+            },
+            data=json.dumps(body).encode("utf-8"),
+            timeout=600,
+        )
+        if not raw.startswith((b"II", b"MM")):
+            raise FetchError(f"CDSE did not return a TIFF for {day}: {raw[:300]!r}")
+        dest.write_bytes(raw)
+        files.append(dest)
+        progress(done, len(series), dest.name)
+
     write_manifest(
         args.out_dir,
         "lst_sentinel3_slstr",
         {
             "api": CDSE_PROCESS_URL,
             "collection": S3_SLSTR_COLLECTION,
-            "date": day.isoformat(),
+            "date_from": series[0].isoformat(),
+            "date_to": series[-1].isoformat(),
             "window_days": args.days,
             "orbit": args.orbit,
             "bbox": list(bbox),
             "resolution_m": args.resolution,
             "auth": "SH_CLIENT_ID/SH_CLIENT_SECRET",
         },
-        [dest],
+        files,
     )
     return 0
 
@@ -1510,7 +1527,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("lst", help="fetch Sentinel-3 SLSTR L2 surface temperature (Kelvin) from CDSE")
     add_common(p)
     p.add_argument("--date", help="YYYY-MM-DD; default yesterday UTC")
-    p.add_argument("--days", type=int, default=3, help="mosaic window length ending on --date")
+    p.add_argument("--start", help="series start YYYY-MM-DD; fetches one file per day")
+    p.add_argument("--end", help="series end YYYY-MM-DD; default yesterday UTC")
+    p.add_argument("--days", type=int, default=3, help="per-day trailing mosaic window (cloud gap-fill)")
     p.add_argument("--orbit", default="DESCENDING", choices=["DESCENDING", "ASCENDING"],
                    help="DESCENDING = daytime pass (default)")
     p.add_argument("--resolution", type=float, default=1000, help="output metres/pixel")

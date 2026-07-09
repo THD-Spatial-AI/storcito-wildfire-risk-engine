@@ -110,19 +110,16 @@ dtm:
 	@$(COMPOSE) exec -T geotools python3 /data/scripts/load_localhost.py load-dtm \
 	  --dir /data/data/OUTPUT/source_data/dtm_cnig/$(RES)m
 
-# Fetch Sentinel-3 LST
+# Fetch Sentinel-3 LST: one file per day into lst_ts
 lst:
 	@$(ENV_RUN) \
 	if [ -n "$(START)" ]; then \
-	  end=$(if $(END),$(END),$$(date -u -d yesterday +%F)); \
-	  days=$$(( ($$(date -d $$end +%s) - $$(date -d $(START) +%s)) / 86400 + 1 )); \
-	  python3 scripts/fetch_sources.py lst --date $$end --days $$days; \
+	  python3 scripts/fetch_sources.py lst --start $(START) $(if $(END),--end $(END)); \
 	else \
 	  python3 scripts/fetch_sources.py lst $(if $(DATE),--date $(DATE)); \
 	fi
-	@$(COMPOSE) exec -T geotools bash -c 'cd /data && \
-	  f=$$(ls -t data/OUTPUT/source_data/lst/LST_*.tif | head -1) && \
-	  python3 scripts/load_localhost.py load-raster --path $$f --table lst --srid 4326'
+	@$(COMPOSE) exec -T geotools python3 /data/scripts/load_localhost.py load-lst \
+	  --dir /data/data/OUTPUT/source_data/lst
 
 # Fetch fuel polygons
 fuels:

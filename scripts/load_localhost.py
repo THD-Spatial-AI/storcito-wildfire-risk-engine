@@ -463,6 +463,19 @@ def cmd_load_firms(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_load_lst(args: argparse.Namespace) -> int:
+    """Seed staged LST_<date>.tif files into lst_ts; newest also replaces lst."""
+    files = sorted(args.dir.glob("LST_*.tif"))
+    if not files:
+        raise LoadError(f"no LST_*.tif files in {args.dir}")
+    for path in files:
+        capture_date = path.stem.split("_", 1)[1]  # LST_2026-05-01 -> 2026-05-01
+        sentinel_ts_append(path, "lst", 4326, capture_date)
+    raster2pgsql_load(files[-1], "lst", 4326, "replace")
+    log(f"lst_ts <- {len(files)} day(s); current lst = {files[-1].name}")
+    return 0
+
+
 def cmd_load_fuels(args: argparse.Namespace) -> int:
     """Rasterize staged MFE fuel-model polygons (20 m, EPSG:32629) into fuels."""
     import tempfile
@@ -705,6 +718,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dir", type=Path, help="folder containing hotspots_*_<year>.csv files")
     p.add_argument("--file", type=Path, help="single hotspots CSV")
     p.set_defaults(func=cmd_load_firms)
+
+    p = sub.add_parser("load-lst", help="seed staged LST series into lst_ts + current lst")
+    p.add_argument("--dir", type=Path, default=Path("data/OUTPUT/source_data/lst"))
+    p.set_defaults(func=cmd_load_lst)
 
     p = sub.add_parser("load-fuels", help="rasterize staged MFE fuel polygons into fuels")
     p.add_argument(

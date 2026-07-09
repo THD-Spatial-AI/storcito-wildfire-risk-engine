@@ -122,7 +122,7 @@ make twi                            # 3. TWI, computed from 2's staged tiles (15
 make mdt                            # 4. ASTER reference grid    (~5 min)
 make fwi START=2026-05-01           # 5. weather, May 1 2026 -> latest available day (long: ~330 MB/day)
 make sentinel START=2026-05-01      # 6. Sentinel-2 weekly mosaics, May 1 2026 -> latest image (~30 min)
-make lst START=2026-05-01           # 7. surface temperature: one latest-day mosaic, cloud gaps filled from May 1 2026 (~1 min)
+make lst START=2026-05-01           # 7. surface temperature, one raster per day May 1 2026 -> latest (~10 min)
 make infra                          # 8. OSM roads + railways    (~10 min)
 make fuels                          # 9. MFE fuel models         (~45 min, slow API)
 make hist START=2026-05-01          # 10. FIRMS fire hotspots, May 1 2026 -> today (needs step 1!)
@@ -164,7 +164,7 @@ omitted:
 | `make hist START=... [END=...]` / `YEAR=...` | sub-season / whole year |
 | `make lst` | yesterday's Sentinel-3 daytime pass |
 | `make lst DATE=2026-06-15` | a specific day |
-| `make lst START=2026-07-01 [END=...]` | one mosaic ending at END, gap-filling back to START (NOT a time series — the `lst` table holds a single mosaic) |
+| `make lst START=2026-05-01 [END=...]` | daily series into `lst_ts`; the newest day also replaces the current `lst` table |
 
 Notes:
 
