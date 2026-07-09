@@ -451,7 +451,7 @@ def cmd_load_firms(args: argparse.Namespace) -> int:
                             "bright_t31": float(r["bright_t31"]),
                             "frp": float(r["frp"]),
                             "daynight": r["daynight"],
-                            "type": int(r["type"]),
+                            "type": int(r.get("type") or 0),
                             "year": year,
                         },
                     )

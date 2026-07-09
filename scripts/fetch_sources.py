@@ -1063,6 +1063,20 @@ def cmd_firms(args: argparse.Namespace) -> int:
     start_m, start_d = (int(p) for p in args.season_start.split("-"))
     end_m, end_d = (int(p) for p in args.season_end.split("-"))
 
+    # The SP (standard processing) archive lags ~4 months; recent dates live in
+    # the NRT source. Find the SP cutoff so requests can stitch the two.
+    sp_max: date | None = None
+    if args.source == "MODIS_SP":
+        try:
+            avail = request_bytes(
+                f"https://firms.modaps.eosdis.nasa.gov/api/data_availability/csv/{map_key}/MODIS_SP",
+                timeout=60,
+            ).decode("utf-8")
+            sp_max = date.fromisoformat(avail.strip().splitlines()[-1].split(",")[2])
+            log(f"MODIS_SP archive ends {sp_max}; later dates use MODIS_NRT")
+        except Exception as exc:  # noqa: BLE001 - fall back to SP-only
+            log(f"could not read FIRMS availability ({exc}); using {args.source} only")
+
     files = []
     for year in years:
         start = date(year, start_m, start_d)
@@ -1075,7 +1089,12 @@ def cmd_firms(args: argparse.Namespace) -> int:
         cur = start
         while cur <= year_end:
             days = min(FIRMS_MAX_DAYS, (year_end - cur).days + 1)
-            url = f"{FIRMS_AREA_API}/{map_key}/{args.source}/{area}/{days}/{cur.isoformat()}"
+            source = args.source
+            if sp_max is not None and cur > sp_max:
+                source = "MODIS_NRT"
+            elif sp_max is not None and cur + timedelta(days=days - 1) > sp_max:
+                days = (sp_max - cur).days + 1  # stop the SP chunk at the cutoff
+            url = f"{FIRMS_AREA_API}/{map_key}/{source}/{area}/{days}/{cur.isoformat()}"
             text = request_bytes(url, timeout=120).decode("utf-8").strip()
             lines = text.splitlines()
             if not lines or "," not in lines[0]:

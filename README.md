@@ -84,6 +84,131 @@ Example request body:
 }
 ```
 
+## Data pipeline: fetching every layer from its source
+
+All engine input layers are fetched from their original public sources and
+seeded into PostGIS — the app has no dependency on bundled input files. Each
+layer follows the same two-stage flow, wrapped in one `make` target:
+
+```text
+1. FETCH   scripts/fetch_sources.py   source API  ->  data/OUTPUT/source_data/<layer>/
+2. SEED    scripts/load_localhost.py  staged file ->  PostGIS table
+```
+
+The staging directory (`data/OUTPUT/source_data/`) is a cache, not a
+dependency: after seeding, the app reads only from PostGIS. Re-running a
+target reuses staged files and skips finished downloads, so every command is
+resumable and idempotent. Delete a layer's staging folder to force a fresh
+download from the source.
+
+### Data sources
+
+| Target | DB table(s) | Dataset | Provider / API | Resolution | Credential (`.env`) |
+|---|---|---|---|---|---|
+| `borders` | `spain_*` | georef-spain admin boundaries | OpenDataSoft public API | vector | none |
+| `dtm` | `dtm` | Spanish MDT (PNOA LiDAR) | IGN INSPIRE WCS — `servicios.idee.es/wcs-inspire/mdt` | 25 m (5 m opt.) | none |
+| `twi` | `twi` | Topographic Wetness Index | computed from `dtm` tiles (GRASS `r.fill.dir` + `r.topidx`) | 25 m | none |
+| `mdt` | `mdt` | ASTER GDEM V003 | NASA Earthdata / LP DAAC (`earthaccess`) | 30 m | `EARTHDATA_USERNAME` + `EARTHDATA_PASSWORD` |
+| `fwi` | `fwi_files` | WRF 1 km weather forecast | MeteoGalicia THREDDS NCSS — `thredds.meteogalicia.gal` | 1 km, daily NetCDF | none |
+| `sentinel` | `sentinel_b4/b8/b8a/b11` + `_ts` | Sentinel-2 L2A bands B04/B08/B8A/B11 | Copernicus Data Space Process API — `sh.dataspace.copernicus.eu` | weekly mosaics | `SH_CLIENT_ID` + `SH_CLIENT_SECRET` |
+| `lst` | `lst` | Sentinel-3 SLSTR L2 land surface temperature | Copernicus Data Space Process API | ~1 km, Kelvin | `SH_CLIENT_ID` + `SH_CLIENT_SECRET` |
+| `infra` | `infra` | OSM roads + railways | Geofabrik extracts — `download.geofabrik.de` | vector | none |
+| `fuels` | `fuels` | MFE forest map, Rothermel fuel model (`modelocombustible`) | MITECO OGC API-Features — `wmts.mapama.gob.es/sig-api` | 20 m (rasterized) | none |
+| `hist` | `hist` | MODIS active-fire hotspots (SP archive + NRT, auto-stitched) | NASA FIRMS area API | points | `FIRMS_MAP_KEY` |
+| `hist-scenes` | `hist_scenes` | Sentinel-2 B8A/B12 pre/post-season pairs (dNBR) | Copernicus Data Space Process API | GeoTIFF blobs | `SH_CLIENT_ID` + `SH_CLIENT_SECRET` |
+| `clc` | `clcplus_2023` | CLC+ Backbone 2023 land cover | Copernicus Land Monitoring Service datarequest API — `land.copernicus.eu` | 10 m | `CLMS_SERVICE_KEY_JSON` |
+| *(pending)* | `iuf` | CLC2018 vector (WUI input) | Copernicus Land Monitoring Service | 1:100k vector | `CLMS_SERVICE_KEY_JSON` |
+
+Copy `.env.example` to `.env` and fill the credentials in. After changing
+`.env`, run `make up` (recreates containers) — `make restart` does not reload
+environment.
+
+### Initial seeding, step by step
+
+Run these in order on a fresh database (order matters only where noted):
+
+```bash
+make borders                     # 1. Spain admin boundaries  (~1 min)
+make dtm                         # 2. IGN elevation 25 m      (~5 min)
+make twi                         # 3. TWI, computed from 2's staged tiles (15-40 min GRASS)
+make mdt                         # 4. ASTER reference grid    (~5 min)
+make fwi START=2026-05-01        # 5. weather, May 1 -> latest day (long: ~330 MB/day)
+make sentinel                    # 6. Sentinel-2, current season so far (~30 min)
+make lst                         # 7. surface temperature, yesterday (~1 min)
+make infra                       # 8. OSM roads + railways    (~10 min)
+make fuels                       # 9. MFE fuel models         (~45 min, slow API)
+make hist                        # 10. FIRMS fire hotspots, season so far (needs 1!)
+make hist-scenes PRE=2025-05-03 POST=2025-10-25   # 11. dNBR pair, last complete season
+make clc                         # 12. CLC+ land cover (Copernicus queue: minutes-hours)
+```
+
+Constraints: `hist` clips against the Galicia polygon from `borders` (1 before
+10); `twi` computes from the tiles staged by `dtm` (2 before 3). Everything
+else is order-independent and can run in parallel.
+
+Verify any layer after its target finishes:
+
+```bash
+docker compose exec postgis psql -U gis -d gis -c "SELECT count(*) FROM <table>;"
+```
+
+### Date ranges (START / END)
+
+The time-dependent targets share one vocabulary. `START`/`END` are full dates
+(`YYYY-MM-DD`); every target defaults to "latest available" when they are
+omitted:
+
+| Command | Fetches |
+|---|---|
+| `make fwi` | yesterday only (the daily increment) |
+| `make fwi START=2026-05-01` | May 1 through yesterday |
+| `make fwi START=... END=...` | exact range |
+| `make sentinel` | current year's May-Oct season, clamped to today |
+| `make sentinel START=2026-05-01` | that day to season end (year read from the date) |
+| `make sentinel START=... END=...` | exact sub-season (one calendar year per run) |
+| `make sentinel YEAR=2025 [MONTH=05]` | whole season / one month (older style) |
+| `make hist` | current year's fire season, clamped to today |
+| `make hist START=... [END=...]` / `YEAR=...` | sub-season / whole year |
+| `make lst` | yesterday's Sentinel-3 daytime pass |
+| `make lst DATE=2026-06-15` | a specific day |
+| `make lst START=2026-07-01 [END=...]` | one mosaic ending at END, gap-filling back to START (NOT a time series — the `lst` table holds a single mosaic) |
+
+Notes:
+
+- Sentinel-2 seeds both the **time series** (`sentinel_*_ts`, one row set per
+  weekly `capture_date`) and the **current mosaic** tables the engine reads
+  (`sentinel_b4/b8/b8a/b11`, latest window only). Re-runs replace overlapping
+  weeks in place — no duplicates.
+- `hist` replaces the requested **year** wholesale in the `hist` table. Years
+  2016-2024 are UVIGO-curated data; only overwrite them deliberately.
+- `hist-scenes` needs a cloud-free window after the fire season, so the 2026
+  pair can only be fetched in November 2026; until then use the latest
+  complete season (2025).
+- `clc` has no date choice: CLC+ Backbone 2023 is the newest published land
+  cover (the 2025 edition ships end of 2026; when it appears, add its dataset
+  UID in `scripts/fetch_sources.py` and run `make clc YEAR=2025`).
+
+### Update cadence: static vs semi-dynamic vs dynamic
+
+| Class | Targets | Refresh | Why |
+|---|---|---|---|
+| **Dynamic** (daily) | `fwi`, `lst` | every day | new MeteoGalicia forecast each morning; Sentinel-3 passes daily. Drives the live map. |
+| **Semi-dynamic** (in fire season) | `sentinel` weekly, `hist` monthly | May-Oct | Sentinel-2 revisit is ~5 days (weekly NDVI/NDMI mosaics); FIRMS hotspots accumulate as fires happen |
+| **Static / quasi-static** | `borders` (never), `dtm`+`twi` (~2 years), `mdt` (never), `infra` (few times/year), `fuels` (new MFE edition, 5-10 years), `clc` (new CLC edition, ~2 years), `hist-scenes` (once, each November) | on publication | terrain, land cover and infrastructure change on multi-year timescales |
+
+Suggested cron for a server (all commands are argument-free thanks to the
+"latest available" defaults):
+
+```cron
+30 6 * * *      cd /path/to/STORCITO && make fwi && make lst    # daily
+0  7 * * 1      cd /path/to/STORCITO && make sentinel           # weekly (May-Oct)
+0  8 1 * *      cd /path/to/STORCITO && make hist               # monthly (May-Oct)
+```
+
+Every fetch writes a JSON manifest (URL, parameters, SHA-256 of each file,
+timestamp) under `data/OUTPUT/source_data/manifests/` — the audit trail of
+exactly what was downloaded when.
+
 ## Database
 
 STORCITO stores its geospatial inputs and results in the bundled **PostGIS**
@@ -100,14 +225,18 @@ vector tables carry a `geom` (or `ogc_fid`) geometry column.
 
 | Table | Kind | SRID | Contents |
 |---|---|---|---|
-| `dtm` | raster | 4326 | ASTER GDEM elevation (DTM) |
-| `sentinel_b4`, `sentinel_b8`, `sentinel_b11` | raster | 4326 | Sentinel-2 L2A bands used for vegetation indices |
+| `dtm` | raster | 4258 | IGN MDT elevation, 25 m (LiDAR-derived) |
+| `sentinel_b4`, `sentinel_b8`, `sentinel_b8a`, `sentinel_b11` | raster | 4326 | Sentinel-2 L2A current-week mosaic (engine input) |
+| `sentinel_*_ts` | raster | 4326 | Sentinel-2 weekly time series with `capture_date` |
 | `fwi_files`, `fwi_slices` | blob/cache | n/a | MeteoGalicia WRF NetCDF files and per-day cached slices |
-| `fuels` | raster | 32629/25830 | Fuel model raster |
-| `infra` | vector | 4326 | Roads/infrastructure |
+| `fuels` | raster | 32629 | Rothermel fuel models 1-13, rasterized from MFE polygons |
+| `infra` | vector | 4326 | OSM roads + railways (Geofabrik) |
 | `iuf` | vector | 4326 | CLC/CORINE land-cover input for WUI/IUF |
-| `hist`, `hist_scenes` | vector/blob | 4326/n/a | Fire-history geometry and pre/post Sentinel scene blobs |
-| `mdt`, `twi`, `lst` | raster | varies | Additional terrain/moisture/temperature layers |
+| `clcplus_2023` | raster | 3035 | CLC+ Backbone 2023 land cover, 10 m |
+| `hist`, `hist_scenes` | vector/blob | 4326/n/a | FIRMS fire hotspots and pre/post Sentinel scene blobs |
+| `mdt` | raster | 32629 | ASTER GDEM 30 m reference grid (WUI/infra rasterization) |
+| `twi` | raster | 32629 | Topographic Wetness Index, computed from `dtm` (GRASS) |
+| `lst` | raster | 4326 | Sentinel-3 SLSTR land surface temperature (Kelvin) |
 | `spain_autonomous_communities` | vector | 4326 | Admin level 1 (incl. `acom_name='Galicia'`) |
 | `spain_provinces` | vector | 4326 | Admin level 2 |
 | `spain_municipalities` | vector | 4326 | Admin level 3 |
