@@ -2,6 +2,10 @@
 .agents
 .codex
 
+# Never bake credentials into image layers.
+.env
+secrets/
+
 __pycache__/
 *.py[cod]
 *$py.class
