@@ -122,7 +122,7 @@ make twi                            # 3. TWI, computed from 2's staged tiles (15
 make mdt                            # 4. ASTER reference grid    (~5 min)
 make fwi START=2026-05-01           # 5. weather, May 1 2026 -> latest available day (long: ~330 MB/day)
 make sentinel START=2026-05-01      # 6. Sentinel-2 weekly mosaics, May 1 2026 -> latest image (~30 min)
-make lst                            # 7. surface temperature, latest available day (~1 min)
+make lst START=2026-05-01           # 7. surface temperature: one latest-day mosaic, cloud gaps filled from May 1 2026 (~1 min)
 make infra                          # 8. OSM roads + railways    (~10 min)
 make fuels                          # 9. MFE fuel models         (~45 min, slow API)
 make hist START=2026-05-01          # 10. FIRMS fire hotspots, May 1 2026 -> today (needs step 1!)
