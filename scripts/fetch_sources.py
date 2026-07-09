@@ -322,7 +322,9 @@ def cmd_fwi(args: argparse.Namespace) -> int:
     bbox = parse_bbox(args.bbox)
     if args.start:
         start = parse_date(args.start)
-        end = parse_date(args.end or args.start)
+        # No --end: fetch through the latest complete day (yesterday UTC).
+        yesterday = datetime.now(timezone.utc).date() - timedelta(days=1)
+        end = parse_date(args.end) if args.end else max(yesterday, start)
     elif args.date:
         start = end = parse_date(args.date)
     else:
