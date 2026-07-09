@@ -70,19 +70,7 @@ API endpoints:
 - `GET /available-static-dates`
 - `POST /run-static-aoi`
 - `POST /run-static-aoi-wildfire`
-- `POST /calliope/start`
-
-Example request body:
-
-```json
-{
-  "longitude": -8.41,
-  "latitude": 43.36,
-  "date": "2025-09-05",
-  "buffer_m": 3000,
-  "context_buffer_m": 3000
-}
-```
+- `POST /assessment/start` (deprecated alias: `POST /calliope/start`)
 
 ## Data pipeline: fetching every layer from its source
 
@@ -288,7 +276,8 @@ Table names are validated against the live catalog and all access is read-only.
 image if you are upgrading an older container.)
 
 For wildfire-platform compatibility, STORCITO also accepts the generic wildfire
-calculation payload at `/run-static-aoi-wildfire` and `/calliope/start`.
+calculation payload at `/run-static-aoi-wildfire` and `/assessment/start`
+(deprecated alias: `/calliope/start`).
 
 - `coordinates` must be GeoJSON geometry.
 - `start_date` and `end_date` must represent `16:00-17:00` in `Europe/Berlin`.
