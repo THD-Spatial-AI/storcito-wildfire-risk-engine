@@ -106,7 +106,7 @@ clc:
 
 iuf:
 	@$(ENV_RUN) python3 scripts/fetch_sources.py clc --dataset clc2018 --format vector \
-	  --bbox "-10.293,41.348,-5.749,44.636"
+	  --bbox=-10.293,41.348,-5.749,44.636
 	@cd data/OUTPUT/source_data/clc/clc2018/vector && \
 	  zip=$$(ls -t *.zip | head -1) && rm -rf extracted && unzip -o -q $$zip -d extracted
 	@$(COMPOSE) exec -T geotools bash -c 'gdb=$$(find /data/data/OUTPUT/source_data/clc/clc2018/vector/extracted -name "*.gdb" -type d | head -1) && \
