@@ -368,6 +368,16 @@ def reconstruct_hist(
         cur.execute("SELECT DISTINCT year FROM hist WHERE year IS NOT NULL ORDER BY year")
         years = [r[0] for r in cur.fetchall()]
 
+        cur.execute("SELECT DISTINCT left(filename, 4) FROM hist_scenes")
+        scene_years = sorted({int(r[0]) for r in cur.fetchall() if r[0].isdigit()})
+        missing = [y for y in scene_years if y not in years]
+        if missing:
+            raise RuntimeError(
+                f"hist_scenes has scenes for {missing} but the hist table has no "
+                f"hotspots for those years (available: {years}). Seed them with "
+                + " and ".join(f"`make hist START={y}-05-01 END={y}-10-31`" for y in missing)
+            )
+
         cur.execute("SELECT phase, filename, data FROM hist_scenes ORDER BY phase, filename")
         for phase, filename, data in cur.fetchall():
             phase_dir = dest_hist_dir / phase
