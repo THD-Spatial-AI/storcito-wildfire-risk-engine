@@ -142,6 +142,76 @@ def export_raster_table(
     return dest_tif
 
 
+def _lst_ts_date_for(target_date) -> str | None:
+    """Best lst_ts capture_date for a run: the assessment day itself, else the
+    nearest earlier day, else None (caller falls back to the current lst table).
+    """
+    try:
+        with _pg_connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('public.lst_ts')")
+            if cur.fetchone()[0] is None:
+                return None
+            cur.execute(
+                "SELECT max(capture_date) FROM lst_ts WHERE capture_date <= %s",
+                (target_date,),
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                return row[0].isoformat()
+            cur.execute("SELECT min(capture_date) FROM lst_ts")
+            row = cur.fetchone()
+            return row[0].isoformat() if row and row[0] else None
+    except Exception:
+        return None
+
+
+def export_lst_raster(
+    target_date,
+    dest_tif: str | Path,
+    *,
+    clip_geom: BaseGeometry | None = None,
+    clip_geom_crs: str = "EPSG:4326",
+    target_srs: str | None = None,
+) -> tuple[Path, str]:
+    """Export the LST raster matching the assessment date from lst_ts.
+
+    Returns (path, capture_date_used). Falls back to the current `lst` table
+    when the time series is missing/empty.
+    """
+    dest_tif = Path(dest_tif)
+    capture_date = _lst_ts_date_for(target_date)
+    if capture_date is None:
+        export_raster_table("lst", dest_tif, clip_geom=clip_geom,
+                            clip_geom_crs=clip_geom_crs, target_srs=target_srs)
+        return dest_tif, "current"
+
+    dest_tif.parent.mkdir(parents=True, exist_ok=True)
+    with _pg_connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT ST_AsGDALRaster(ST_Union(rast), 'GTiff') FROM lst_ts "
+            "WHERE capture_date = %s",
+            (capture_date,),
+        )
+        raw = cur.fetchone()[0]
+    fd, tmp_name = tempfile.mkstemp(suffix=".tif", dir=dest_tif.parent)
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        tmp.write_bytes(bytes(raw))
+        cmd = ["gdalwarp", "-of", "GTiff", "-overwrite"]
+        if clip_geom is not None:
+            cutline = _write_cutline(clip_geom, clip_geom_crs, dest_tif.parent)
+            cmd += ["-cutline", str(cutline), "-crop_to_cutline"]
+        if target_srs is not None:
+            cmd += ["-t_srs", target_srs]
+        _run(cmd + [str(tmp), str(dest_tif)])
+    finally:
+        tmp.unlink(missing_ok=True)
+        if clip_geom is not None:
+            cutline.unlink(missing_ok=True)
+    return dest_tif, capture_date
+
+
 def export_vector_table(
     table: str,
     dest_shp: str | Path,
@@ -384,9 +454,16 @@ def reconstruct_inputs(
     # the heavier DB raster/vector exports run.
     fwi_files = reconstruct_fwi(target_date, dest_input_dir / "FWI")
 
+    lst_date_used: str | None = None
     for kind, table, rel in _ENGINE_PLANS[engine]:
         dest = dest_input_dir / rel
-        if kind == _RASTER:
+        if table == "lst":
+            # Date-matched from the lst_ts series: the static map (hottest FWI
+            # day) gets that day's LST, dynamic runs get their own day's.
+            _, lst_date_used = export_lst_raster(
+                target_date, dest, clip_geom=clip_geom,
+                clip_geom_crs=clip_geom_crs, target_srs=ENGINE_RASTER_SRS)
+        elif kind == _RASTER:
             export_raster_table(table, dest, clip_geom=clip_geom,
                                 clip_geom_crs=clip_geom_crs, target_srs=ENGINE_RASTER_SRS)
         else:
@@ -404,5 +481,6 @@ def reconstruct_inputs(
         "produced": produced,
         "fwi_files": [str(p) for p in fwi_files],
         "hist": hist_info,
+        "lst_date": lst_date_used,
         "skipped_layers": [],
     }

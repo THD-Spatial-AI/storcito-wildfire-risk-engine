@@ -16,7 +16,7 @@ Start the API stack:
 docker compose up -d
 ```
 
-The public API is served through HAProxy at `http://localhost:8090`, backed by
+The public API is served through HAProxy at `http://localhost:8085`, backed by
 four STORCITO API containers: `storcito-api-1` through `storcito-api-4`.
 HAProxy stats are available at `http://localhost:8406/stats`.
 
@@ -99,7 +99,7 @@ download from the source.
 | `mdt` | `mdt` | ASTER GDEM V003 | NASA Earthdata / LP DAAC (`earthaccess`) | 30 m | `EARTHDATA_USERNAME` + `EARTHDATA_PASSWORD` |
 | `fwi` | `fwi_files` | WRF 1 km weather forecast | MeteoGalicia THREDDS NCSS — `thredds.meteogalicia.gal` | 1 km, daily NetCDF | none |
 | `sentinel` | `sentinel_b4/b8/b8a/b11` + `_ts` | Sentinel-2 L2A bands B04/B08/B8A/B11 | Copernicus Data Space Process API — `sh.dataspace.copernicus.eu` | weekly mosaics | `SH_CLIENT_ID` + `SH_CLIENT_SECRET` |
-| `lst` | `lst` | Sentinel-3 SLSTR L2 land surface temperature | Copernicus Data Space Process API | ~1 km, Kelvin | `SH_CLIENT_ID` + `SH_CLIENT_SECRET` |
+| `lst` | `lst` + `lst_ts` | Sentinel-3 SLSTR L2 land surface temperature | Copernicus Data Space Process API | ~1 km, Kelvin | `SH_CLIENT_ID` + `SH_CLIENT_SECRET` |
 | `infra` | `infra` | OSM roads + railways | Geofabrik extracts — `download.geofabrik.de` | vector | none |
 | `fuels` | `fuels` | MFE forest map, Rothermel fuel model (`modelocombustible`) | MITECO OGC API-Features — `wmts.mapama.gob.es/sig-api` | 20 m (rasterized) | none |
 | `hist` | `hist` | MODIS active-fire hotspots (SP archive + NRT, auto-stitched) | NASA FIRMS area API | points | `FIRMS_MAP_KEY` |
@@ -164,7 +164,7 @@ omitted:
 | `make hist START=... [END=...]` / `YEAR=...` | sub-season / whole year |
 | `make lst` | yesterday's Sentinel-3 daytime pass |
 | `make lst DATE=2026-06-15` | a specific day |
-| `make lst START=2026-05-01 [END=...]` | daily series into `lst_ts`; the newest day also replaces the current `lst` table |
+| `make lst START=2026-05-01 [END=...]` | daily series into `lst_ts` — the engine picks the raster matching each run's assessment date from it (falling back to the nearest earlier day); the newest day also refreshes the `lst` fallback table |
 
 Notes:
 
@@ -229,7 +229,7 @@ vector tables carry a `geom` (or `ogc_fid`) geometry column.
 | `hist`, `hist_scenes` | vector/blob | 4326/n/a | FIRMS fire hotspots and pre/post Sentinel scene blobs |
 | `mdt` | raster | 32629 | ASTER GDEM 30 m reference grid (WUI/infra rasterization) |
 | `twi` | raster | 32629 | Topographic Wetness Index, computed from `dtm` (GRASS) |
-| `lst` | raster | 4326 | Sentinel-3 SLSTR land surface temperature (Kelvin) |
+| `lst`, `lst_ts` | raster | 4326 | Sentinel-3 SLSTR land surface temperature (Kelvin); `lst_ts` is the daily series the engine selects from by assessment date |
 | `spain_autonomous_communities` | vector | 4326 | Admin level 1 (incl. `acom_name='Galicia'`) |
 | `spain_provinces` | vector | 4326 | Admin level 2 |
 | `spain_municipalities` | vector | 4326 | Admin level 3 |
@@ -271,9 +271,9 @@ Read-only introspection over the tables above (backed by `FR/db_catalog.py`):
 Examples:
 
 ```bash
-curl http://localhost:8090/db/tables
-curl http://localhost:8090/db/raster/s2_b04
-curl "http://localhost:8090/db/vector/spain_provinces?bbox=-9.4,41.8,-6.7,43.8&limit=20"
+curl http://localhost:8085/db/tables
+curl http://localhost:8085/db/raster/sentinel_b4
+curl "http://localhost:8085/db/vector/spain_provinces?bbox=-9.4,41.8,-6.7,43.8&limit=20"
 ```
 
 Table names are validated against the live catalog and all access is read-only.
