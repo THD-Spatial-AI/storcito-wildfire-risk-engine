@@ -116,19 +116,24 @@ environment.
 Run these in order on a fresh database (order matters only where noted):
 
 ```bash
-make borders                     # 1. Spain admin boundaries  (~1 min)
-make dtm                         # 2. IGN elevation 25 m      (~5 min)
-make twi                         # 3. TWI, computed from 2's staged tiles (15-40 min GRASS)
-make mdt                         # 4. ASTER reference grid    (~5 min)
-make fwi START=2026-05-01        # 5. weather, May 1 -> latest day (long: ~330 MB/day)
-make sentinel                    # 6. Sentinel-2, current season so far (~30 min)
-make lst                         # 7. surface temperature, yesterday (~1 min)
-make infra                       # 8. OSM roads + railways    (~10 min)
-make fuels                       # 9. MFE fuel models         (~45 min, slow API)
-make hist                        # 10. FIRMS fire hotspots, season so far (needs 1!)
-make hist-scenes PRE=2025-05-03 POST=2025-10-25   # 11. dNBR pair, last complete season
-make clc                         # 12. CLC+ land cover (Copernicus queue: minutes-hours)
+make borders                        # 1. Spain admin boundaries  (~1 min)
+make dtm                            # 2. IGN elevation 25 m      (~5 min)
+make twi                            # 3. TWI, computed from 2's staged tiles (15-40 min GRASS)
+make mdt                            # 4. ASTER reference grid    (~5 min)
+make fwi START=2026-05-01           # 5. weather, May 1 2026 -> latest available day (long: ~330 MB/day)
+make sentinel START=2026-05-01      # 6. Sentinel-2 weekly mosaics, May 1 2026 -> latest image (~30 min)
+make lst                            # 7. surface temperature, latest available day (~1 min)
+make infra                          # 8. OSM roads + railways    (~10 min)
+make fuels                          # 9. MFE fuel models         (~45 min, slow API)
+make hist START=2026-05-01          # 10. FIRMS fire hotspots, May 1 2026 -> today (needs step 1!)
+make hist-scenes PRE=2025-05-03 POST=2025-10-25   # 11. dNBR pair, last complete season (2025)
+make clc                            # 12. CLC+ Backbone 2023 land cover (Copernicus queue: minutes-hours)
 ```
+
+The explicit `START=` dates make the fetched range visible; the bare forms
+(`make sentinel`, `make hist`) fetch exactly the same "current season so far"
+range by default. Adjust the year in `START=` to backfill another season
+(e.g. `make sentinel START=2025-05-01` for all of 2025).
 
 Constraints: `hist` clips against the Galicia polygon from `borders` (1 before
 10); `twi` computes from the tiles staged by `dtm` (2 before 3). Everything
