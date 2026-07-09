@@ -529,15 +529,18 @@ def cmd_compute_twi(args: argparse.Namespace) -> int:
             ["gdalwarp", "-q", "-t_srs", "EPSG:32629", "-tr", "25", "25",
              "-r", "bilinear", "-co", "COMPRESS=DEFLATE", str(vrt), str(dem)]
         )
+        # float() cast avoids the DCELL->Float32 precision warning; -c skips the
+        # color table GDAL rejects on float TIFF bands.
         grass_script = (
             f"r.in.gdal --q input={dem} output=dem && "
             "g.region raster=dem && "
             "r.fill.dir --q input=dem output=dem_filled direction=fdir && "
-            "r.topidx input=dem_filled output=twi && "
-            f"r.out.gdal --q -f input=twi output={twi} format=GTiff "
+            "r.topidx --q input=dem_filled output=twi && "
+            "r.mapcalc --q expression='twi_f=float(twi)' && "
+            f"r.out.gdal --q -c input=twi_f output={twi} format=GTiff "
             "type=Float32 createopt=COMPRESS=DEFLATE"
         )
-        run(["grass", "--tmp-location", str(dem), "--exec", "bash", "-c", grass_script])
+        run(["grass", "--tmp-project", str(dem), "--exec", "bash", "-c", grass_script])
         import shutil  # move survives crossing filesystems (/tmp vs bind mount)
 
         shutil.move(str(twi), str(out_tif))
