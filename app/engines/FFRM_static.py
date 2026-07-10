@@ -171,6 +171,8 @@ if run_fwi:
         show_plots=False
     )
 
+import matplotlib.pyplot as _plt
+_plt.close('all')
 print("Todas las capas base del caso estático generadas/disponibles en 're\\'.")
 
 # ==========================================

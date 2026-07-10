@@ -324,6 +324,60 @@ def _finish_wildfire_response(outputs, payload, request, calculation_mode,
     return response
 
 
+
+def _region_breaks(target_date) -> dict[str, str]:
+    """Region-wide 20/40/60/80 percentile breakpoints for the percentile-
+    classified layers, so tiled/partial runs classify identically everywhere.
+    LST is per assessment date (from lst_ts); TWI is static and cached.
+    Empty dict on any failure -> engine falls back to extent-local percentiles.
+    """
+    breaks: dict[str, str] = {}
+    try:
+        from FR.db_reconstruct import _pg_connect, _ts_date_for
+
+        with _pg_connect() as conn, conn.cursor() as cur:
+            capture = _ts_date_for("lst_ts", target_date)
+            if capture:
+                cur.execute(
+                    """SELECT (q).value FROM (
+                         SELECT ST_Quantile(ST_Union(rast), ARRAY[0.2,0.4,0.6,0.8]) q
+                         FROM lst_ts WHERE capture_date = %s) s""",
+                    (capture,),
+                )
+                vals = [r[0] for r in cur.fetchall()]
+                if len(vals) == 4:
+                    breaks["FFRM_LST_BREAKS"] = ",".join(f"{v:.3f}" for v in vals)
+
+            cur.execute(
+                """CREATE TABLE IF NOT EXISTS layer_breaks
+                   (layer text PRIMARY KEY, breaks float8[], computed_at timestamptz)"""
+            )
+            cur.execute("SELECT breaks FROM layer_breaks WHERE layer = 'twi'")
+            row = cur.fetchone()
+            if row is None:
+                # 25% spatial sample: exact enough for a smooth field, and
+                # avoids unioning the full 25 m raster in postgres memory.
+                cur.execute(
+                    """SELECT (q).value FROM (
+                         SELECT ST_Quantile(ST_Union(rast), ARRAY[0.2,0.4,0.6,0.8]) q
+                         FROM twi WHERE rid %% 4 = 0) s"""
+                )
+                vals = [r[0] for r in cur.fetchall()]
+                if len(vals) == 4:
+                    cur.execute(
+                        "INSERT INTO layer_breaks VALUES ('twi', %s, now()) "
+                        "ON CONFLICT (layer) DO NOTHING",
+                        (vals,),
+                    )
+                    conn.commit()
+                    row = (vals,)
+            if row:
+                breaks["FFRM_TWI_BREAKS"] = ",".join(f"{v:.4f}" for v in row[0])
+    except Exception as exc:  # noqa: BLE001
+        print(f"[STORCITO] region breaks unavailable ({exc}); extent-local percentiles", flush=True)
+    return breaks
+
+
 def run_engine_job(
     payload: WildfireCalculationRequest,
     engine: str,
@@ -354,6 +408,7 @@ def run_engine_job(
         "FFRM_BASE_DIR": str(job_dir),
         "FFRM_OUTPUT_DIR": str(output_dir),
         "MPLBACKEND": "Agg",
+        **_region_breaks(target_date),
         **cfg["run_flags"],
     }
     proc = subprocess.run(

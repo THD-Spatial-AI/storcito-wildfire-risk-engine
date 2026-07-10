@@ -177,6 +177,9 @@ if run_lst:
         show_plots=False,
     )
 
+import matplotlib.pyplot as _plt
+_plt.close('all') 
+
 print("Todas las capas base del caso dinámico generadas/disponibles en 're'.")
 
 # ==========================================

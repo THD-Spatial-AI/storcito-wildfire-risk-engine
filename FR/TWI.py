@@ -3,6 +3,23 @@ import rasterio
 import numpy as np
 import matplotlib.pyplot as plt
 
+
+def _env_breaks(name):
+    """Fixed classification breakpoints from the environment (region-wide
+    values computed once per run), overriding extent-local percentiles so
+    tiled runs classify identically everywhere."""
+    import os
+
+    raw = os.environ.get(name, "")
+    parts = [p for p in raw.replace(";", ",").split(",") if p.strip()]
+    if len(parts) == 4:
+        try:
+            return tuple(float(p) for p in parts)
+        except ValueError:
+            pass
+    return None
+
+
 def Twi(input_twi, output_twi=None, output_twi_risk=None, show_plots=True):
     print('Running TWI layer...')
 
@@ -40,7 +57,8 @@ def Twi(input_twi, output_twi=None, output_twi_risk=None, show_plots=True):
         raise ValueError("The TWI layer does not contain valid values.")
 
     print('Calculating TWI percentiles and risk...')
-    p20, p40, p60, p80 = np.percentile(twi[valid], [20, 40, 60, 80])
+    fixed = _env_breaks("FFRM_TWI_BREAKS")
+    p20, p40, p60, p80 = fixed if fixed else np.percentile(twi[valid], [20, 40, 60, 80])
 
     # Reclasification: assign values 1-5 for risk levels
     reclasificado = np.zeros(twi.shape, dtype=np.uint8)
@@ -118,7 +136,8 @@ def twi_risk(input_twi, output_risk):
     valid = np.isfinite(twi)
     if not np.any(valid):
         raise ValueError("The TWI layer does not contain valid values.")
-    p20, p40, p60, p80 = np.percentile(twi[valid], [20, 40, 60, 80])
+    fixed = _env_breaks("FFRM_TWI_BREAKS")
+    p20, p40, p60, p80 = fixed if fixed else np.percentile(twi[valid], [20, 40, 60, 80])
     r = np.zeros(twi.shape, dtype="int32")
     r[(twi <= p20) & valid] = 1
     r[(twi > p20) & (twi <= p40)] = 2

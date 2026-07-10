@@ -25,13 +25,15 @@ _MAP_KINDS = ("final_map", "continuous_map")
 def _clip_raster(cur, map_kind: str, target_date: date, aoi_geojson: str) -> bytes | None:
     cur.execute(
         """
-        SELECT ST_AsGDALRaster(
-                 ST_Clip(rast, ST_SetSRID(ST_GeomFromGeoJSON(%s), 32629), true),
-                 'GTiff')
-        FROM simulation_results
+        WITH aoi AS (SELECT ST_SetSRID(ST_GeomFromGeoJSON(%s), 32629) AS g)
+        SELECT ST_AsGDALRaster(ST_Clip(rast, aoi.g, true), 'GTiff')
+        FROM simulation_results, aoi
         WHERE user_id = %s AND engine = 'dynamic' AND map_kind = %s
           AND target_date = %s
-        ORDER BY created_at DESC
+          AND ST_Intersects(ST_ConvexHull(rast), aoi.g)
+        ORDER BY ST_Contains(ST_ConvexHull(rast), aoi.g) DESC,
+                 ST_Area(ST_Intersection(ST_ConvexHull(rast), aoi.g)) DESC,
+                 created_at DESC
         LIMIT 1
         """,
         (aoi_geojson, _REGIONAL_USER, map_kind, target_date),

@@ -16,8 +16,12 @@ cd "$(dirname "$0")/.."
 MAX_RUNS="${MAX_RUNS:-4}"
 MAX_ATTEMPTS="${MAX_ATTEMPTS:-3}"
 API_URL="${API_URL:-http://localhost:8085}"
-# Whole-coverage bbox (Galicia); the engine clips all layers to it.
-REGION_POLYGON='{"type":"Polygon","coordinates":[[[-9.31,41.80],[-6.73,41.80],[-6.73,43.80],[-9.31,43.80],[-9.31,41.80]]]}'
+TILES=(
+ '{"type":"Polygon","coordinates":[[[-9.31,41.80],[-7.95,41.80],[-7.95,42.95],[-9.31,42.95],[-9.31,41.80]]]}'
+ '{"type":"Polygon","coordinates":[[[-8.10,41.80],[-6.73,41.80],[-6.73,42.95],[-8.10,42.95],[-8.10,41.80]]]}'
+ '{"type":"Polygon","coordinates":[[[-9.31,42.80],[-7.95,42.80],[-7.95,43.80],[-9.31,43.80],[-9.31,42.80]]]}'
+ '{"type":"Polygon","coordinates":[[[-8.10,42.80],[-6.73,42.80],[-6.73,43.80],[-8.10,43.80],[-8.10,42.80]]]}'
+)
 
 LOG_DIR="data/OUTPUT/logs"
 mkdir -p "$LOG_DIR"
@@ -82,14 +86,19 @@ for d in $dates; do
               WHERE engine='dynamic' AND target_date='$d';"
     run_started=$(date -u +%FT%TZ)
 
-    body=$(curl -s -X POST "$API_URL/run-dynamic" \
-        -H "Content-Type: application/json" --max-time 7200 -d '{
-        "user_id":"regional","model_id":"dynamic","session_id":"'"$d"'",
-        "start_date":"'"$d"'T16:00:00+02:00","end_date":"'"$d"'T17:00:00+02:00",
-        "parameters":{"context_buffer_m":0},
-        "coordinates":'"$REGION_POLYGON"'}')
+    ok=1
+    for t in 0 1 2 3; do
+        echo "    tile $t"
+        body=$(curl -s -X POST "$API_URL/run-dynamic" \
+            -H "Content-Type: application/json" --max-time 7200 -d '{
+            "user_id":"regional","model_id":"dynamic","session_id":"'"$d"'_t'"$t"'",
+            "start_date":"'"$d"'T16:00:00+02:00","end_date":"'"$d"'T17:00:00+02:00",
+            "parameters":{"context_buffer_m":0},
+            "coordinates":'"${TILES[$t]}"'}')
+        echo "$body" | grep -q '"status": *"success"' || { ok=0; break; }
+    done
 
-    if echo "$body" | grep -q '"status": *"success"'; then
+    if [ "$ok" = "1" ]; then
         # Success: retire the superseded map (retrieval reads newest first, so
         # the old one stayed serviceable while this run was in flight).
         $PSQL -c "DELETE FROM simulation_results
