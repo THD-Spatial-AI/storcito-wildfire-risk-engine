@@ -88,9 +88,10 @@ sentinel:
 	  start=$(MONTH)-01; end=$$(date -d "$(YEAR)-$(MONTH)-01 +1 month -1 day" +%m-%d); \
 	else start=05-01; end=10-31; fi; \
 	python3 scripts/fetch_sources.py sentinel --years $(YEAR) --season-start $$start --season-end $$end; rc=$$?; \
+	skip=$$( [ "$(YEAR)" != "$$(date +%Y)" ] && echo --skip-current ); \
 	$(COMPOSE) exec -T geotools bash -c 'cd /data && \
 	  for w in $$(ls data/OUTPUT/source_data/sentinel | grep "^$(YEAR)$(MONTH)" | sort); do \
-	    python3 scripts/load_localhost.py load-sentinel --dir data/OUTPUT/source_data/sentinel/$$w || exit 1; \
+	    python3 scripts/load_localhost.py load-sentinel --dir data/OUTPUT/source_data/sentinel/$$w '"$$skip"' || exit 1; \
 	  done' && exit $$rc
 
 # Fetch CLC+ land cover

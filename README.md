@@ -176,9 +176,11 @@ omitted:
 Notes:
 
 - Sentinel-2 seeds both the **time series** (`sentinel_*_ts`, one row set per
-  weekly `capture_date`) and the **current mosaic** tables the engine reads
+  weekly `capture_date`) and the **current mosaic** tables
   (`sentinel_b4/b8/b8a/b11`, latest window only). Re-runs replace overlapping
-  weeks in place — no duplicates.
+  weeks in place — no duplicates. Backfilling a past year (START year !=
+  current year) skips the current-mosaic refresh so it never overwrites the
+  present season's mosaic.
 - `hist` replaces the requested **year** wholesale in the `hist` table. Years
   2016-2024 are UVIGO-curated data; only overwrite them deliberately.
 - `hist-scenes` needs a cloud-free window after the fire season, so the 2026

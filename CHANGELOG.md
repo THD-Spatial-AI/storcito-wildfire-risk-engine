@@ -66,53 +66,22 @@ Notable changes of this engine relative to the original UVIGO codebase
   sources accepted.
 - `reconstruct_hist` fails fast with the exact `make hist` command when
   `hist_scenes` years have no matching hotspots in `hist`.
+- AOIs must intersect the coverage region (`STORCITO_COVERAGE_REGION`,
+  default Galicia); requests outside it return 422.
+- Whole-region engines run non-interactively end to end: `f_w_index`
+  defaults its scoring day to the newest file, `Ndmi`/`Twi`/`Lst` no longer
+  prompt or write to hardcoded paths, and the fire-history layer is located
+  by pattern instead of a hardcoded year range.
+- Engine inputs with a time series (Sentinel-2 bands, LST) are exported
+  matching the run's assessment date; dNBR treats NaN as unburned; result
+  rasters declare nodata=0; the Sentinel-2 evalscript masks SCL cloud
+  classes to nodata.
+- Loader hardening: one spatial index per raster table, single-insert FWI
+  blob assembly (run `VACUUM FULL fwi_files` once on existing databases),
+  cache invalidation for re-seeded FWI dates, unique staging table names,
+  `ST_MakeValid` on `iuf`. `make fwi`/`sentinel` seed staged files even
+  when the fetch partially fails.
 
-
-## 2026-07-10 — External review fixes
-
-Findings from an external code review, verified and addressed:
-
-- **Out-of-coverage requests rejected** (was: nearest-weather-cell
-  substitution silently produced fabricated results for AOIs anywhere on
-  Earth). AOIs must now intersect the coverage region
-  (`STORCITO_COVERAGE_REGION`); violations return 422 pointing at
-  `/available-data-coverage`.
-- **Whole-region engines un-broken**: `f_w_index` defaults its scoring day to
-  the newest available file again (the run-up refactor had made
-  `target_date` mandatory, crashing `/run-static` and `/run-dynamic`);
-  `Ndmi` rewritten with the engine's signature and save layout; interactive
-  `input()` prompts in `Ndmi`/`Twi`/`Lst` are TTY-guarded and their
-  hardcoded Windows output paths derive from the given output path.
-- **No future data in historical runs**: Sentinel-2 B04/B08/B11 engine
-  inputs are now exported from the `sentinel_*_ts` series matching the
-  assessment date (like LST); the `*_ts` fallback picks the nearest later
-  date instead of the earliest one in the table.
-- **dNBR correctness**: NaN pixels no longer classify as burned; PRE/POST
-  grid shapes are verified before differencing.
-- **Result nodata**: output writers declare 0 (the value actually written to
-  invalid pixels) instead of inheriting the reference raster's -9999.
-- **Cloud masking**: the Sentinel-2 evalscript masks SCL classes 3/8/9/10
-  (cloud shadow, medium/high cloud, cirrus) to nodata.
-- **FIRMS bbox** covered all of Galicia's north (was cut at 43.70 N;
-  Estaca de Bares reaches 43.79 N).
-- **Loader**: spatial index created once per table (appends previously added
-  one duplicate GiST index per file); FWI blobs assembled server-side in one
-  insert (repeated `||` updates had bloated the table ~2.3x — run
-  `VACUUM FULL fwi_files` once on existing databases, and drop old duplicate
-  indexes with the DO block in `load_localhost.py`); re-seeded FWI dates
-  invalidate `fwi_slices` and the on-disk NetCDF cache; staging tables get
-  unique names; `iuf` geometries pass `ST_MakeValid`.
-- **Makefile**: `fwi`/`sentinel` seed whatever was staged even when the
-  fetch partially fails (the fetch's exit code is still propagated).
-
-Review findings *not* adopted, with reasons: FIRMS year-replacement is
-already atomic (single transaction per CSV; a failed load rolls back);
-SP+NRT merging is intentional (rows carry the source in `version`, e.g.
-`6.1NRT`, and SP re-runs replace NRT rows when the archive catches up);
-boundaries remain OpenDataSoft-derived for now (simplified but sufficient
-for clipping; switching to IGN's authoritative WFS is noted as future work);
-Sentinel's ~180 m default resolution is a deliberate CDSE-quota tradeoff -
-`make sentinel` accepts `--resolution` for native 10-20 m tiled fetches.
 
 ## Backfilling a past season (example: 2025)
 

@@ -224,10 +224,16 @@ if run_fwi:
     active_top_levels.add("meteo")
     raw_layer_paths["meteo"] = Path(_cropped('FWI_Risk_Map_cropped.tif'))
 
-# Historical fire (only when the dataset is available).
 if run_fhist:
+    fhist_candidates = sorted(
+        Path(output_folder_cropped).glob('Fire_History_(Risk_Map)_*_cropped.tif')
+    )
+    if not fhist_candidates:
+        raise FileNotFoundError(
+            f"No Fire_History_(Risk_Map)_*_cropped.tif in {output_folder_cropped}"
+        )
     active_top_levels.add("fhist")
-    raw_layer_paths["fhist"] = Path(_cropped('Fire_History_(Risk_Map)_(2016-2024)_cropped.tif'))
+    raw_layer_paths["fhist"] = fhist_candidates[-1]
 
 layers_dir = Path(output_base) / "layers"
 fr_final = Path(output_base) / "forest_fire_risk_map.tif"
