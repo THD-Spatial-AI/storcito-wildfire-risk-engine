@@ -98,12 +98,26 @@ run_wui = _env_flag("FFRM_RUN_WUI", True)
 run_fwi = _env_flag("FFRM_RUN_FWI", True)
 run_lst = _env_flag("FFRM_RUN_LST", False)
 
+
+import time as _time
+_engine_t0 = _time.time()
+_engine_last = [_time.time()]
+
+def _step(msg: str) -> None:
+    """Uniform step banner: elapsed since run start and since previous step."""
+    now = _time.time()
+    print(f"\n[engine +{now - _engine_t0:6.0f}s] ===== {msg} "
+          f"(previous step took {now - _engine_last[0]:.0f}s) =====", flush=True)
+    _engine_last[0] = now
+
+
 # ---------------------------
 # 1.4. LAYER GENERATION
 # ---------------------------
 mdt_reference = os.path.join(output_folder_re, 'TIFs', 'MDT_RISK_MAP.tif')
 
 if run_mdt:
+    _step("terrain: elevation, slope, aspect risk layers")
     Mdt.mdt(
         input_mdt,
         output_folder=output_folder_re,
@@ -112,9 +126,11 @@ if run_mdt:
     )
 
 if run_twi:
+    _step("topographic wetness (TWI) risk layer")
     Twi.Twi(input_twi, os.path.join(output_folder_re, 'twi.tif'))
 
 if run_ndvi:
+    _step("vegetation greenness (NDVI) risk layer")
     Ndvi.ndvi(
         input_b4,
         input_b8,
@@ -123,6 +139,7 @@ if run_ndvi:
     )
 
 if run_ndmi:
+    _step("vegetation moisture (NDMI) risk layer")
     Ndmi.Ndmi(
         input_b8,
         input_b11,
@@ -131,6 +148,7 @@ if run_ndmi:
     )
 
 if run_fmt:
+    _step("fuel model risk layer (MFE)")
     Fmt.fmt(
         input_fmt,
         output_folder=output_folder_re,
@@ -139,6 +157,7 @@ if run_fmt:
     )
 
 if run_infra:
+    _step("infrastructure proximity risk layer (OSM)")
     Infra.infrastructure(
         input_infra,
         output_folder=output_folder_re,
@@ -148,6 +167,7 @@ if run_infra:
     )
 
 if run_wui:
+    _step("wildland-urban interface risk layer")
     Wui.wui(
         input_infra,
         input_clc,
@@ -158,6 +178,7 @@ if run_wui:
     )
 
 if run_fwi:
+    _step("fire weather index (FWI) - warm-up + scoring")
     # NetCDF FWI; the job's INPUT/FWI folder already contains only the files up
     # to the requested date, so no target_date filtering is needed here.
     Fwi.f_w_index(
@@ -168,6 +189,7 @@ if run_fwi:
     )
 
 if run_lst:
+    _step("land surface temperature risk layer")
     if not os.path.exists(input_lst):
         raise FileNotFoundError(f"LST layer not found at expected path: {input_lst}")
     Lst.Lst(
@@ -185,7 +207,7 @@ print("Todas las capas base del caso dinámico generadas/disponibles en 're'.")
 # ==========================================
 # 2. CROP WITH BUFFER (Cropped Folder)
 # ==========================================
-print("\nStarting crop of layers to the study area...")
+_step("cropping all layers to the study area (+buffer)")
 shapefile_for_buffer = input_clc
 buffer_distance = 3000
 
@@ -194,7 +216,7 @@ Cropped.cropped(output_folder_re, output_folder_cropped, shapefile_for_buffer, b
 # ==========================================
 # 3. ALIGNMENT AND LOGICAL TREATMENT OF GAPS
 # ==========================================
-print("\nAligning layers and processing missing data...")
+_step("aligning layers to one grid and filling gaps")
 
 
 def align_raster_with_resampling(source_path, reference_path):
@@ -349,7 +371,7 @@ print("La matriz es consistente." if cr < 0.1 else "La matriz no es consistente.
 # ==========================================
 # 5. FINAL RISK MAP AND SAVING
 # ==========================================
-print("\nGenerating and classifying the final map...")
+_step("AHP weighting -> final risk map")
 fr_map = np.zeros(master_mask.shape, dtype=np.float32)
 for layer, weight in zip(final_layers, final_weights):
     fr_map += layer * np.float32(weight)

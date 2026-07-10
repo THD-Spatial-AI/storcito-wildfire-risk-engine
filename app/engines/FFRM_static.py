@@ -106,11 +106,25 @@ run_infra = _env_flag("FFRM_RUN_INFRA", True)
 run_wui = _env_flag("FFRM_RUN_WUI", True)
 run_fwi = _env_flag("FFRM_RUN_FWI", True)
 
+
+import time as _time
+_engine_t0 = _time.time()
+_engine_last = [_time.time()]
+
+def _step(msg: str) -> None:
+    """Uniform step banner: elapsed since run start and since previous step."""
+    now = _time.time()
+    print(f"\n[engine +{now - _engine_t0:6.0f}s] ===== {msg} "
+          f"(previous step took {now - _engine_last[0]:.0f}s) =====", flush=True)
+    _engine_last[0] = now
+
+
 # ---------------------------
 # 1.5. GENERACIÓN DE CAPAS
 # ---------------------------
 
 if run_mdt:
+    _step("terrain: elevation, slope, aspect risk layers")
     Mdt.mdt(
         input_mdt,
         output_folder=output_folder_re,
@@ -119,6 +133,7 @@ if run_mdt:
     )
 
 if run_ndvi:
+    _step("vegetation greenness (NDVI) risk layer")
     # Requiere versión unificada del módulo NDVI:
     # Ndvi(input_band4, input_band8, output_ndvi)
     Ndvi.ndvi(
@@ -129,6 +144,7 @@ if run_ndvi:
     )
 
 if run_fhist:
+    _step("historical fires (FIRMS + dNBR burned areas)")
     Fhist.fire_history(
         input_folder=input_hist_folder,
         output_folder=output_folder_re,
@@ -137,6 +153,7 @@ if run_fhist:
     )
 
 if run_fmt:
+    _step("fuel model risk layer (MFE)")
     Fmt.fmt(
         input_fmt,
         output_folder=output_folder_re,
@@ -145,6 +162,7 @@ if run_fmt:
     )
 
 if run_infra:
+    _step("infrastructure proximity risk layer (OSM)")
     Infra.infrastructure(
         input_infra,
         output_folder=output_folder_re,
@@ -154,6 +172,7 @@ if run_infra:
     )
 
 if run_wui:
+    _step("wildland-urban interface risk layer")
     Wui.wui(
         input_infra,
         input_clc,
@@ -164,6 +183,7 @@ if run_wui:
     )
 
 if run_fwi:
+    _step("fire weather index (FWI) - warm-up + scoring")
     Fwi.f_w_index(
         input_fwi_folder,
         output_folder=output_folder_re,
@@ -178,7 +198,7 @@ print("Todas las capas base del caso estático generadas/disponibles en 're\\'."
 # ==========================================
 # 2. RECORTE CON BUFFER (Carpeta Cropped)
 # ==========================================
-print("\nIniciando recorte de capas a la zona de estudio...")
+_step("cropping all layers to the study area (+buffer)")
 shapefile_for_buffer  = input_clc
 buffer_distance = 3000
 
@@ -190,7 +210,7 @@ Cropped.cropped(output_folder_re, output_folder_cropped, shapefile_for_buffer, b
 # The alignment / gap-filling / AHP weighting / classification logic lives in
 # FR.combine so it can run with only the layers that were actually generated
 # (layers without DB data are disabled via the run_* flags above).
-print("\nCombinando capas activas y generando el mapa final...")
+_step("AHP weighting -> final risk map")
 
 from pathlib import Path
 

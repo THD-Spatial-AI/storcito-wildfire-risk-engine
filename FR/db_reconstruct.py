@@ -475,9 +475,10 @@ def reconstruct_inputs(
     dest_input_dir = Path(dest_input_dir)
     produced: dict[str, str] = {}
 
-    # FWI first: it is a cheap file-copy and validates the requested date before
-    # the heavier DB raster/vector exports run.
+
+    print("[reconstruct] copying FWI weather files (run-up window) from DB blobs", flush=True)
     fwi_files = reconstruct_fwi(target_date, dest_input_dir / "FWI")
+    print(f"[reconstruct] FWI: {len(fwi_files)} day file(s) materialised", flush=True)
 
     # Layers with a *_ts time series export the raster matching the run's
     # assessment date, so historical runs never mix in newer imagery.
@@ -488,7 +489,9 @@ def reconstruct_inputs(
         "sentinel_b11": "sentinel_b11_ts",
     }
     ts_dates_used: dict[str, str] = {}
-    for kind, table, rel in _ENGINE_PLANS[engine]:
+    _plan = _ENGINE_PLANS[engine]
+    for _n, (kind, table, rel) in enumerate(_plan, start=1):
+        print(f"[reconstruct] {_n:>2}/{len(_plan)} exporting {table} -> {rel}", flush=True)
         dest = dest_input_dir / rel
         if table in _TS_TABLES:
             _, ts_dates_used[table] = export_ts_raster(
@@ -504,6 +507,7 @@ def reconstruct_inputs(
 
     # Historical fire (both engines): yearly perimeters from the `hist` table
     # plus the on-disk PRE_FIRE / POST_FIRE Sentinel scenes.
+    print("[reconstruct] exporting fire history (hotspot shapefiles + dNBR scenes)", flush=True)
     hist_info = reconstruct_hist(dest_input_dir / "HIST",
                                  clip_geom=clip_geom, clip_geom_crs=clip_geom_crs,
                                  target_date=target_date)

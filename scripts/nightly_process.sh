@@ -110,7 +110,7 @@ for d in $dates; do
                 jd="data/OUTPUT/jobs/regional_dynamic_${d}_t${t}/OUTPUT"
                 el=$(ls "$jd"/engine.log 2>/dev/null)
                 if [ -n "$el" ]; then
-                    step=$(grep -aoE "^[A-Za-z][^.]{4,60}\.\.\.|Processed day: [0-9-]+|OK" "$el" 2>/dev/null | tail -1)
+                    step=$(grep -aoE "\[engine \+[0-9 ]+s\] ===== [^=(]+|\[FWI\] +[0-9]+/[0-9]+ [0-9-]+ [A-Za-z-]+" "$el" 2>/dev/null | tail -1)
                     echo "    [$(date +%H:%M:%S)] tile $t: engine running - ${step:-working}"
                 elif [ -d "$jd/../db_input" ]; then
                     n=$(find "$jd/../db_input" -type f 2>/dev/null | wc -l)

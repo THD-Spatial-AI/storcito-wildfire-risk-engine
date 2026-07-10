@@ -233,6 +233,15 @@ def f_w_index(input_folder:str|Path,file_name:str='FWI_Risk_Map',output_folder:P
     if not lista_nc:
         raise ValueError("No netCDF files found in input folder")
 
+    n_runup = sum(1 for f in lista_nc if _fwi_file_date(f) < score_start)
+    n_score = len(lista_nc) - n_runup
+    print(
+        f"[FWI] plan: {n_runup} warm-up day(s) ({_fwi_file_date(lista_nc[0]).isoformat()} -> "
+        f"{score_start.isoformat()}) to build fuel-moisture memory, then score "
+        f"{n_score} requested day(s) {score_start.isoformat()}..{score_end.isoformat()}; "
+        f"the map = the highest-risk scored day. Assessment hour: 16:00 Europe/Madrid."
+    )
+
     GRID_SIZE = 360
 
     # Peak-of-range tracking: keep the scoring-window day with the highest mean FWI.
@@ -255,10 +264,7 @@ def f_w_index(input_folder:str|Path,file_name:str='FWI_Risk_Map',output_folder:P
             # 16:00 local (Europe/Madrid); the UTC axis shifts with DST.
             HOUR_1600 = assessment_hour_index(dataset)
             selected_hour = nc.num2date(dataset["time"][HOUR_1600], dataset["time"].units)
-            print(
-                f"  -> opening {file.name}: selecting only hour "
-                f"{str(selected_hour)[11:16]} (index {HOUR_1600} of {n_hours} hourly steps)"
-            )
+
 
             x_coord = ma.getdata(dataset["lon"])
             y_coord = ma.getdata(dataset["lat"])
@@ -313,10 +319,11 @@ def f_w_index(input_folder:str|Path,file_name:str='FWI_Risk_Map',output_folder:P
         f0, p0, d0 = f, p, d
 
         in_window = score_start <= day <= score_end
-        print(f"Día {id_file+1} ({day.isoformat()}) {'[scored]' if in_window else '[run-up]'} procesado. Mes: {mes}")
-        print(f"\t FFMC max: {np.max(f):.2f}")
-        print(f"\t DMC max:  {np.max(p):.2f}")
-        print(f"\t DC max:   {np.max(d):.2f}\n")
+        stage = "SCORING" if in_window else "warm-up"
+        print(
+            f"[FWI] {id_file+1:>3}/{len(lista_nc)} {day.isoformat()} {stage:8s} "
+            f"drought-memory DC={np.max(d):6.1f}  DMC={np.max(p):6.1f}  FFMC={np.max(f):5.1f}"
+        )
 
         # Score only days inside the window; remember the peak (highest mean FWI).
         if in_window:

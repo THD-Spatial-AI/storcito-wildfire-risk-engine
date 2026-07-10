@@ -393,6 +393,11 @@ def run_engine_job(
     input_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    import time as _t
+
+    print(f"[job {job_id}] phase 1/3: reconstructing engine inputs from PostGIS "
+          f"(exports every layer clipped to the AOI; typically 2-10 min)", flush=True)
+    _t0 = _t.time()
     reconstruction = reconstruct_inputs(
         input_dir,
         engine=engine,
@@ -400,7 +405,10 @@ def run_engine_job(
         clip_geom=clip_geom,
         clip_geom_crs="EPSG:4326",
     )
+    print(f"[job {job_id}] phase 1/3 done in {_t.time() - _t0:.0f}s "
+          f"(layer dates: {reconstruction.get('layer_dates')})", flush=True)
 
+    print(f"[job {job_id}] phase 2/3: region-wide LST/TWI class breakpoints", flush=True)
     env = {
         **os.environ,
         "FFRM_BASE_DIR": str(job_dir),
@@ -409,23 +417,31 @@ def run_engine_job(
         **_region_breaks(target_date),
         **cfg["run_flags"],
     }
-    proc = subprocess.run(
-        ["python", str(cfg["script"])],
-        cwd=str(BASE_DIR),
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-    (output_dir / "engine.log").write_text(
-        f"returncode={proc.returncode}\n--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}\n"
-    )
+    print(f"[job {job_id}] phase 3/3: {engine} engine started - follow live: "
+          f"tail -f {output_dir / 'engine.log'}", flush=True)
+    _t1 = _t.time()
+    log_path = output_dir / "engine.log"
+    with log_path.open("w") as log_fh:
+        proc = subprocess.run(
+            ["python", str(cfg["script"])],
+            cwd=str(BASE_DIR),
+            env=env,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    with log_path.open("a") as log_fh:
+        log_fh.write(f"\nreturncode={proc.returncode}\n")
+    print(f"[job {job_id}] engine finished in {_t.time() - _t1:.0f}s "
+          f"rc={proc.returncode}", flush=True)
     if proc.returncode != 0:
-        raise RuntimeError(f"{engine} engine failed (see engine.log):\n{proc.stderr[-2000:]}")
+        tail = log_path.read_text()[-2000:]
+        raise RuntimeError(f"{engine} engine failed (see engine.log):\n{tail}")
 
     result_map = output_dir / cfg["result"]
     if not result_map.is_file():
         raise RuntimeError(
-            f"{engine} engine finished but {cfg['result']} was not produced.\n{proc.stdout[-1000:]}"
+            f"{engine} engine finished but {cfg['result']} was not produced.\n{log_path.read_text()[-1000:]}"
         )
 
     continuous = "mapa_final_dinamico.tif" if engine == "dynamic" else "mapa_final.tif"
