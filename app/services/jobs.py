@@ -355,12 +355,10 @@ def _region_breaks(target_date) -> dict[str, str]:
             cur.execute("SELECT breaks FROM layer_breaks WHERE layer = 'twi'")
             row = cur.fetchone()
             if row is None:
-                # 25% spatial sample: exact enough for a smooth field, and
-                # avoids unioning the full 25 m raster in postgres memory.
                 cur.execute(
                     """SELECT (q).value FROM (
                          SELECT ST_Quantile(ST_Union(rast), ARRAY[0.2,0.4,0.6,0.8]) q
-                         FROM twi WHERE rid %% 4 = 0) s"""
+                         FROM twi WHERE rid %% 50 = 0) s"""
                 )
                 vals = [r[0] for r in cur.fetchall()]
                 if len(vals) == 4:

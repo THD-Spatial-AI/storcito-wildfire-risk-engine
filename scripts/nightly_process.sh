@@ -87,15 +87,32 @@ for d in $dates; do
     run_started=$(date -u +%FT%TZ)
 
     ok=1
-    for t in 0 1 2 3; do
-        echo "    tile $t"
-        body=$(curl -s -X POST "$API_URL/run-dynamic" \
-            -H "Content-Type: application/json" --max-time 7200 -d '{
-            "user_id":"regional","model_id":"dynamic","session_id":"'"$d"'_t'"$t"'",
-            "start_date":"'"$d"'T16:00:00+02:00","end_date":"'"$d"'T17:00:00+02:00",
-            "parameters":{"context_buffer_m":0},
-            "coordinates":'"${TILES[$t]}"'}')
-        echo "$body" | grep -q '"status": *"success"' || { ok=0; break; }
+    PARALLEL_TILES="${PARALLEL_TILES:-2}"
+    for group_start in $(seq 0 $PARALLEL_TILES 3); do
+        pids=()
+        for t in $(seq $group_start $((group_start + PARALLEL_TILES - 1))); do
+            [ "$t" -le 3 ] || continue
+            echo "    tile $t started"
+            curl -s -o "$LOG_DIR/.tile_${d}_$t.json" -X POST "$API_URL/run-dynamic" \
+                -H "Content-Type: application/json" --max-time 7200 -d '{
+                "user_id":"regional","model_id":"dynamic","session_id":"'"$d"'_t'"$t"'",
+                "start_date":"'"$d"'T16:00:00+02:00","end_date":"'"$d"'T17:00:00+02:00",
+                "parameters":{"context_buffer_m":0},
+                "coordinates":'"${TILES[$t]}"'}' &
+            pids+=($!)
+        done
+        wait "${pids[@]}"
+        for t in $(seq $group_start $((group_start + PARALLEL_TILES - 1))); do
+            [ "$t" -le 3 ] || continue
+            if grep -q '"status": *"success"' "$LOG_DIR/.tile_${d}_$t.json" 2>/dev/null; then
+                echo "    tile $t OK"
+            else
+                echo "    tile $t FAILED: $(head -c 300 "$LOG_DIR/.tile_${d}_$t.json" 2>/dev/null)"
+                ok=0
+            fi
+            rm -f "$LOG_DIR/.tile_${d}_$t.json"
+        done
+        [ "$ok" = "1" ] || break
     done
 
     if [ "$ok" = "1" ]; then
