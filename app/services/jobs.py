@@ -336,17 +336,27 @@ def _region_breaks(target_date) -> dict[str, str]:
         from FR.db_reconstruct import _pg_connect, _ts_date_for
 
         with _pg_connect() as conn, conn.cursor() as cur:
+            cur.execute("SET postgis.gdal_enabled_drivers = 'GTiff'")
             capture = _ts_date_for("lst_ts", target_date)
             if capture:
                 cur.execute(
-                    """SELECT (q).value FROM (
-                         SELECT ST_Quantile(ST_Union(rast), ARRAY[0.2,0.4,0.6,0.8]) q
-                         FROM lst_ts WHERE capture_date = %s) s""",
+                    "SELECT ST_AsGDALRaster(ST_Union(rast), 'GTiff') "
+                    "FROM lst_ts WHERE capture_date = %s",
                     (capture,),
                 )
-                vals = [r[0] for r in cur.fetchall()]
-                if len(vals) == 4:
-                    breaks["FFRM_LST_BREAKS"] = ",".join(f"{v:.3f}" for v in vals)
+                row = cur.fetchone()
+                if row and row[0]:
+                    import io
+
+                    import numpy as np
+                    import rasterio
+
+                    with rasterio.open(io.BytesIO(bytes(row[0]))) as src:
+                        arr = src.read(1)
+                    valid = arr[np.isfinite(arr) & (arr > 220.0) & (arr < 340.0)]
+                    if valid.size:
+                        vals = np.percentile(valid, [20, 40, 60, 80])
+                        breaks["FFRM_LST_BREAKS"] = ",".join(f"{v:.3f}" for v in vals)
 
             cur.execute(
                 """CREATE TABLE IF NOT EXISTS layer_breaks
@@ -358,7 +368,7 @@ def _region_breaks(target_date) -> dict[str, str]:
                 cur.execute(
                     """SELECT (q).value FROM (
                          SELECT ST_Quantile(ST_Union(rast), ARRAY[0.2,0.4,0.6,0.8]) q
-                         FROM twi WHERE rid %% 50 = 0) s"""
+                         FROM twi WHERE rid % 50 = 0) s"""
                 )
                 vals = [r[0] for r in cur.fetchall()]
                 if len(vals) == 4:
