@@ -449,6 +449,7 @@ def run_engine_job(
     response: dict[str, Any] = {
         "status": "success",
         "engine": engine,
+        "served_by": __import__("socket").gethostname(),
         "job_id": job_id,
         "session_id": payload.session_id,
         "target_date": target_date.isoformat(),

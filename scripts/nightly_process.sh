@@ -101,11 +101,32 @@ for d in $dates; do
                 "coordinates":'"${TILES[$t]}"'}' &
             pids+=($!)
         done
+        while :; do
+            alive=0
+            for pid in "${pids[@]}"; do kill -0 "$pid" 2>/dev/null && alive=1; done
+            [ "$alive" = "1" ] || break
+            for t in $(seq $group_start $((group_start + PARALLEL_TILES - 1))); do
+                [ "$t" -le 3 ] || continue
+                jd="data/OUTPUT/jobs/regional_dynamic_${d}_t${t}/OUTPUT"
+                el=$(ls "$jd"/engine.log 2>/dev/null)
+                if [ -n "$el" ]; then
+                    step=$(grep -aoE "^[A-Za-z][^.]{4,60}\.\.\.|Processed day: [0-9-]+|OK" "$el" 2>/dev/null | tail -1)
+                    echo "    [$(date +%H:%M:%S)] tile $t: engine running - ${step:-working}"
+                elif [ -d "$jd/../db_input" ]; then
+                    n=$(find "$jd/../db_input" -type f 2>/dev/null | wc -l)
+                    echo "    [$(date +%H:%M:%S)] tile $t: reconstructing inputs from PostGIS ($n files)"
+                else
+                    echo "    [$(date +%H:%M:%S)] tile $t: queued/starting"
+                fi
+            done
+            sleep 60
+        done
         wait "${pids[@]}"
         for t in $(seq $group_start $((group_start + PARALLEL_TILES - 1))); do
             [ "$t" -le 3 ] || continue
             if grep -q '"status": *"success"' "$LOG_DIR/.tile_${d}_$t.json" 2>/dev/null; then
-                echo "    tile $t OK"
+                host=$(grep -o '"served_by": *"[^"]*"' "$LOG_DIR/.tile_${d}_$t.json" | cut -d'"' -f4)
+                echo "    tile $t OK${host:+ (on $host)}"
             else
                 echo "    tile $t FAILED: $(head -c 300 "$LOG_DIR/.tile_${d}_$t.json" 2>/dev/null)"
                 ok=0
