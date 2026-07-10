@@ -550,7 +550,6 @@ def sentinel_process_request(
         "evalscript": sentinel_evalscript(bands),
     }
     ensure_dir(out_dir)
-    (out_dir / "request.json").write_text(json.dumps(body, indent=2) + "\n")
     with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as tmp:
         archive = Path(tmp.name)
     try:
@@ -569,6 +568,8 @@ def sentinel_process_request(
         files = safe_extract_tar(archive, out_dir)
     finally:
         archive.unlink(missing_ok=True)
+    # Marker written last: a failed download must not certify stale TIFFs.
+    (out_dir / "request.json").write_text(json.dumps(body, indent=2) + "\n")
     files.append(out_dir / "request.json")
     return files
 
@@ -1083,7 +1084,9 @@ def cmd_firms(args: argparse.Namespace) -> int:
                 header = lines[0]
             rows.extend(lines[1:])
             cur += timedelta(days=days)
-        dest = out_dir / f"hotspots_{args.source}_{year}.csv"
+        # Fixed name regardless of SP/NRT stitching (per-row source is in
+        # the CSV's `version` column); the Makefile loads this exact name.
+        dest = out_dir / f"hotspots_MODIS_{year}.csv"
         dest.write_text("\n".join([header or "", *rows]) + "\n")
         log(f"{dest.name}: {len(rows)} detections")
         files.append(dest)

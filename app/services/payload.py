@@ -97,7 +97,12 @@ def _require_inside_coverage(geometry_wgs84) -> None:
     inside = geometry_wgs84.intersection(region).area
     total = geometry_wgs84.area
     mostly_inside = total > 0 and inside / total >= 0.5
-    anchored = region.contains(geometry_wgs84.representative_point())
+    # Anchored (representative point inside) only helps genuinely coastal /
+    # border AOIs; a continent-sized box anchored in Galicia must not pass.
+    anchored = (
+        region.contains(geometry_wgs84.representative_point())
+        and total > 0 and inside / total >= 0.10
+    )
     if not (mostly_inside or anchored):
         raise ValueError(
             "The requested area lies mostly outside the wildfire data coverage "

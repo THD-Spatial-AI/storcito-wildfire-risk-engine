@@ -160,7 +160,17 @@ def _ts_date_for(ts_table: str, target_date) -> str | None:
                 (target_date,),
             )
             row = cur.fetchone()
-            return row[0].isoformat() if row and row[0] else None
+            if row and row[0]:
+                if (row[0] - target_date).days > 16:
+                    raise LookupError(
+                        f"{ts_table} has no data on/before {target_date} and the "
+                        f"nearest later capture ({row[0]}) is too far ahead; seed "
+                        f"the missing period first."
+                    )
+                return row[0].isoformat()
+            return None
+    except LookupError:
+        raise
     except Exception:
         return None
 
@@ -393,7 +403,7 @@ def reconstruct_hist(
 
         cur.execute("SELECT phase, filename, data FROM hist_scenes ORDER BY phase, filename")
         for phase, filename, data in cur.fetchall():
-            if max_year is not None and filename[:4].isdigit() and int(filename[:4]) > max_year:
+            if target_date is not None and filename[:10] > str(target_date):
                 continue
             phase_dir = dest_hist_dir / phase
             phase_dir.mkdir(parents=True, exist_ok=True)
@@ -405,7 +415,10 @@ def reconstruct_hist(
         dest = years_dir / f"hist_{year}.shp"
         export_vector_table(
             "hist", dest, t_srs=ENGINE_VECTOR_SRS,
-            select_sql=f"SELECT * FROM hist WHERE year = {year}",
+            select_sql=(
+                f"SELECT * FROM hist WHERE year = {year}"
+                + (f" AND acq_date <= '{target_date}'" if target_date is not None else "")
+            ),
         )
         produced.append(str(dest))
 

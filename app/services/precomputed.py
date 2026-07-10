@@ -30,13 +30,17 @@ def _clip_raster(cur, map_kind: str, target_date: date, aoi_geojson: str) -> byt
         FROM simulation_results, aoi
         WHERE user_id = %s AND engine = 'dynamic' AND map_kind = %s
           AND target_date = %s
-          AND ST_Intersects(ST_ConvexHull(rast), aoi.g)
-        ORDER BY ST_Contains(ST_ConvexHull(rast), aoi.g) DESC,
-                 ST_Area(ST_Intersection(ST_ConvexHull(rast), aoi.g)) DESC,
-                 created_at DESC
+          -- only fully containing tiles: a partial clip would silently return
+          -- a fraction of the AOI; non-contained AOIs fall back to compute
+          AND ST_Contains(ST_ConvexHull(rast), aoi.g)
+          -- and only from completed regional runs
+          AND EXISTS (SELECT 1 FROM regional_runs q
+                      WHERE q.engine = 'dynamic' AND q.target_date = %s
+                        AND q.status = 'done')
+        ORDER BY created_at DESC
         LIMIT 1
         """,
-        (aoi_geojson, _REGIONAL_USER, map_kind, target_date),
+        (aoi_geojson, _REGIONAL_USER, map_kind, target_date, target_date),
     )
     row = cur.fetchone()
     return bytes(row[0]) if row and row[0] else None

@@ -135,7 +135,8 @@ except Exception as e:
         wait "${pids[@]}"
         for t in $(seq $group_start $((group_start + PARALLEL_TILES - 1))); do
             [ "$t" -le 3 ] || continue
-            if grep -q '"status": *"success"' "$LOG_DIR/.tile_${d}_$t.json" 2>/dev/null; then
+            if grep -q '"status": *"success"' "$LOG_DIR/.tile_${d}_$t.json" 2>/dev/null \
+               && ! grep -q '"db_store_error"' "$LOG_DIR/.tile_${d}_$t.json"; then
                 host=$(grep -o '"served_by": *"[^"]*"' "$LOG_DIR/.tile_${d}_$t.json" | cut -d'"' -f4)
                 echo "    tile $t OK${host:+ (on $host)}"
             else
@@ -147,6 +148,15 @@ except Exception as e:
         [ "$ok" = "1" ] || break
     done
 
+    if [ "$ok" = "1" ]; then
+        stored=$($PSQL -c "SELECT count(*) FROM simulation_results
+                 WHERE user_id='regional' AND engine='dynamic'
+                   AND target_date='$d' AND created_at >= '$run_started';")
+        if [ "${stored:-0}" -lt 8 ]; then
+            echo "    ERROR: only $stored/8 result records stored for $d"
+            ok=0
+        fi
+    fi
     if [ "$ok" = "1" ]; then
         # Success: retire the superseded map (retrieval reads newest first, so
         # the old one stayed serviceable while this run was in flight).

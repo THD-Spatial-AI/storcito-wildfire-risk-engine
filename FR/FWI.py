@@ -255,8 +255,15 @@ def f_w_index(input_folder:str|Path,file_name:str='FWI_Risk_Map',output_folder:P
 
     # --------------------------------------------------------
     # PROCESAMIENTO DE CADA ARCHIVO .NC
+    prev_day = None
     for id_file, file in enumerate(lista_nc):
         day = _fwi_file_date(file)
+        if prev_day is not None and (day - prev_day).days > 7:
+            print(f"[FWI] {prev_day.isoformat()} -> {day.isoformat()}: "
+                  f"{(day - prev_day).days}-day data gap; resetting moisture codes to defaults")
+            f0 = p0 = d0 = None
+            prev_rain_tail = None
+        prev_day = day
 
         with nc.Dataset(file) as dataset:
 
@@ -303,9 +310,11 @@ def f_w_index(input_folder:str|Path,file_name:str='FWI_Risk_Map',output_folder:P
         hum_m = griddata(coords, rh_to_percent(humidity).flatten(), grid_coords, method='nearest')
         temp_m = griddata(coords, temperature.flatten() - 273.15, grid_coords, method='nearest')  # K -> °C
 
-        # Inicialización en el primer paso
+        # Initialise on the first step and after any data-gap reset.
         if id_file == 0:
             init_f, init_p, init_d = fwi_init_codes()
+            f0 = p0 = d0 = None
+        if f0 is None:
             f0 = np.full_like(hum_m, init_f)
             p0 = np.full_like(hum_m, init_p)
             d0 = np.full_like(hum_m, init_d)

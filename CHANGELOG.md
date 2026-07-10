@@ -115,6 +115,16 @@ Notable changes of this engine relative to the original UVIGO codebase
 - **Native-resolution Sentinel by default.** `make sentinel RES=10` works
   (tiled fetch, mosaicked at load) but costs ~25x the CDSE quota of the
   default ~180 m fetch; evaluate once quota headroom is known.
+- **Weather-summary rain window.** The engine and slice cache now use the
+  DST-correct 16:00-local index, but the summary's 24 h rain array is not
+  trimmed to the assessment hour; the reported accumulation can include up
+  to two extra hours. Cosmetic for the map (the engine computes its own
+  rain), fix when touching fwi_sampling next.
+- **TWI risk direction.** Wettest areas currently map to risk class 5
+  (inherited from the original code); physically, wet valleys usually burn
+  less. Needs UVIGO's confirmation before changing - flagged, not altered.
+- **Automated regression tests** against reference outputs (golden rasters
+  for a fixed AOI/date) so engine changes surface as diffs, not surprises.
 - Each November: `make hist-scenes PRE=<year>-05-03 POST=<year>-10-25` for
   the season just ended, plus a fresh `make hist` once the MODIS SP archive
   catches up (~February) to replace the season's NRT rows.
