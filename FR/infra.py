@@ -132,22 +132,24 @@ def infrastructure(input_infra: str|Path,
         raster_data = np.zeros((y_res, x_res), dtype=rasterio.uint8)
         output_crs = ref_crs
     else:
-        # Unión de todas las infraestructuras en una geometría única
-        road_union = road.geometry.union_all()
+        from scipy.ndimage import distance_transform_edt
 
-        anillos = _create_risk_rings(road_union, radii, risks)
-        anillos.crs = road.crs
-
-        geoms = ((geom, val) for geom, val in zip(anillos.geometry, anillos['risk']))
-        raster_data = rasterize(
-            geoms,
+        road_mask = rasterize(
+            ((geom, 1) for geom in road.geometry),
             out_shape=(y_res, x_res),
             transform=transform,
             fill=0,
             dtype=rasterio.uint8,
             all_touched=True,
         )
-        output_crs = ref_crs if native_grid else anillos.crs
+        dist = distance_transform_edt(
+            road_mask == 0,
+            sampling=(abs(transform.e), abs(transform.a)),
+        )
+        raster_data = np.zeros((y_res, x_res), dtype=rasterio.uint8)
+        for r, val in sorted(zip(radii, risks), reverse=True):
+            raster_data[dist <= r] = val
+        output_crs = ref_crs
     
     # Configuración de metadatos para guardar
     meta_info = {

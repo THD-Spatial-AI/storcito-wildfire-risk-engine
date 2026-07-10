@@ -110,9 +110,14 @@ def wui(input_road, input_clc, file_name:str='IUF_Risk_Map',
     if road.empty or clc.empty:
         return _save_empty_result()
 
-    # Phase I: Intersectar con buffer de carretera - sin guardar a disco
-    road_buffer_geom = road.buffer(road_buffer).union_all()
-    poligonos = clc[clc.intersects(road_buffer_geom)].copy()
+    try:
+        left_idx, _ = road.sindex.query(
+            clc.geometry, predicate="dwithin", distance=road_buffer
+        )
+        poligonos = clc.iloc[sorted(set(left_idx))].copy()
+    except (TypeError, ValueError):  # older shapely/GEOS without dwithin
+        road_buffer_geom = road.buffer(road_buffer).union_all()
+        poligonos = clc[clc.intersects(road_buffer_geom)].copy()
     print("Intersecting polygons found (phase I):", len(poligonos))
     
     if len(poligonos) == 0:
