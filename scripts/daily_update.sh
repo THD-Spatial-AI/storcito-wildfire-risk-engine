@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 LOG_DIR="data/OUTPUT/logs"
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/daily_$(date +%F).log"
-exec >>"$LOG" 2>&1
+exec >>"$LOG" 2>&1 </dev/null
 
 echo "=== daily update started $(date -Is) ==="
 rc=0

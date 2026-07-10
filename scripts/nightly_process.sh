@@ -22,7 +22,9 @@ REGION_POLYGON='{"type":"Polygon","coordinates":[[[-9.31,41.80],[-6.73,41.80],[-
 LOG_DIR="data/OUTPUT/logs"
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/nightly_$(date +%F).log"
-exec >>"$LOG" 2>&1
+# Detach stdin too: docker compose exec keeps it attached, and a backgrounded
+# run touching terminal stdin gets suspended with SIGTTIN.
+exec >>"$LOG" 2>&1 </dev/null
 
 # One instance at a time (a long backfill must not overlap the next night).
 exec 9>"$LOG_DIR/.nightly.lock"
