@@ -185,6 +185,29 @@ def run_wildfire_payload(payload: WildfireCalculationRequest, request: Request |
     output_aoi = wildfire_geometry(payload)
     optional_layers = wildfire_optional_layers(payload)
     user_inputs = wildfire_user_inputs(payload, AOI_OUTPUT_ROOT / "_user_inputs" / payload.model_id)
+
+    # Serve from the nightly precomputed regional map when the request is a
+    # plain regional dynamic run (no custom inputs/layers, no force_compute):
+    # ST_Clip in seconds instead of a ~30 min engine run.
+    if (
+        calculation_mode == "dynamic"
+        and risk_profile == "regional"
+        # Multi-day requests produce per-day maps; a single-date regional
+        # clip would silently change what the result means.
+        and (start_date is None or start_date == target_date)
+        and not user_inputs
+        and optional_layers is None
+        and not payload.parameters.get("force_compute")
+    ):
+        from app.services.precomputed import get_precomputed_result
+
+        pre = get_precomputed_result(target_date, output_aoi)
+        if pre is not None:
+            print(f"[STORCITO] serving precomputed regional map for {target_date}", flush=True)
+            return _finish_wildfire_response(pre, payload, request, calculation_mode,
+                                             risk_profile, target_date, start_date,
+                                             output_aoi, optional_layers, user_inputs)
+
     outputs = run_static_aoi_for_geometry(
         output_aoi,
         target_date,
@@ -213,6 +236,19 @@ def run_wildfire_payload(payload: WildfireCalculationRequest, request: Request |
             "optional_layers": optional_layers or {},
         },
     )
+    return _finish_wildfire_response(outputs, payload, request, calculation_mode,
+                                     risk_profile, target_date, start_date,
+                                     output_aoi, optional_layers, user_inputs)
+
+
+def _finish_wildfire_response(outputs, payload, request, calculation_mode,
+                              risk_profile, target_date, start_date,
+                              output_aoi, optional_layers, user_inputs):
+    """Shared tail of a wildfire request: weather summary, URLs, DB store,
+    callback zip, response dict. Used by both the computed and the
+    precomputed (regional clip) paths."""
+    precomputed = outputs.get("source") == "precomputed"
+
     weather_summary_path = write_model_weather_summary(
         Path(outputs["job_dir"]),
         payload=payload,
@@ -227,23 +263,27 @@ def run_wildfire_payload(payload: WildfireCalculationRequest, request: Request |
 
     enriched_outputs = augment_with_urls(outputs, request)
 
-    db_info, db_error = store_results_to_db(
-        outputs,
-        metadata={
-            "job_id": outputs.get("request_id"),
-            "session_id": payload.session_id,
-            "user_id": payload.user_id,
-            "model_id": payload.model_id,
-            "engine": "static_aoi",
-            "calculation_mode": calculation_mode,
-            "request_type": "wildfire_payload",
-            "target_date": target_date.isoformat(),
-            "country": payload.country,
-            "lkr": payload.lkr,
-            "risk_profile": risk_profile,
-        },
-        aoi_wgs84=reproject_geometry(output_aoi, DEFAULT_PROJECTED_CRS, "EPSG:4326"),
-    )
+    db_info = db_error = None
+    if not precomputed:
+        # Precomputed responses are clips of an already-stored regional map;
+        # storing them again would duplicate rasters per request.
+        db_info, db_error = store_results_to_db(
+            outputs,
+            metadata={
+                "job_id": outputs.get("request_id"),
+                "session_id": payload.session_id,
+                "user_id": payload.user_id,
+                "model_id": payload.model_id,
+                "engine": "static_aoi",
+                "calculation_mode": calculation_mode,
+                "request_type": "wildfire_payload",
+                "target_date": target_date.isoformat(),
+                "country": payload.country,
+                "lkr": payload.lkr,
+                "risk_profile": risk_profile,
+            },
+            aoi_wgs84=reproject_geometry(output_aoi, DEFAULT_PROJECTED_CRS, "EPSG:4326"),
+        )
 
     callback_info: dict[str, Any] | None = None
     callback_error: str | None = None
@@ -270,6 +310,7 @@ def run_wildfire_payload(payload: WildfireCalculationRequest, request: Request |
         "status": "success",
         "session_id": payload.session_id,
         "callback_url": payload.callback_url,
+        "source": "precomputed" if precomputed else "computed",
         "outputs": enriched_outputs,
     }
     if callback_info is not None:

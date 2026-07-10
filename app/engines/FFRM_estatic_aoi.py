@@ -580,6 +580,7 @@ def run_static_aoi_for_geometry(
     request_path.write_text(json.dumps(metadata, indent=2))
     outputs["request"] = request_path
     outputs["job_dir"] = job_dir
+    outputs["request_id"] = request_id
 
     if not keep_intermediate:
         shutil.rmtree(base_output_dir)

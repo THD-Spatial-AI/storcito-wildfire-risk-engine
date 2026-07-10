@@ -223,7 +223,7 @@ candidate_paths = {
     "mdt": (_cropped('MDT_RISK_MAP_cropped.tif'), run_mdt),
     "slope": (_cropped('SLOPE_RISK_MAP_cropped.tif'), run_mdt),
     "aspect": (_cropped('ASPECT_RISK_MAP_cropped.tif'), run_mdt),
-    "twi": (_cropped('twi_cropped.tif'), run_twi),
+    "twi": (_cropped('twi_risk_map_cropped.tif'), run_twi),
     "ftm": (_cropped('FMT_cropped.tif'), run_fmt),
     "ndvi": (_cropped('estatic_(NDVI_Risk_Map)_cropped.tif'), run_ndvi),
     "ndmi": (_cropped('estatic_(NDMI_Risk_Map)_cropped.tif'), run_ndmi),
@@ -353,7 +353,7 @@ for layer, weight in zip(final_layers, final_weights):
 
 with rasterio.open(reference_path) as ref:
     reference_profile = ref.profile
-reference_profile.update(dtype='float32', count=1)
+reference_profile.update(dtype='float32', count=1, nodata=0)
 output_path = os.path.join(output_base, 'mapa_final_dinamico.tif')
 
 with rasterio.open(output_path, 'w', **reference_profile) as dst:

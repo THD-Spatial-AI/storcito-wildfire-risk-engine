@@ -298,7 +298,6 @@ def cmd_auth(_args: argparse.Namespace) -> int:
     rows = [
         ("sentinel", "Copernicus Sentinel Hub Process API", "ACCESS_TOKEN or SH_CLIENT_ID + SH_CLIENT_SECRET"),
         ("fwi", "MeteoGalicia THREDDS NCSS", "none"),
-        ("dtm-aster", "NASA Earthdata / LP DAAC ASTGTM.003", "EARTHDATA_USERNAME + EARTHDATA_PASSWORD or .netrc"),
         ("borders", "OpenDataSoft public API", "none"),
         ("osm-infra", "GeoFabrik OpenStreetMap extracts", "none"),
         ("clc", "Copernicus Land Monitoring Service API", "CLMS_ACCESS_TOKEN or CLMS_SERVICE_KEY_JSON + PyJWT"),
@@ -603,7 +602,17 @@ def cmd_sentinel(args: argparse.Namespace) -> int:
         window_dir = args.out_dir / "sentinel" / f"{date_from:%Y%m%d}_{date_to:%Y%m%d}"
         for ix, iy, tile_bbox, width, height in tiles:
             tile_dir = window_dir / f"tile_{ix:02d}_{iy:02d}" if len(tiles) > 1 else window_dir
-            if any(tile_dir.glob("*.tif")):
+            # Cache is only valid if it was fetched with the current evalscript
+            # (e.g. the SCL cloud mask); otherwise re-fetch the window.
+            evalscript_current = sentinel_evalscript(bands)
+            cached_request = tile_dir / "request.json"
+            cache_valid = False
+            if any(tile_dir.glob("*.tif")) and cached_request.exists():
+                try:
+                    cache_valid = json.loads(cached_request.read_text()).get("evalscript") == evalscript_current
+                except (json.JSONDecodeError, OSError):
+                    cache_valid = False
+            if cache_valid:
                 log(f"skip {tile_dir}: already downloaded")
                 continue
             try:
@@ -715,47 +724,6 @@ def cmd_osm_infra(args: argparse.Namespace) -> int:
 
 # ==============================================================================
 # DTM ASTER (NASA)
-# ==============================================================================
-
-
-def cmd_dtm_aster(args: argparse.Namespace) -> int:
-    try:
-        import earthaccess  # type: ignore[import-not-found]
-    except ImportError as exc:
-        raise FetchError("earthaccess is required for dtm-aster") from exc
-
-    bbox = parse_bbox(args.bbox)
-    out_dir = ensure_dir(args.out_dir / "dtm_aster")
-    log(f"earthaccess login strategy={args.login_strategy}")
-    earthaccess.login(strategy=args.login_strategy, persist=args.persist_login)
-    granules = earthaccess.search_data(
-        short_name="ASTGTM",
-        version="003",
-        provider="LPCLOUD",
-        bounding_box=bbox,
-        cloud_hosted=True,
-        count=args.count,
-    )
-    log(f"found {len(granules)} ASTER granules")
-    files = [Path(p) for p in earthaccess.download(granules, local_path=out_dir)]
-    write_manifest(
-        args.out_dir,
-        "dtm_aster_gdem",
-        {
-            "api": "NASA Earthdata CMR via earthaccess",
-            "short_name": "ASTGTM",
-            "version": "003",
-            "provider": "LPCLOUD",
-            "bbox": bbox,
-            "auth": "EARTHDATA_USERNAME/EARTHDATA_PASSWORD, .netrc, or interactive",
-        },
-        files,
-    )
-    return 0
-
-
-# ==============================================================================
-# CLC (COPERNICUS LAND MONITORING)
 # ==============================================================================
 
 
@@ -1036,7 +1004,7 @@ def cmd_fuels(args: argparse.Namespace) -> int:
             props = feat.get("properties", {})
             label = str(props.get("modelocombustible") or "")
             digits = "".join(ch for ch in label if ch.isdigit())
-            props["modcom"] = int(digits) if digits else 0
+            props["modcom"] = int(digits) if digits else 14
             features.append(feat)
         progress(len(features), max(total, 1), "MFE polygons")
         url = next(
@@ -1474,18 +1442,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="any Geofabrik path, e.g. europe/spain/galicia or europe/portugal; repeatable",
     )
     p.set_defaults(func=cmd_osm_infra)
-
-    p = sub.add_parser("dtm-aster", help="fetch NASA ASTER GDEM V003 tiles via earthaccess")
-    add_common(p)
-    p.add_argument("--bbox", help="west,south,east,north; default Galicia bbox")
-    p.add_argument("--count", type=int, default=-1, help="earthaccess search count")
-    p.add_argument(
-        "--login-strategy",
-        default=os.environ.get("EARTHACCESS_STRATEGY", "environment"),
-        help="earthaccess login strategy: environment, netrc, interactive",
-    )
-    p.add_argument("--persist-login", action="store_true")
-    p.set_defaults(func=cmd_dtm_aster)
 
     p = sub.add_parser(
         "clc", help="fetch CORINE / CLC+ Backbone land cover via the CLMS datarequest API"

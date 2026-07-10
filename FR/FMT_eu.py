@@ -27,6 +27,7 @@ FINAL_MAP = {
     7: 2, 8: 2, 9: 3,
     10: 4, 11: 4,
     12: 4, 13: 5,
+    14: 1,
 }
 
 def _print_progress(completed: int, total: int, label: str) -> None:

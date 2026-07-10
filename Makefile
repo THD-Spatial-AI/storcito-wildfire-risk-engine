@@ -87,7 +87,7 @@ sentinel:
 	elif [ -n "$(MONTH)" ]; then \
 	  start=$(MONTH)-01; end=$$(date -d "$(YEAR)-$(MONTH)-01 +1 month -1 day" +%m-%d); \
 	else start=05-01; end=10-31; fi; \
-	python3 scripts/fetch_sources.py sentinel --years $(YEAR) --season-start $$start --season-end $$end; rc=$$?; \
+	python3 scripts/fetch_sources.py sentinel --years $(YEAR) --season-start $$start --season-end $$end $(if $(RES),--resolution $(RES)); rc=$$?; \
 	skip=$$( [ "$(YEAR)" != "$$(date +%Y)" ] && echo --skip-current ); \
 	$(COMPOSE) exec -T geotools bash -c 'cd /data && \
 	  for w in $$(ls data/OUTPUT/source_data/sentinel | grep "^$(YEAR)$(MONTH)" | sort); do \
@@ -137,10 +137,9 @@ fuels:
 	@$(COMPOSE) exec -T geotools python3 /data/scripts/load_localhost.py load-fuels \
 	  --geojson /data/data/OUTPUT/source_data/fuels/mfe_fuels.geojson
 
-# Fetch ASTER GDEM tiles
+# Build the mdt reference grid (30 m, EPSG:32629) from the IGN tiles staged
+# by `make dtm` - run that first.
 mdt:
-	@$(COMPOSE) exec -T storcito-api-1 micromamba run -n storcito \
-	  python3 /app/scripts/fetch_sources.py dtm-aster
 	@$(COMPOSE) exec -T geotools python3 /data/scripts/load_localhost.py load-mdt
 
 # Compute TWI
@@ -172,7 +171,7 @@ hist:
 	  python3 scripts/fetch_sources.py firms --years $(YEAR); \
 	fi
 	@$(COMPOSE) exec -T geotools python3 /data/scripts/load_localhost.py load-firms \
-	  --file /data/data/OUTPUT/source_data/firms/hotspots_MODIS_SP_$(YEAR).csv
+	  --file /data/data/OUTPUT/source_data/firms/hotspots_MODIS_$(YEAR).csv
 
 # Fetch Sentinel dNBR scenes
 hist-scenes:

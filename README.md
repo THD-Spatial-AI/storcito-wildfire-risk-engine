@@ -99,7 +99,7 @@ download from the source.
 | `borders` | `spain_*` | georef-spain admin boundaries | OpenDataSoft public API | vector | none |
 | `dtm` | `dtm` | Spanish MDT (PNOA LiDAR) | IGN INSPIRE WCS — `servicios.idee.es/wcs-inspire/mdt` | 25 m (5 m opt.) | none |
 | `twi` | `twi` | Topographic Wetness Index | computed from `dtm` tiles (GRASS `r.fill.dir` + `r.topidx`) | 25 m | none |
-| `mdt` | `mdt` | ASTER GDEM V003 | NASA Earthdata / LP DAAC (`earthaccess`) | 30 m | `EARTHDATA_USERNAME` + `EARTHDATA_PASSWORD` |
+| `mdt` | `mdt` | reference grid resampled from the IGN MDT tiles | derived locally (no fetch) | 30 m | none |
 | `fwi` | `fwi_files` | WRF 1 km weather forecast | MeteoGalicia THREDDS NCSS — `thredds.meteogalicia.gal` | 1 km, daily NetCDF | none |
 | `sentinel` | `sentinel_b4/b8/b8a/b11` + `_ts` | Sentinel-2 L2A bands B04/B08/B8A/B11 | Copernicus Data Space Process API — `sh.dataspace.copernicus.eu` | weekly mosaics | `SH_CLIENT_ID` + `SH_CLIENT_SECRET` |
 | `lst` | `lst` + `lst_ts` | Sentinel-3 SLSTR L2 land surface temperature | Copernicus Data Space Process API | ~1 km, Kelvin | `SH_CLIENT_ID` + `SH_CLIENT_SECRET` |
@@ -122,7 +122,7 @@ Run these in order on a fresh database (order matters only where noted):
 make borders                        # 1. Spain admin boundaries  (~1 min)
 make dtm                            # 2. IGN elevation 25 m      (~5 min)
 make twi                            # 3. TWI, computed from 2's staged tiles (15-40 min GRASS)
-make mdt                            # 4. ASTER reference grid    (~5 min)
+make mdt                            # 4. reference grid from step 2's tiles (~2 min)
 make fwi START=2026-05-01           # 5. weather, May 1 2026 -> latest available day (long: ~330 MB/day)
 make sentinel START=2026-05-01      # 6. Sentinel-2 weekly mosaics, May 1 2026 -> latest image (~30 min)
 make lst START=2026-05-01           # 7. surface temperature, one raster per day May 1 2026 -> latest (~10 min)
@@ -140,7 +140,7 @@ range by default. Adjust the year in `START=` to backfill another season
 (e.g. `make sentinel START=2025-05-01` for all of 2025).
 
 Constraints: `hist` clips against the Galicia polygon from `borders` (1 before
-10); `twi` computes from the tiles staged by `dtm` (2 before 3). Everything
+10); `twi` and `mdt` build from the tiles staged by `dtm` (2 before 3 and 4). Everything
 else is order-independent and can run in parallel. Steps 12 and 13 submit a
 datarequest to Copernicus and poll until their queue prepares the extract —
 usually minutes, occasionally hours; the request survives a poller timeout,
@@ -194,18 +194,43 @@ Notes:
 
 | Class | Targets | Refresh | Why |
 |---|---|---|---|
-| **Dynamic** (daily) | `fwi`, `lst` | every day | new MeteoGalicia forecast each morning; Sentinel-3 passes daily. Drives the live map. |
-| **Semi-dynamic** (in fire season) | `sentinel` weekly, `hist` monthly | May-Oct | Sentinel-2 revisit is ~5 days (weekly NDVI/NDMI mosaics); FIRMS hotspots accumulate as fires happen |
+| **Dynamic** (daily) | `fwi` (Apr-Oct: the season plus the 60-day moisture run-up), `lst` | every day | new MeteoGalicia forecast each morning; Sentinel-3 passes daily. Drives the live map. |
+| **Semi-dynamic** (in fire season) | `sentinel` weekly; `hist` runs with the daily job | May-Oct | Sentinel-2 revisit is ~5 days (weekly NDVI/NDMI mosaics); FIRMS hotspots accumulate as fires happen |
 | **Static / quasi-static** | `borders` (never), `dtm`+`twi` (~2 years), `mdt` (never), `infra` (few times/year), `fuels` (new MFE edition, 5-10 years), `clc`+`iuf` (new CLC edition, ~2-6 years), `hist-scenes` (once, each November) | on publication | terrain, land cover and infrastructure change on multi-year timescales |
 
 Suggested cron for a server (all commands are argument-free thanks to the
 "latest available" defaults):
 
 ```cron
-30 6 * * *      cd /path/to/STORCITO && make fwi && make lst    # daily
-0  7 * * 1      cd /path/to/STORCITO && make sentinel           # weekly (May-Oct)
-0  8 1 * *      cd /path/to/STORCITO && make hist               # monthly (May-Oct)
+15 8 * * *      cd /path/to/STORCITO && ./scripts/daily_update.sh     # daily: FWI through today, LST, fire hotspots
+30 9 * * *      cd /path/to/STORCITO && ./scripts/nightly_process.sh  # daily: precompute the regional dynamic map
+0  9 * * 1      cd /path/to/STORCITO && make sentinel                 # weekly (May-Oct)
 ```
+
+### Precomputed regional results
+
+`nightly_process.sh` runs the whole-region dynamic engine for every newly
+available FWI date (queued once per date in `regional_runs`, UNIQUE-guarded;
+newest first; `MAX_RUNS` per night so backfills drain incrementally; failures
+retry up to `MAX_ATTEMPTS` on later nights) and stores the result rasters in
+`simulation_results` under `user_id='regional'`.
+
+Plain regional dynamic requests (no custom inputs, no layer toggles) are then
+answered by clipping that stored map with `ST_Clip` - seconds instead of a
+~30 min engine run; the response carries `"source": "precomputed"`. Any other
+request - static mode, finca profile, custom DTM/NDVI/station uploads, layer
+toggles, or `"parameters": {"force_compute": true}` - takes the normal
+on-demand engine path (`"source": "computed"`). Requests for a date the
+nightly job has not processed yet also fall back to on-demand compute.
+
+Run status: `SELECT * FROM regional_runs ORDER BY target_date DESC;`
+Logs: `data/OUTPUT/logs/nightly_<date>.log`.
+
+Do not schedule the daily job around midnight: "yesterday" is computed in
+UTC (wrong answer before ~02:00 CEST), and MeteoGalicia publishes each
+day's WRF file in the morning - there is nothing new to fetch at 00:15.
+`daily_update.sh` logs to `data/OUTPUT/logs/daily_<date>.log` and also
+pulls today's forecast file once it is published.
 
 Every fetch writes a JSON manifest (URL, parameters, SHA-256 of each file,
 timestamp) under `data/OUTPUT/source_data/manifests/` — the audit trail of
@@ -236,7 +261,7 @@ vector tables carry a `geom` (or `ogc_fid`) geometry column.
 | `iuf` | vector | 4326 | CLC/CORINE land-cover input for WUI/IUF |
 | `clcplus_2023` | raster | 3035 | CLC+ Backbone 2023 land cover, 10 m |
 | `hist`, `hist_scenes` | vector/blob | 4326/n/a | FIRMS fire hotspots and pre/post Sentinel scene blobs |
-| `mdt` | raster | 32629 | ASTER GDEM 30 m reference grid (WUI/infra rasterization) |
+| `mdt` | raster | 32629 | 30 m reference grid resampled from the IGN MDT (WUI/infra rasterization) |
 | `twi` | raster | 32629 | Topographic Wetness Index, computed from `dtm` (GRASS) |
 | `lst`, `lst_ts` | raster | 4326 | Sentinel-3 SLSTR land surface temperature (Kelvin); `lst_ts` is the daily series the engine selects from by assessment date |
 | `spain_autonomous_communities` | vector | 4326 | Admin level 1 (incl. `acom_name='Galicia'`) |

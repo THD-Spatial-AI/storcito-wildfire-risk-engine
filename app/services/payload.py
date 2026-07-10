@@ -7,6 +7,7 @@ from typing import Any
 from FR.aoi import build_geojson_aoi, reproject_geometry, DEFAULT_PROJECTED_CRS
 
 from app.config import BERLIN_TZ
+from app.config import logger
 from app.schemas import WildfireCalculationRequest
 
 
@@ -48,11 +49,16 @@ def unwrap_geojson_geometry(node: Any) -> dict | None:
         return None
     node_type = node.get("type")
     if node_type == "FeatureCollection":
-        for feature in node.get("features", []) or []:
-            geom = unwrap_geojson_geometry(feature)
-            if geom is not None:
-                return geom
-        return None
+        geoms = [g for g in (unwrap_geojson_geometry(f) for f in node.get("features", []) or [])
+                 if g is not None]
+        if not geoms:
+            return None
+        if len(geoms) == 1:
+            return geoms[0]
+        from shapely.geometry import mapping as _mapping, shape as _shape
+        from shapely.ops import unary_union
+
+        return _mapping(unary_union([_shape(g) for g in geoms]))
     if node_type == "Feature":
         return unwrap_geojson_geometry(node.get("geometry"))
     if "type" in node and "coordinates" in node:
@@ -84,12 +90,18 @@ def _require_inside_coverage(geometry_wgs84) -> None:
         if not row:
             return
         region = shapely_shape(json.loads(row[0]))
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        # Fail open (the engine will fail anyway without the DB), but loudly.
+        logger.warning("Coverage check skipped (region lookup failed): %s", exc)
         return
-    if not geometry_wgs84.intersects(region):
+    inside = geometry_wgs84.intersection(region).area
+    total = geometry_wgs84.area
+    mostly_inside = total > 0 and inside / total >= 0.5
+    anchored = region.contains(geometry_wgs84.representative_point())
+    if not (mostly_inside or anchored):
         raise ValueError(
-            "The requested area is outside the wildfire data coverage region; "
-            "see GET /available-data-coverage for the supported boundary."
+            "The requested area lies mostly outside the wildfire data coverage "
+            "region; see GET /available-data-coverage for the supported boundary."
         )
 
 

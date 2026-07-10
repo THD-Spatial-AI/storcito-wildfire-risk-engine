@@ -215,6 +215,22 @@ def cmd_load_sentinel(args: argparse.Namespace) -> int:
             ]
         )
         if path is None:
+            # Native-resolution fetches tile the window into tile_XX_YY/ subdirs;
+            # mosaic them into the window root once, then load normally.
+            tiles = sorted(args.dir.glob(f"tile_*/{band}.tif")) or sorted(
+                args.dir.glob(f"tile_*/{band}.tiff")
+            )
+            if tiles:
+                import subprocess as sp
+
+                vrt = args.dir / f"{band}.vrt"
+                path = args.dir / f"{band}.tif"
+                sp.run(["gdalbuildvrt", "-q", str(vrt)] + [str(t) for t in tiles], check=True)
+                sp.run(["gdal_translate", "-q", "-co", "COMPRESS=DEFLATE",
+                        str(vrt), str(path)], check=True)
+                vrt.unlink(missing_ok=True)
+                log(f"mosaicked {len(tiles)} tiles -> {path.name}")
+        if path is None:
             if args.allow_missing or band == "B8A":
                 log(f"skip {band}: not found in {args.dir}")
                 continue
@@ -514,6 +530,7 @@ def cmd_load_fuels(args: argparse.Namespace) -> int:
     out_tif = args.geojson.parent / "FUELS.tif"
     with tempfile.TemporaryDirectory() as work:
         gpkg = Path(work) / "mfe.gpkg"
+        layer = args.geojson.stem
         run(
             [
                 "ogr2ogr",
@@ -523,6 +540,11 @@ def cmd_load_fuels(args: argparse.Namespace) -> int:
                 "EPSG:32629",
                 "-nlt",
                 "PROMOTE_TO_MULTI",
+                "-dialect",
+                "SQLite",
+                "-sql",
+                f"SELECT CASE WHEN modcom = 0 THEN 14 ELSE modcom END AS modcom, "
+                f"geometry FROM {layer}",
                 str(gpkg),
                 str(args.geojson),
             ]
@@ -593,13 +615,13 @@ def cmd_compute_twi(args: argparse.Namespace) -> int:
 
 
 def cmd_load_mdt(args: argparse.Namespace) -> int:
-    """Mosaic staged ASTER tiles into the mdt reference grid (30 m, EPSG:32629)."""
+    """Resample staged IGN MDT tiles into mdt reference grid (30 m, EPSG:32629) for WUI/infra rasterization anchor."""
     import tempfile
 
-    tiles = sorted(args.dir.glob("ASTGTMV003_*_dem.tif"))
+    tiles = sorted(args.dir.glob("*.tif"))
     if not tiles:
-        raise LoadError(f"no ASTGTMV003_*_dem.tif tiles in {args.dir}; run dtm-aster first")
-    out_tif = args.dir.parent / "mdt" / "MDT.tif"
+        raise LoadError(f"no MDT tiles in {args.dir}; run `make dtm` first")
+    out_tif = args.dir.parent.parent / "mdt" / "MDT.tif"
     out_tif.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as work:
         vrt = Path(work) / "dem.vrt"
@@ -610,7 +632,7 @@ def cmd_load_mdt(args: argparse.Namespace) -> int:
              str(vrt), str(out_tif)]
         )
     raster2pgsql_load(out_tif, args.table, 32629, "replace")
-    log(f"{args.table} <- {out_tif} ({len(tiles)} ASTER tiles)")
+    log(f"{args.table} <- {out_tif} ({len(tiles)} IGN tiles)")
     return 0
 
 
@@ -768,8 +790,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--table", default="twi")
     p.set_defaults(func=cmd_compute_twi)
 
-    p = sub.add_parser("load-mdt", help="mosaic staged ASTER tiles into the mdt reference grid")
-    p.add_argument("--dir", type=Path, default=Path("data/OUTPUT/source_data/dtm_aster"))
+    p = sub.add_parser("load-mdt", help="resample staged IGN tiles into the mdt reference grid")
+    p.add_argument("--dir", type=Path, default=Path("data/OUTPUT/source_data/dtm_cnig/25m"))
     p.add_argument("--table", default="mdt")
     p.set_defaults(func=cmd_load_mdt)
 

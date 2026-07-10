@@ -106,6 +106,18 @@ def _fwi_area_grid_indices(lon_grid, lat_grid, aoi_wgs84):
     )
 
 
+def _hour_index_for_date(fdate, local_hour: int = 16) -> int:
+    """Time-axis index of 16:00 Europe/Madrid for a date (axis starts 01:00 UTC,
+    so index = utc_hour - 1). DST-aware: 13 in summer, 14 in winter."""
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+
+    local = _dt(fdate.year, fdate.month, fdate.day, local_hour,
+                tzinfo=ZoneInfo("Europe/Madrid"))
+    offset = int(local.utcoffset().total_seconds() // 3600)
+    return local_hour - offset - 1
+
+
 def _fwi_slice(cur, fdate, hour_index: int) -> dict[str, Any] | None:
     """Per-day NetCDF extract, cached in fwi_slices to avoid re-reading the big blobs."""
     import io
@@ -113,6 +125,10 @@ def _fwi_slice(cur, fdate, hour_index: int) -> dict[str, Any] | None:
     import numpy as np
     import netCDF4 as nc
 
+    if hour_index == 15:
+        # Default = the assessment hour, 16:00 local (a raw UTC index 15 is
+        # 18:00 CEST in summer). Resolved before the cache key is used.
+        hour_index = _hour_index_for_date(fdate)
     cur.execute(
         """CREATE TABLE IF NOT EXISTS fwi_slices (
                fdate date NOT NULL,

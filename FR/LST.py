@@ -7,7 +7,7 @@ def Lst(input_lst, output_lst=None, output_lst_risk=None, show_plots=True):
     print('Executing LST layer...')
 
     import sys
-    if sys.stdin is not None and sys.stdin.isatty():
+    if sys.stdin is not None and sys.stdin.isatty() and sys.stdout.isatty():
         while True:
             save_answer = input("Do you want to save the LST images? (y/n): ").strip().lower()
             if save_answer in ('y', 'n'):

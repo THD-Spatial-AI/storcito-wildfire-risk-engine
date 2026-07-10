@@ -350,6 +350,7 @@ def reconstruct_hist(
     *,
     clip_geom: BaseGeometry | None = None,
     clip_geom_crs: str = "EPSG:4326",
+    target_date=None,
 ) -> dict[str, object]:
     """Rebuild the HIST/ folder that FR.FHIST.fire_history reads, entirely from DB.
 
@@ -367,11 +368,21 @@ def reconstruct_hist(
     produced: list[str] = []
     copied_scenes: list[str] = []
     with _pg_connect() as conn, conn.cursor() as cur:
-        cur.execute("SELECT DISTINCT year FROM hist WHERE year IS NOT NULL ORDER BY year")
+        max_year = target_date.year if target_date is not None else None
+        if max_year is not None:
+            # No future leakage: a 2025 run must not see 2026 fires.
+            cur.execute(
+                "SELECT DISTINCT year FROM hist WHERE year IS NOT NULL AND year <= %s ORDER BY year",
+                (max_year,),
+            )
+        else:
+            cur.execute("SELECT DISTINCT year FROM hist WHERE year IS NOT NULL ORDER BY year")
         years = [r[0] for r in cur.fetchall()]
 
         cur.execute("SELECT DISTINCT left(filename, 4) FROM hist_scenes")
         scene_years = sorted({int(r[0]) for r in cur.fetchall() if r[0].isdigit()})
+        if max_year is not None:
+            scene_years = [y for y in scene_years if y <= max_year]
         missing = [y for y in scene_years if y not in years]
         if missing:
             raise RuntimeError(
@@ -382,6 +393,8 @@ def reconstruct_hist(
 
         cur.execute("SELECT phase, filename, data FROM hist_scenes ORDER BY phase, filename")
         for phase, filename, data in cur.fetchall():
+            if max_year is not None and filename[:4].isdigit() and int(filename[:4]) > max_year:
+                continue
             phase_dir = dest_hist_dir / phase
             phase_dir.mkdir(parents=True, exist_ok=True)
             out = phase_dir / filename
@@ -492,7 +505,8 @@ def reconstruct_inputs(
     # Historical fire (both engines): yearly perimeters from the `hist` table
     # plus the on-disk PRE_FIRE / POST_FIRE Sentinel scenes.
     hist_info = reconstruct_hist(dest_input_dir / "HIST",
-                                 clip_geom=clip_geom, clip_geom_crs=clip_geom_crs)
+                                 clip_geom=clip_geom, clip_geom_crs=clip_geom_crs,
+                                 target_date=target_date)
 
     return {
         "input_dir": str(dest_input_dir),

@@ -36,9 +36,10 @@ Notable changes of this engine relative to the original UVIGO codebase
   as fallback), so the static map uses the hottest day's surface
   temperature rather than yesterday's.
 - Elevation upgraded from ASTER GDEM (30 m photogrammetry) to the IGN
-  PNOA-LiDAR MDT (25 m) via the INSPIRE WCS; TWI is now computed
-  reproducibly from it (GRASS r.fill.dir + r.topidx) instead of being an
-  opaque delivered file.
+  PNOA-LiDAR MDT (25 m) via the INSPIRE WCS; TWI is computed reproducibly
+  from it (GRASS r.fill.dir + r.topidx), and the 30 m mdt reference grid is
+  resampled from the same tiles - ASTER and the NASA Earthdata credential
+  are no longer used anywhere.
 - Fuel models come from the MITECO MFE OGC API (the `modelocombustible`
   attribute rasterized at 20 m, verified 97% pixel match against the
   delivered raster). Fire history comes from NASA FIRMS (SP archive

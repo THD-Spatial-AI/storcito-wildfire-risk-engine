@@ -7,7 +7,7 @@ def Twi(input_twi, output_twi=None, output_twi_risk=None, show_plots=True):
     print('Running TWI layer...')
 
     import sys
-    if sys.stdin is not None and sys.stdin.isatty():
+    if sys.stdin is not None and sys.stdin.isatty() and sys.stdout.isatty():
         while True:
             save_answer = input("Do you want to save the TWI images (y/n): ").strip().lower()
             if save_answer in ('y', 'n'):

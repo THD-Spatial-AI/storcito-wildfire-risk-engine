@@ -62,6 +62,26 @@ FWI_RUNUP_DAYS = 60
 FWI_CLASS_BOUNDS = (5.2, 11.2, 21.3, 38.0)
 
 
+
+def assessment_hour_index(dataset, local_hour: int = 16, tz: str = "Europe/Madrid") -> int:
+    """Index of the time step whose *local* wall-clock hour is the assessment
+    hour. The WRF time axis is UTC, so a fixed index drifts with DST (index 15
+    is 18:00 CEST in summer). Falls back to index 15 if the axis is unreadable.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        from datetime import timezone as _tz
+
+        times = nc.num2date(dataset["time"][:24], dataset["time"].units)
+        for idx, t in enumerate(times):
+            local = datetime(t.year, t.month, t.day, t.hour, tzinfo=_tz.utc).astimezone(ZoneInfo(tz))
+            if local.hour == local_hour:
+                return idx
+    except Exception:
+        pass
+    return 15
+
+
 def _fwi_file_date(file: Path) -> date:
     """Extract the forecast/history date encoded in an FWI filename."""
     match = FWI_DATE_RE.search(file.name)
@@ -214,8 +234,6 @@ def f_w_index(input_folder:str|Path,file_name:str='FWI_Risk_Map',output_folder:P
         raise ValueError("No netCDF files found in input folder")
 
     GRID_SIZE = 360
-    # Hourly steps start at 01:00; index 15 = the 16:00 assessment hour.
-    HOUR_1600 = 15
 
     # Peak-of-range tracking: keep the scoring-window day with the highest mean FWI.
     peak_fwi = None
@@ -234,6 +252,8 @@ def f_w_index(input_folder:str|Path,file_name:str='FWI_Risk_Map',output_folder:P
         with nc.Dataset(file) as dataset:
 
             n_hours = dataset["time"].shape[0]
+            # 16:00 local (Europe/Madrid); the UTC axis shifts with DST.
+            HOUR_1600 = assessment_hour_index(dataset)
             selected_hour = nc.num2date(dataset["time"][HOUR_1600], dataset["time"].units)
             print(
                 f"  -> opening {file.name}: selecting only hour "
