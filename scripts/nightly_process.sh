@@ -118,7 +118,7 @@ except Exception as e:
             [ "$alive" = "1" ] || break
             for t in $(seq $group_start $((group_start + PARALLEL_TILES - 1))); do
                 [ "$t" -le 3 ] || continue
-                jd="data/OUTPUT/jobs/regional_dynamic_${d}_t${t}/OUTPUT"
+                jd=$(ls -td data/OUTPUT/jobs/regional_dynamic_${d}_t${t}*/OUTPUT 2>/dev/null | head -1)
                 el=$(ls "$jd"/engine.log 2>/dev/null)
                 if [ -n "$el" ]; then
                     step=$(grep -aoE "\[engine \+[0-9 ]+s\] ===== [^=(]+|\[FWI\] +[0-9]+/[0-9]+ [0-9-]+ [A-Za-z-]+" "$el" 2>/dev/null | tail -1)
