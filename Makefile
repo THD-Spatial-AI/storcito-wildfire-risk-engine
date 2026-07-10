@@ -192,4 +192,4 @@ fwi:
 	  $(if $(START),--start $(START)) $(if $(END),--end $(END)); rc=$$?; \
 	$(COMPOSE) exec -T storcito-api-1 micromamba run -n storcito \
 	  python3 /app/scripts/load_localhost.py load-fwi-files --dir /app/data/OUTPUT/source_data/fwi \
-	  $(if $(START),--start $(START)) $(if $(END),--end $(END)) && exit $$rc
+	  $(if $(START),--start $(START)) $(if $(END),--end $(END)) $(if $(PRUNE),--prune-days $(PRUNE)) && exit $$rc

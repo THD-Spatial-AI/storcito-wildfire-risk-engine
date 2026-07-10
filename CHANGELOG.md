@@ -84,6 +84,41 @@ Notable changes of this engine relative to the original UVIGO codebase
   when the fetch partially fails.
 
 
+
+## Future work
+
+- **Multi-day forecast mode.** Each MeteoGalicia WRF file carries 96 hourly
+  steps (~4 days ahead), but the engine only exposes one assessment day per
+  file (that day's own 00Z run at 16:00 local - the freshest forecast for
+  that day). A forecast mode could compute expected risk for today+1..+3
+  from the current file: moisture-code run-up through today as usual, then
+  the forecast hours for the future days, with outputs clearly labelled as
+  forecasts and replaced as each day's own file arrives. Needs UVIGO's
+  sign-off on the semantics before implementation; the calendar would then
+  offer future dates in a visually distinct style.
+- **Region-wide LST/TWI breakpoints for on-demand AOI runs.** The nightly
+  regional tiles already classify against region-wide percentile breakpoints
+  (layer_breaks table). On-demand AOI runs still use extent-local
+  percentiles (the historical behaviour); switching them to the same
+  region-wide breaks would make a small AOI's classes match the regional
+  map exactly. One-line change in the AOI path once the semantics are
+  agreed.
+- **Authoritative IGN boundaries.** Clipping still uses the simplified
+  OpenDataSoft 2022 derivative; switch to IGN's WFS when border-line
+  precision starts to matter.
+- **FIRMS confidence filtering.** Detections are loaded unfiltered
+  (matching UVIGO's method); an optional confidence >= threshold would trade
+  recall for precision in the fire-history layer.
+- **LST quality masks.** Only the LST band is fetched; adding the SLSTR
+  confidence/cloud masks would drop low-quality pixels instead of relying on
+  the 220-340 K plausibility filter.
+- **Native-resolution Sentinel by default.** `make sentinel RES=10` works
+  (tiled fetch, mosaicked at load) but costs ~25x the CDSE quota of the
+  default ~180 m fetch; evaluate once quota headroom is known.
+- Each November: `make hist-scenes PRE=<year>-05-03 POST=<year>-10-25` for
+  the season just ended, plus a fresh `make hist` once the MODIS SP archive
+  catches up (~February) to replace the season's NRT rows.
+
 ## Backfilling a past season (example: 2025)
 
 Static layers (`borders`, `dtm`, `twi`, `mdt`, `infra`, `fuels`, `clc`,

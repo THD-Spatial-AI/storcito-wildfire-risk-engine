@@ -401,6 +401,27 @@ def cmd_load_fwi_files(args: argparse.Namespace) -> int:
                 log(f"fwi_files <- {path.name} date={fdate} bytes={size} peak_temp={peak}")
             if skipped:
                 log(f"skipped {skipped} staged file(s) outside {start}..{end}")
+            if args.prune_days is not None:
+                from datetime import date as _date, timedelta as _td
+
+                cutoff = _date.today() - _td(days=args.prune_days)
+                pruned = 0
+                with conn.cursor() as pcur:
+                    for path in files:
+                        m = FWI_DATE_RE.search(path.name)
+                        fdate = datetime.strptime(m.group(1), "%Y%m%d").date() if m else None
+                        if fdate is None or fdate >= cutoff:
+                            continue
+                        pcur.execute(
+                            "SELECT 1 FROM fwi_files WHERE filename=%s AND nbytes=%s "
+                            "AND length(data)=nbytes",
+                            (path.name, path.stat().st_size),
+                        )
+                        if pcur.fetchone():
+                            path.unlink()
+                            pruned += 1
+                if pruned:
+                    log(f"pruned {pruned} staged file(s) older than {cutoff} (verified in DB)")
     finally:
         conn.close()
     return 0
@@ -764,6 +785,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dir", type=Path, required=True)
     p.add_argument("--start", help="only load files dated >= YYYY-MM-DD")
     p.add_argument("--end", help="only load files dated <= YYYY-MM-DD")
+    p.add_argument("--prune-days", type=int, default=None,
+                   help="delete staged files older than N days once verified in the DB")
     p.set_defaults(func=cmd_load_fwi_files)
 
     p = sub.add_parser("load-firms", help="load FIRMS hotspot CSVs into hist (replaces those years)")
