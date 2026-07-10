@@ -6,11 +6,15 @@ import matplotlib.pyplot as plt
 def Lst(input_lst, output_lst=None, output_lst_risk=None, show_plots=True):
     print('Executing LST layer...')
 
-    while True:
-        save_answer = input("Do you want to save the LST images? (y/n): ").strip().lower()
-        if save_answer in ('y', 'n'):
-            break
-        print("Invalid input. Please enter 'y' or 'n'.")
+    import sys
+    if sys.stdin is not None and sys.stdin.isatty():
+        while True:
+            save_answer = input("Do you want to save the LST images? (y/n): ").strip().lower()
+            if save_answer in ('y', 'n'):
+                break
+            print("Invalid input. Please enter 'y' or 'n'.")
+    else:
+        save_answer = 'y'  # non-interactive (engine subprocess): always save
 
     save_outputs = (save_answer == 'y')
 
@@ -43,8 +47,9 @@ def Lst(input_lst, output_lst=None, output_lst_risk=None, show_plots=True):
     reclasificado[(lst_clean > p60) & (lst_clean <= p80)] = 4
     reclasificado[(lst_clean > p80) & valid] = 5
     
-    out_dir_tif = r'C:\Users\Mateo G\Desktop\STORCITO\Salida Datos\re'
-    out_dir_png = r'C:\Users\Mateo G\Desktop\STORCITO\Salida Datos\LST'
+    base_dir = os.path.dirname(str(output_lst)) if output_lst else 'data/OUTPUT'
+    out_dir_tif = base_dir
+    out_dir_png = os.path.join(base_dir, 'PNGs')
 
     if output_lst is None:
         output_lst = os.path.join(out_dir_tif, 'LST.tif')

@@ -87,11 +87,11 @@ sentinel:
 	elif [ -n "$(MONTH)" ]; then \
 	  start=$(MONTH)-01; end=$$(date -d "$(YEAR)-$(MONTH)-01 +1 month -1 day" +%m-%d); \
 	else start=05-01; end=10-31; fi; \
-	python3 scripts/fetch_sources.py sentinel --years $(YEAR) --season-start $$start --season-end $$end
-	@$(COMPOSE) exec -T geotools bash -c 'cd /data && \
+	python3 scripts/fetch_sources.py sentinel --years $(YEAR) --season-start $$start --season-end $$end; rc=$$?; \
+	$(COMPOSE) exec -T geotools bash -c 'cd /data && \
 	  for w in $$(ls data/OUTPUT/source_data/sentinel | grep "^$(YEAR)$(MONTH)" | sort); do \
 	    python3 scripts/load_localhost.py load-sentinel --dir data/OUTPUT/source_data/sentinel/$$w || exit 1; \
-	  done'
+	  done' && exit $$rc
 
 # Fetch CLC+ land cover
 clc: YEAR ?= 2023
@@ -189,7 +189,7 @@ hist-scenes:
 # Fetch MeteoGalicia FWI
 fwi:
 	@$(ENV_RUN) python3 scripts/fetch_sources.py fwi \
-	  $(if $(START),--start $(START)) $(if $(END),--end $(END))
-	@$(COMPOSE) exec -T storcito-api-1 micromamba run -n storcito \
+	  $(if $(START),--start $(START)) $(if $(END),--end $(END)); rc=$$?; \
+	$(COMPOSE) exec -T storcito-api-1 micromamba run -n storcito \
 	  python3 /app/scripts/load_localhost.py load-fwi-files --dir /app/data/OUTPUT/source_data/fwi \
-	  $(if $(START),--start $(START)) $(if $(END),--end $(END))
+	  $(if $(START),--start $(START)) $(if $(END),--end $(END)) && exit $$rc

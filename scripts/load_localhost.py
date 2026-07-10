@@ -86,7 +86,9 @@ def raster2pgsql_load(
         "-s",
         str(srid),
         pg_mode,
-        "-I",
+        # Index only on replace: -I on append creates a duplicate GiST index
+        # per file (66 duplicates were found on a tiled table).
+        *(["-I"] if mode == "replace" else []),
         # -C adds a max-extent constraint that rejects later appends; skip for tiled loads.
         *(["-C"] if constraints else []),
         "-M",
@@ -178,7 +180,7 @@ def sentinel_capture_date(args: argparse.Namespace) -> str:
 def sentinel_ts_append(path: Path, table: str, srid: int, capture_date: str) -> None:
     """Append one band mosaic into the {table}_ts time-series table."""
     ts = f"{table}_ts"
-    staging = f"{table}_ts_stage"
+    staging = f"{table}_ts_stage_{os.getpid()}"
     raster2pgsql_load(path, staging, srid, "replace")
     psql_sql(
         f"""
@@ -232,6 +234,14 @@ def cmd_load_clcplus(args: argparse.Namespace) -> int:
         mode = "replace" if idx == 0 and args.mode == "replace" else "append"
         raster2pgsql_load(path, args.table, args.srid, mode, constraints=False)
     psql_sql(f"SELECT AddRasterConstraints('public'::name, '{args.table}'::name, 'rast'::name, 'srid');")
+    # Clean up duplicate GiST indexes left by older loads (-I per appended file).
+    psql_sql(
+        f"""DO $$ DECLARE r record; BEGIN
+        FOR r IN SELECT indexname FROM pg_indexes
+                 WHERE tablename = '{args.table}'
+                   AND indexname ~ '_st_convexhull_idx[0-9]+$'
+        LOOP EXECUTE format('DROP INDEX %I', r.indexname); END LOOP; END $$;"""
+    )
     log(f"{args.table} <- {len(tifs)} tiles")
     return 0
 
@@ -268,6 +278,9 @@ def cmd_load_borders(args: argparse.Namespace) -> int:
 
 def cmd_load_iuf(args: argparse.Namespace) -> int:
     ogr_load(args.path, "iuf", t_srs=args.t_srs, overwrite=True)
+    # The CLC GDB carries a handful of invalid (self-intersecting) polygons.
+    psql_sql("UPDATE iuf SET geom = ST_Multi(ST_CollectionExtract(ST_MakeValid(geom), 3)) "
+             "WHERE NOT ST_IsValid(geom);")
     return 0
 
 
@@ -338,21 +351,36 @@ def cmd_load_fwi_files(args: argparse.Namespace) -> int:
                     continue
                 size = path.stat().st_size
                 peak = _fwi_peak_temp(path)
+                # Assemble chunks server-side in one pass: repeated
+                # `data = data || chunk` updates rewrote the row per chunk and
+                # bloated the table to ~2.3x its logical size.
+                cur.execute(
+                    "CREATE TEMP TABLE IF NOT EXISTS fwi_chunks "
+                    "(i int, part bytea) ON COMMIT DELETE ROWS"
+                )
                 with path.open("rb") as fh:
-                    first = fh.read(FWI_CHUNK_BYTES)
-                    cur.execute(
-                        """INSERT INTO fwi_files (fdate, filename, data, nbytes, peak_temp)
-                           VALUES (%s, %s, %s, %s, %s)
-                           ON CONFLICT (filename)
-                           DO UPDATE SET fdate=EXCLUDED.fdate, data=EXCLUDED.data,
-                                         nbytes=EXCLUDED.nbytes, peak_temp=EXCLUDED.peak_temp""",
-                        (fdate, path.name, first, size, peak),
-                    )
+                    i = 0
                     while chunk := fh.read(FWI_CHUNK_BYTES):
                         cur.execute(
-                            "UPDATE fwi_files SET data = data || %s WHERE filename = %s",
-                            (chunk, path.name),
+                            "INSERT INTO fwi_chunks (i, part) VALUES (%s, %s)", (i, chunk)
                         )
+                        i += 1
+                cur.execute(
+                    """INSERT INTO fwi_files (fdate, filename, data, nbytes, peak_temp)
+                       SELECT %s, %s, string_agg(part, ''::bytea ORDER BY i), %s, %s
+                       FROM fwi_chunks
+                       ON CONFLICT (filename)
+                       DO UPDATE SET fdate=EXCLUDED.fdate, data=EXCLUDED.data,
+                                     nbytes=EXCLUDED.nbytes, peak_temp=EXCLUDED.peak_temp""",
+                    (fdate, path.name, size, peak),
+                )
+                # Invalidate caches keyed by date/filename: the per-day slices
+                # and the on-disk NetCDF cache would otherwise serve stale data.
+                cur.execute("SELECT to_regclass('public.fwi_slices')")
+                if cur.fetchone()[0] is not None and fdate is not None:
+                    cur.execute("DELETE FROM fwi_slices WHERE fdate = %s", (fdate,))
+                cache_file = args.dir.parent.parent / "_fwi_cache" / path.name
+                cache_file.unlink(missing_ok=True)
                 conn.commit()
                 log(f"fwi_files <- {path.name} date={fdate} bytes={size} peak_temp={peak}")
             if skipped:

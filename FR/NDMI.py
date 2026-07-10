@@ -3,7 +3,10 @@ import rasterio
 import numpy as np
 import matplotlib.pyplot as plt
 
-def Ndmi(input_band8, input_band11):
+def Ndmi(input_band8, input_band11, output_folder=None, export_image=False,
+         show_plots=False):
+    from FR.rutinas.setup import save_file, default_imshow
+
     print('NDMI Layer processing...')
 
     with rasterio.open(input_band8) as b8_src:
@@ -24,77 +27,21 @@ def Ndmi(input_band8, input_band11):
     reclasificado[(ndmi > 0.20) & (ndmi <= 0.40)] = 2
     reclasificado[ndmi > 0.40] = 1
 
-    while True:
-        choice = input("Do you want to save the images? (y/n): ").lower().strip()
-        if choice in ('y', 'n'):
-            break
-        print("Invalid input. Please enter 'y' or 'n'")
+    fig1, ax1 = default_imshow(ndmi, 'NDMI')
+    fig2, ax2 = default_imshow(reclasificado, 'NDMI Risk Map')
 
-    if choice == 'y':
-        tiff_dir = r'C:\Users\Mateo G\Desktop\STORCITO\Salida Datos\re'
-        png_dir = r'C:\Users\Mateo G\Desktop\STORCITO\Salida Datos\NDMI'
-        os.makedirs(tiff_dir, exist_ok=True)
-        os.makedirs(png_dir, exist_ok=True)
+    if export_image and output_folder is not None:
+        save_file(ndmi, 'estatic', output_folder, meta_ref,
+                  'NDMI', extensions=['tif', 'tiff', 'png'], fig=fig1)
+        save_file(reclasificado, 'estatic', output_folder, meta_ref,
+                  'NDMI_Risk_Map', extensions=['tif', 'tiff', 'png'], fig=fig2)
 
-        # Save NDMI continuous
-        meta_ndmi = meta_ref.copy()
-        meta_ndmi.update(driver='GTiff', dtype='float32', count=1)
-        ndmi_tiff = os.path.join(tiff_dir, 'ndmi.tiff')
-        ndmi_tif = os.path.join(tiff_dir, 'ndmi.tif')
-
-        with rasterio.open(ndmi_tiff, 'w', **meta_ndmi) as dst:
-            dst.write(ndmi.astype('float32'), 1)
-        with rasterio.open(ndmi_tif, 'w', **meta_ndmi) as dst:
-            dst.write(ndmi.astype('float32'), 1)
-
-        # Save reclassified
-        meta_recl = meta_ref.copy()
-        meta_recl.update(driver='GTiff', dtype='int32', count=1)
-        recl_tiff = os.path.join(tiff_dir, 'ndmi_risk_map.tiff')
-        recl_tif = os.path.join(tiff_dir, 'ndmi_risk_map.tif')
-
-        with rasterio.open(recl_tiff, 'w', **meta_recl) as dst:
-            dst.write(reclasificado.astype('int32'), 1)
-        with rasterio.open(recl_tif, 'w', **meta_recl) as dst:
-            dst.write(reclasificado.astype('int32'), 1)
-
-        # Save PNGs
-        plt.figure(figsize=(8, 6))
-        plt.imshow(ndmi, cmap='RdYlGn')
-        plt.colorbar()
-        plt.title('NDMI')
-        plt.tight_layout()
-        plt.savefig(os.path.join(png_dir, 'ndmi.png'), dpi=300, bbox_inches='tight')
-        plt.close()
-
-        plt.figure(figsize=(8, 6))
-        plt.imshow(reclasificado, cmap='Reds')
-        plt.colorbar()
-        plt.title('NDMI Risk Map')
-        plt.tight_layout()
-        plt.savefig(os.path.join(png_dir, 'ndmi_risk_map.png'), dpi=300, bbox_inches='tight')
-        plt.close()
-
-        print(f"Images saved in:\n - Rasters: {tiff_dir}\n - PNGs: {png_dir}")
-    else:
-        print("Images not saved")
-
-    plt.figure(figsize=(8, 6))
-    plt.imshow(ndmi, cmap='RdYlGn')
-    plt.colorbar()
-    plt.title('NDMI')
-    plt.tight_layout()
-    plt.show()
-
-    plt.figure(figsize=(8, 6))
-    plt.imshow(reclasificado, cmap='Reds')
-    plt.colorbar()
-    plt.title('NDMI Risk Map')
-    plt.tight_layout()
-    plt.show()
+    if show_plots:
+        plt.show()
+    plt.close('all')
 
     print('NDMI Layer completed')
-    return
+    return ndmi, reclasificado
 
 
 def ndmi_risk(input_band8, input_band11, output_risk):

@@ -2,6 +2,9 @@
 
 Dockerized Python geospatial CLI app.
 
+See [CHANGELOG.md](CHANGELOG.md) for differences vs. the original UVIGO code
+and season-backfill runbooks.
+
 ## Run with Docker Compose
 
 Create local data folders:
@@ -70,7 +73,7 @@ API endpoints:
 - `GET /available-static-dates`
 - `POST /run-static-aoi`
 - `POST /run-static-aoi-wildfire`
-- `POST /assessment/start` (deprecated alias: `POST /calliope/start`)
+- `POST /calliope/start`
 
 ## Data pipeline: fetching every layer from its source
 
@@ -105,7 +108,7 @@ download from the source.
 | `hist` | `hist` | MODIS active-fire hotspots (SP archive + NRT, auto-stitched) | NASA FIRMS area API | points | `FIRMS_MAP_KEY` |
 | `hist-scenes` | `hist_scenes` | Sentinel-2 B8A/B12 pre/post-season pairs (dNBR) | Copernicus Data Space Process API | GeoTIFF blobs | `SH_CLIENT_ID` + `SH_CLIENT_SECRET` |
 | `clc` | `clcplus_2023` | CLC+ Backbone 2023 land cover | Copernicus Land Monitoring Service datarequest API — `land.copernicus.eu` | 10 m | `CLMS_SERVICE_KEY_JSON` |
-| *(pending)* | `iuf` | CLC2018 vector (WUI input) | Copernicus Land Monitoring Service | 1:100k vector | `CLMS_SERVICE_KEY_JSON` |
+| `iuf` | `iuf` | CORINE CLC2018 vector (WUI/land-use input) | Copernicus Land Monitoring Service datarequest API | 1:100k vector | `CLMS_SERVICE_KEY_JSON` |
 
 Copy `.env.example` to `.env` and fill the credentials in. After changing
 `.env`, run `make up` (recreates containers) — `make restart` does not reload
@@ -128,6 +131,7 @@ make fuels                          # 9. MFE fuel models         (~45 min, slow 
 make hist START=2026-05-01          # 10. FIRMS fire hotspots, May 1 2026 -> today (needs step 1!)
 make hist-scenes PRE=2025-05-03 POST=2025-10-25   # 11. dNBR pair, last complete season (2025)
 make clc                            # 12. CLC+ Backbone 2023 land cover (Copernicus queue: minutes-hours)
+make iuf                            # 13. CORINE CLC2018 vector -> iuf, the WUI/land-use input (Copernicus queue)
 ```
 
 The explicit `START=` dates make the fetched range visible; the bare forms
@@ -137,7 +141,10 @@ range by default. Adjust the year in `START=` to backfill another season
 
 Constraints: `hist` clips against the Galicia polygon from `borders` (1 before
 10); `twi` computes from the tiles staged by `dtm` (2 before 3). Everything
-else is order-independent and can run in parallel.
+else is order-independent and can run in parallel. Steps 12 and 13 submit a
+datarequest to Copernicus and poll until their queue prepares the extract —
+usually minutes, occasionally hours; the request survives a poller timeout,
+so re-running the target later picks the prepared file up.
 
 Verify any layer after its target finishes:
 
@@ -187,7 +194,7 @@ Notes:
 |---|---|---|---|
 | **Dynamic** (daily) | `fwi`, `lst` | every day | new MeteoGalicia forecast each morning; Sentinel-3 passes daily. Drives the live map. |
 | **Semi-dynamic** (in fire season) | `sentinel` weekly, `hist` monthly | May-Oct | Sentinel-2 revisit is ~5 days (weekly NDVI/NDMI mosaics); FIRMS hotspots accumulate as fires happen |
-| **Static / quasi-static** | `borders` (never), `dtm`+`twi` (~2 years), `mdt` (never), `infra` (few times/year), `fuels` (new MFE edition, 5-10 years), `clc` (new CLC edition, ~2 years), `hist-scenes` (once, each November) | on publication | terrain, land cover and infrastructure change on multi-year timescales |
+| **Static / quasi-static** | `borders` (never), `dtm`+`twi` (~2 years), `mdt` (never), `infra` (few times/year), `fuels` (new MFE edition, 5-10 years), `clc`+`iuf` (new CLC edition, ~2-6 years), `hist-scenes` (once, each November) | on publication | terrain, land cover and infrastructure change on multi-year timescales |
 
 Suggested cron for a server (all commands are argument-free thanks to the
 "latest available" defaults):
@@ -281,8 +288,7 @@ Table names are validated against the live catalog and all access is read-only.
 image if you are upgrading an older container.)
 
 For wildfire-platform compatibility, STORCITO also accepts the generic wildfire
-calculation payload at `/run-static-aoi-wildfire` and `/assessment/start`
-(deprecated alias: `/calliope/start`).
+calculation payload at `/run-static-aoi-wildfire` and `/calliope/start`.
 
 - `coordinates` must be GeoJSON geometry.
 - `start_date` and `end_date` must represent `16:00-17:00` in `Europe/Berlin`.

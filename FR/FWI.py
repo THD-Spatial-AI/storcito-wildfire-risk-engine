@@ -191,6 +191,13 @@ def f_w_index(input_folder:str|Path,file_name:str='FWI_Risk_Map',output_folder:P
 
     print("Fire Weather Index Layer processing...")
 
+    # Whole-region engines call without target_date
+    if target_date is None:
+        available = available_fwi_dates(input_folder)
+        if not available:
+            raise ValueError("No netCDF files found in input folder")
+        target_date = available[-1]
+
     # Scoring window = reported day(s); earlier days only spin up the moisture
     # codes. The map is the highest-FWI day in the window (peak-of-range).
     score_end = target_date

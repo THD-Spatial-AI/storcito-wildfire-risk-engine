@@ -72,7 +72,10 @@ def _write_array(path: Path, array: np.ndarray, reference_path: Path, dtype: str
     path.parent.mkdir(parents=True, exist_ok=True)
     with rasterio.open(reference_path) as ref:
         profile = ref.profile
-    profile.update(dtype=dtype, count=1)
+    # The engine marks invalid pixels as 0 (masked/no-data areas); declare that
+    # instead of inheriting the reference's nodata (e.g. -9999) which is never
+    # actually written.
+    profile.update(dtype=dtype, count=1, nodata=0)
     with rasterio.open(path, "w", **profile) as dst:
         dst.write(array.astype(dtype, copy=False), 1)
     return path

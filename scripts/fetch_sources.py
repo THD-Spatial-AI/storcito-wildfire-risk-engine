@@ -98,7 +98,7 @@ MFE_PAGE_SIZE = 1000
 FIRMS_AREA_API = "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
 FIRMS_SOURCE = "MODIS_SP"
 FIRMS_MAX_DAYS = 5
-FIRMS_GALICIA_BBOX = "-9.40171,41.74648,-6.7452,43.69909"
+FIRMS_GALICIA_BBOX = "-9.40,41.75,-6.68,43.85"
 
 
 # ==============================================================================
@@ -409,11 +409,18 @@ def cdse_access_token() -> str:
 
 
 def sentinel_evalscript(bands: list[str]) -> str:
+    """Band-passthrough evalscript with SCL cloud masking.
+
+    Cloud shadow (3), medium/high-probability cloud (8/9) and thin cirrus (10)
+    pixels are written as 0 (the engines' nodata) instead of contaminating
+    NDVI/NDMI with cloud reflectance. leastCC mosaicking minimises the gaps.
+    """
     outputs = ",\n      ".join(
         f'{{ id: "{band}", bands: 1, sampleType: "UINT16" }}' for band in bands
     )
-    band_list = ",".join(f'"{band}"' for band in bands)
+    band_list = ",".join(f'"{band}"' for band in bands + ["SCL"])
     values = ", ".join(f"{band}:[s.{band}]" for band in bands)
+    zeros = ", ".join(f"{band}:[0]" for band in bands)
     return f"""//VERSION=3
 function setup() {{
   return {{
@@ -423,7 +430,12 @@ function setup() {{
     ]
   }};
 }}
-function evaluatePixel(s) {{ return {{ {values} }}; }}
+function evaluatePixel(s) {{
+  if (s.SCL === 3 || s.SCL === 8 || s.SCL === 9 || s.SCL === 10) {{
+    return {{ {zeros} }};
+  }}
+  return {{ {values} }};
+}}
 """
 
 

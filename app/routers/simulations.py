@@ -100,7 +100,7 @@ def run_static_aoi_wildfire_request(payload: WildfireCalculationRequest, request
 @router.post("/calliope/start")
 def calliope_start(payload: WildfireCalculationRequest, request: Request):
     """
-    Wildfire-compatible default webservice endpoint.
+    Start a wildfire risk assessment (wildfire-platform default endpoint).
     """
     try:
         return run_wildfire_payload(payload, request)

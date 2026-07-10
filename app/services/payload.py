@@ -60,6 +60,39 @@ def unwrap_geojson_geometry(node: Any) -> dict | None:
     return None
 
 
+def _require_inside_coverage(geometry_wgs84) -> None:
+    """Reject AOIs outside the data region: the engine would otherwise
+    substitute nearest-cell weather and produce fabricated results.
+    Skipped (open) when the region polygon is unavailable.
+    """
+    import json
+    import os
+
+    pattern = os.environ.get("STORCITO_COVERAGE_REGION", "%galicia%")
+    try:
+        from shapely.geometry import shape as shapely_shape
+
+        from FR.db_reconstruct import _pg_connect
+
+        with _pg_connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT ST_AsGeoJSON(geom) FROM spain_autonomous_communities "
+                "WHERE acom_name ILIKE %s LIMIT 1",
+                (pattern,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return
+        region = shapely_shape(json.loads(row[0]))
+    except Exception:
+        return
+    if not geometry_wgs84.intersects(region):
+        raise ValueError(
+            "The requested area is outside the wildfire data coverage region; "
+            "see GET /available-data-coverage for the supported boundary."
+        )
+
+
 def wildfire_geometry(payload: WildfireCalculationRequest):
     geometry = unwrap_geojson_geometry(payload.coordinates)
     if geometry is None:
@@ -72,6 +105,10 @@ def wildfire_geometry(payload: WildfireCalculationRequest):
                 break
     if geometry is None:
         raise ValueError("coordinates or topology[0].geometry must contain a GeoJSON geometry.")
+
+    from shapely.geometry import shape as shapely_shape
+
+    _require_inside_coverage(shapely_shape(geometry))
 
     projected = build_geojson_aoi(geometry)
     if payload.buffer_distance > 0:

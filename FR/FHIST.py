@@ -144,13 +144,21 @@ def fire_history(input_folder:str|Path=Path('data/INPUT'), output_folder:str|Pat
         nir_pre, swir_pre = nir_pre.astype('float32'), swir_pre.astype('float32')
         nir_post, swir_post = nir_post.astype('float32'), swir_post.astype('float32')
         
+        if nir_pre.shape != nir_post.shape:
+            raise ValueError(
+                f"PRE/POST scene grids differ ({nir_pre.shape} vs {nir_post.shape}); "
+                "refetch the pair with matching windows."
+            )
+
         # Calcular dNBR = NBR_pre - NBR_post
         nbr_pre = _calculate_nbr(nir_pre, swir_pre)
         nbr_post = _calculate_nbr(nir_post, swir_post)
         dnbr = nbr_pre - nbr_post
-        
-        # Reclasificar: valores < 0.27 = no quemado (0), >= 0.27 = quemado (1)
-        reclassified = np.where(dnbr < BURNED_THRESHOLD, 0, 1).astype('int32')
+
+        # Reclasificar: >= 0.27 = quemado (1); nodata/NaN cuenta como no quemado.
+        reclassified = np.where(
+            np.isfinite(dnbr) & (dnbr >= BURNED_THRESHOLD), 1, 0
+        ).astype('int32')
         
         # Aplicar máscara de geometrías
         geometries = _load_reference_geometries(year)

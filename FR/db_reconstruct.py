@@ -142,30 +142,32 @@ def export_raster_table(
     return dest_tif
 
 
-def _lst_ts_date_for(target_date) -> str | None:
-    """Best lst_ts capture_date for a run: the assessment day itself, else the
-    nearest earlier day, else None (caller falls back to the current lst table).
-    """
+def _ts_date_for(ts_table: str, target_date) -> str | None:
     try:
         with _pg_connect() as conn, conn.cursor() as cur:
-            cur.execute("SELECT to_regclass('public.lst_ts')")
+            cur.execute("SELECT to_regclass(%s)", (f"public.{ts_table}",))
             if cur.fetchone()[0] is None:
                 return None
             cur.execute(
-                "SELECT max(capture_date) FROM lst_ts WHERE capture_date <= %s",
+                f"SELECT max(capture_date) FROM {ts_table} WHERE capture_date <= %s",
                 (target_date,),
             )
             row = cur.fetchone()
             if row and row[0]:
                 return row[0].isoformat()
-            cur.execute("SELECT min(capture_date) FROM lst_ts")
+            cur.execute(
+                f"SELECT min(capture_date) FROM {ts_table} WHERE capture_date > %s",
+                (target_date,),
+            )
             row = cur.fetchone()
             return row[0].isoformat() if row and row[0] else None
     except Exception:
         return None
 
 
-def export_lst_raster(
+def export_ts_raster(
+    ts_table: str,
+    current_table: str,
     target_date,
     dest_tif: str | Path,
     *,
@@ -173,22 +175,22 @@ def export_lst_raster(
     clip_geom_crs: str = "EPSG:4326",
     target_srs: str | None = None,
 ) -> tuple[Path, str]:
-    """Export the LST raster matching the assessment date from lst_ts.
+    """Export the raster matching the assessment date from a *_ts time series.
 
-    Returns (path, capture_date_used). Falls back to the current `lst` table
-    when the time series is missing/empty.
+    Returns (path, capture_date_used). Falls back to the current single-mosaic
+    table when the time series is missing/empty.
     """
     dest_tif = Path(dest_tif)
-    capture_date = _lst_ts_date_for(target_date)
+    capture_date = _ts_date_for(ts_table, target_date)
     if capture_date is None:
-        export_raster_table("lst", dest_tif, clip_geom=clip_geom,
+        export_raster_table(current_table, dest_tif, clip_geom=clip_geom,
                             clip_geom_crs=clip_geom_crs, target_srs=target_srs)
         return dest_tif, "current"
 
     dest_tif.parent.mkdir(parents=True, exist_ok=True)
     with _pg_connect() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT ST_AsGDALRaster(ST_Union(rast), 'GTiff') FROM lst_ts "
+            f"SELECT ST_AsGDALRaster(ST_Union(rast), 'GTiff') FROM {ts_table} "
             "WHERE capture_date = %s",
             (capture_date,),
         )
@@ -464,14 +466,20 @@ def reconstruct_inputs(
     # the heavier DB raster/vector exports run.
     fwi_files = reconstruct_fwi(target_date, dest_input_dir / "FWI")
 
-    lst_date_used: str | None = None
+    # Layers with a *_ts time series export the raster matching the run's
+    # assessment date, so historical runs never mix in newer imagery.
+    _TS_TABLES = {
+        "lst": "lst_ts",
+        "sentinel_b4": "sentinel_b4_ts",
+        "sentinel_b8": "sentinel_b8_ts",
+        "sentinel_b11": "sentinel_b11_ts",
+    }
+    ts_dates_used: dict[str, str] = {}
     for kind, table, rel in _ENGINE_PLANS[engine]:
         dest = dest_input_dir / rel
-        if table == "lst":
-            # Date-matched from the lst_ts series: the static map (hottest FWI
-            # day) gets that day's LST, dynamic runs get their own day's.
-            _, lst_date_used = export_lst_raster(
-                target_date, dest, clip_geom=clip_geom,
+        if table in _TS_TABLES:
+            _, ts_dates_used[table] = export_ts_raster(
+                _TS_TABLES[table], table, target_date, dest, clip_geom=clip_geom,
                 clip_geom_crs=clip_geom_crs, target_srs=ENGINE_RASTER_SRS)
         elif kind == _RASTER:
             export_raster_table(table, dest, clip_geom=clip_geom,
@@ -491,6 +499,6 @@ def reconstruct_inputs(
         "produced": produced,
         "fwi_files": [str(p) for p in fwi_files],
         "hist": hist_info,
-        "lst_date": lst_date_used,
+        "layer_dates": ts_dates_used,
         "skipped_layers": [],
     }

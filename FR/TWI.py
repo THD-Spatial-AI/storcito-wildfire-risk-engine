@@ -6,16 +6,21 @@ import matplotlib.pyplot as plt
 def Twi(input_twi, output_twi=None, output_twi_risk=None, show_plots=True):
     print('Running TWI layer...')
 
-    while True:
-        save_answer = input("Do you want to save the TWI images (y/n): ").strip().lower()
-        if save_answer in ('y', 'n'):
-            break
-        print("Enter 'y' or 'n'.")
+    import sys
+    if sys.stdin is not None and sys.stdin.isatty():
+        while True:
+            save_answer = input("Do you want to save the TWI images (y/n): ").strip().lower()
+            if save_answer in ('y', 'n'):
+                break
+            print("Enter 'y' or 'n'.")
+    else:
+        save_answer = 'y'  # non-interactive (engine subprocess): always save
 
     save_outputs = (save_answer == 'y')
 
-    out_dir_tif = r'C:\Users\Mateo G\Desktop\STORCITO\Salida Datos\re'
-    out_dir_png = r'C:\Users\Mateo G\Desktop\STORCITO\Salida Datos\TWI'
+    base_dir = os.path.dirname(str(output_twi)) if output_twi else 'data/OUTPUT'
+    out_dir_tif = base_dir
+    out_dir_png = os.path.join(base_dir, 'PNGs')
 
     if output_twi is None:
         output_twi = os.path.join(out_dir_tif, 'twi.tif')
