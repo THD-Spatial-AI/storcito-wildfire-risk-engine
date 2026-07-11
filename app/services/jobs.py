@@ -196,7 +196,7 @@ def run_wildfire_payload(payload: WildfireCalculationRequest, request: Request |
         # clip would silently change what the result means.
         and (start_date is None or start_date == target_date)
         and not user_inputs
-        and optional_layers is None
+        and not (optional_layers and any(optional_layers.values()))
         and not payload.parameters.get("force_compute")
     ):
         from app.services.precomputed import get_precomputed_result
