@@ -386,6 +386,31 @@ def _region_breaks(target_date) -> dict[str, str]:
     return breaks
 
 
+
+# Bump when engine-layer code changes so cached static outputs regenerate.
+STATIC_CACHE_VERSION = "1"
+_STATIC_EXCLUDE = ("NDVI", "ndvi", "NDMI", "ndmi", "FWI", "LST", "Fire_History", "HIST")
+
+
+def _static_signature() -> dict | None:
+    """Fingerprint of the date-independent source tables; a reseed of any of
+    them (or a cache-version bump) invalidates the cached static layers."""
+    try:
+        from FR.db_reconstruct import _pg_connect
+
+        sig: dict = {"v": STATIC_CACHE_VERSION}
+        with _pg_connect() as conn, conn.cursor() as cur:
+            for t in ("dtm", "twi", "fuels", "mdt"):
+                cur.execute(f"SELECT count(*), coalesce(max(rid), 0) FROM {t}")
+                sig[t] = list(cur.fetchone())
+            for t in ("infra", "iuf"):
+                cur.execute(f"SELECT count(*) FROM {t}")
+                sig[t] = cur.fetchone()[0]
+        return sig
+    except Exception:
+        return None
+
+
 def run_engine_job(
     payload: WildfireCalculationRequest,
     engine: str,
@@ -418,6 +443,32 @@ def run_engine_job(
     print(f"[job {job_id}] phase 1/3 done in {_t.time() - _t0:.0f}s "
           f"(layer dates: {reconstruction.get('layer_dates')})", flush=True)
 
+    # Static-layer cache (regional tiles only): terrain/TWI/fuel/infra/WUI do
+    # not depend on the date, so reuse the previous run's outputs for the same
+    # tile geometry while the source tables are unchanged.
+    import hashlib
+    import shutil
+
+    static_flags: dict[str, str] = {}
+    cache_dir = None
+    static_sig = None
+    if payload.user_id == "regional" and engine == "dynamic" and clip_geom is not None:
+        key = hashlib.sha1(clip_geom.wkt.encode()).hexdigest()[:16]
+        cache_dir = JOBS_OUTPUT_ROOT.parent / "cache" / "static_layers" / key
+        static_sig = _static_signature()
+        sig_file = cache_dir / "signature.json"
+        if static_sig is not None and sig_file.exists():
+            try:
+                cached_ok = json.loads(sig_file.read_text()) == static_sig
+            except (json.JSONDecodeError, OSError):
+                cached_ok = False
+            if cached_ok:
+                shutil.copytree(cache_dir / "re", output_dir / "re", dirs_exist_ok=True)
+                static_flags = {"FFRM_RUN_MDT": "0", "FFRM_RUN_TWI": "0",
+                                "FFRM_RUN_FMT": "0", "FFRM_RUN_INFRA": "0",
+                                "FFRM_RUN_WUI": "0"}
+                print(f"[job {job_id}] static layers reused from cache {key}", flush=True)
+
     print(f"[job {job_id}] phase 2/3: region-wide LST/TWI class breakpoints", flush=True)
     env = {
         **os.environ,
@@ -426,6 +477,7 @@ def run_engine_job(
         "MPLBACKEND": "Agg",
         **_region_breaks(target_date),
         **cfg["run_flags"],
+        **static_flags,
     }
     print(f"[job {job_id}] phase 3/3: {engine} engine started - follow live: "
           f"tail -f {output_dir / 'engine.log'}", flush=True)
@@ -447,6 +499,20 @@ def run_engine_job(
     if proc.returncode != 0:
         tail = log_path.read_text()[-2000:]
         raise RuntimeError(f"{engine} engine failed (see engine.log):\n{tail}")
+
+    # Populate the static cache after a successful full run (cache miss).
+    if cache_dir is not None and not static_flags and static_sig is not None:
+        try:
+            src = output_dir / "re"
+            for f in src.rglob("*"):
+                if f.is_file() and not any(x in f.name for x in _STATIC_EXCLUDE):
+                    dest = cache_dir / "re" / f.relative_to(src)
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(f, dest)
+            (cache_dir / "signature.json").write_text(json.dumps(static_sig))
+            print(f"[job {job_id}] static layers cached for reuse", flush=True)
+        except Exception as exc:  # noqa: BLE001 - cache is best-effort
+            print(f"[job {job_id}] static cache write skipped: {exc}", flush=True)
 
     result_map = output_dir / cfg["result"]
     if not result_map.is_file():
