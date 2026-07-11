@@ -402,8 +402,20 @@ def reconstruct_hist(
             )
 
         cur.execute("SELECT phase, filename, data FROM hist_scenes ORDER BY phase, filename")
-        for phase, filename, data in cur.fetchall():
-            if target_date is not None and filename[:10] > str(target_date):
+        rows = [
+            (phase, filename, data)
+            for phase, filename, data in cur.fetchall()
+            if target_date is None or filename[:10] <= str(target_date)
+        ]
+        # Keep only complete PRE/POST pairs per year: dropping a future POST
+        # scene must also drop its PRE partner or FHIST crashes on the pair.
+        years_with = {}
+        for phase, filename, _ in rows:
+            years_with.setdefault(filename[:4], set()).add(phase)
+        complete = {y for y, phases in years_with.items()
+                    if {"PRE_FIRE", "POST_FIRE"} <= phases}
+        for phase, filename, data in rows:
+            if filename[:4] not in complete:
                 continue
             phase_dir = dest_hist_dir / phase
             phase_dir.mkdir(parents=True, exist_ok=True)

@@ -257,7 +257,8 @@ candidate_paths = {
     "meteo": (_cropped('FWI_Risk_Map_cropped.tif'), run_fwi),
     "lst": (_cropped('LST_risk_map_cropped.tif'), run_lst),
 }
-raster_paths = {key: path for key, (path, active) in candidate_paths.items() if active}
+raster_paths = {key: path for key, (path, active) in candidate_paths.items()
+                if active or os.path.exists(path)}  # cached static layers exist with flags off
 
 if "mdt" not in raster_paths:
     raise RuntimeError("The MDT layer (reference grid) is required but was not generated.")
