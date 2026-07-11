@@ -407,8 +407,6 @@ def reconstruct_hist(
             for phase, filename, data in cur.fetchall()
             if target_date is None or filename[:10] <= str(target_date)
         ]
-        # Keep only complete PRE/POST pairs per year: dropping a future POST
-        # scene must also drop its PRE partner or FHIST crashes on the pair.
         years_with = {}
         for phase, filename, _ in rows:
             years_with.setdefault(filename[:4], set()).add(phase)
