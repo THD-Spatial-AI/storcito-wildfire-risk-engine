@@ -212,12 +212,16 @@ def _combine_layers(
     topic_arrays: dict[str, np.ndarray] = {}
     topic_masks: dict[str, np.ndarray] = {}
     topic_coverage: dict[str, np.ndarray] = {}
+    subtopic_weights: dict[str, dict[str, float]] = {}
     required_layer_keys: set[str] = set()
     for topic in spec["top_order"]:
         if topic not in active_topics:
             continue
         keys, sub = spec["topics"][topic]
         weights = _sub_weights(keys, sub)
+        subtopic_weights[topic] = {
+            key: float(weight) for key, weight in zip(keys, weights)
+        }
         acc = np.zeros(master_mask.shape, dtype=np.float32)
         available_weight = np.zeros(master_mask.shape, dtype=np.float32)
         required_mask = master_mask.copy()
@@ -307,6 +311,7 @@ def _combine_layers(
             {
                 "weight_scheme": spec["name"],
                 "top_level_weights": {t: float(w) for t, w in zip(order, final_weights)},
+                "subtopic_weights": subtopic_weights,
                 "comparison_matrix_consistency_ratio": float(cr),
                 "comparison_matrix_consistent": bool(cr < 0.1),
                 "predictive_validation": "not established by AHP consistency",
@@ -875,6 +880,12 @@ def run_static_aoi_for_geometry(
             selected_day.isoformat(), {}
         ),
         "daily_source_layer_date_details": daily_source_details,
+        "classification_breaks": (
+            (classification_breaks_by_date or {}).get(
+                selected_day.isoformat(), classification_breaks or {}
+            )
+        ),
+        "daily_classification_breaks": classification_breaks_by_date or {},
         "daily_skipped_layers": daily_skipped_layers,
         "daily_risk_dates": daily_risk_dates,
         "historical_fire": {
