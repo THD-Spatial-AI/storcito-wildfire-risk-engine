@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
-from FR.db_reconstruct import available_fwi_dates_db, highest_temperature_fwi_dates_db
+from FR.db_reconstruct import available_dynamic_fwi_dates_db, available_fwi_dates_db, highest_temperature_fwi_dates_db
 
 from app.config import MODEL_VERSION
 from app.services.coverage import available_data_coverage_geojson
@@ -20,7 +20,9 @@ def available_static_dates():
 
 @router.get("/available-dynamic-dates")
 def available_dynamic_dates():
-    dates = available_fwi_dates_db()
+    # Assessable dates only: fire season (May-Oct), complete 60-day run-up,
+    # and fresh LST/Sentinel. Run-up-only months (March/April) never appear.
+    dates = available_dynamic_fwi_dates_db()
     return {"dates": [day.isoformat() for day in dates]}
 
 

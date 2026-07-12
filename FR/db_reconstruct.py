@@ -601,7 +601,8 @@ def available_dynamic_fwi_dates_db() -> list[date]:
                    SELECT DISTINCT fdate FROM fwi_files WHERE fdate IS NOT NULL
                ), eligible AS (
                    SELECT d.fdate FROM dates d
-                   WHERE (SELECT count(DISTINCT f.fdate) FROM fwi_files f
+                   WHERE EXTRACT(MONTH FROM d.fdate) BETWEEN 5 AND 10
+                     AND (SELECT count(DISTINCT f.fdate) FROM fwi_files f
                           WHERE f.fdate BETWEEN d.fdate - 60 AND d.fdate) = 61
                )
                SELECT e.fdate FROM eligible e
