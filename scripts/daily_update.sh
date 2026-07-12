@@ -14,8 +14,8 @@ rc=0
 month=$(date +%-m)
 weekday=$(date +%u)
 
-# Weather: Apr-Oct (includes 60-day FWI run-up). 3-day catch-up window.
-if [ "$month" -ge 4 ] && [ "$month" -le 10 ]; then
+# Weather: Mar-Oct (May-season dates need 60 run-up days). 3-day catch-up window.
+if [ "$month" -ge 3 ] && [ "$month" -le 10 ]; then
     if ! make fwi START="$(date -d '3 days ago' +%F)" END="$(date +%F)" PRUNE=4; then
         echo "WARN: fwi fetch incomplete (today's file may not be published yet)"
         rc=1
