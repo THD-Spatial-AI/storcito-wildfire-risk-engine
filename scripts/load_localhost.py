@@ -1253,6 +1253,10 @@ def cmd_load_firms(args: argparse.Namespace) -> int:
         for row in rows:
             try:
                 acquisition = datetime.fromisoformat(row["acq_date"]).date()
+                acq_time = row["acq_time"].strip()
+                if not re.fullmatch(r"\d{1,4}", acq_time):
+                    raise ValueError("invalid FIRMS acquisition time")
+                row["acq_time"] = acq_time.zfill(4)
                 confidence = int(row["confidence"])
                 latitude = float(row["latitude"])
                 longitude = float(row["longitude"])
@@ -1288,6 +1292,8 @@ def cmd_load_firms(args: argparse.Namespace) -> int:
                 or row.get("instrument") != "MODIS"
                 or row.get("daynight") not in {"D", "N"}
                 or not re.fullmatch(r"\d{4}", row.get("acq_time", ""))
+                or not (0 <= int(row["acq_time"]) // 100 <= 23
+                        and int(row["acq_time"]) % 100 <= 59)
             ):
                 raise LoadError(f"FIRMS row violates the expected source contract: {row}")
         validated.append((path, year, rows))
