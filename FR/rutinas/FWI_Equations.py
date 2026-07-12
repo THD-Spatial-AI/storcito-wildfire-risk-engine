@@ -5,6 +5,9 @@ Optimized for NumPy arrays (no slow loops).
 import numpy as np
 
 
+FFMC_COEFFICIENT = 250.0 * 59.5 / 101.0
+
+
 def ffmc(temp, hum, wind, rain, f0) -> np.ndarray:
     """
     Calculate the Fine Fuel Moisture Code (FFMC).
@@ -26,8 +29,12 @@ def ffmc(temp, hum, wind, rain, f0) -> np.ndarray:
         Van Wagner, C.E. (1987). Development and Structure of the Canadian Forest Fire 
         Weather Index System. Canadian Forest Service Publication 35.
     """
+    # The reference implementation constrains saturated RH before applying
+    # the equilibrium-moisture equations.
+    hum = np.clip(hum, 0.0, 99.9999)
+
     # Create copies to avoid modifying originals
-    mo = 147.2 * ((101.0 - f0) / (59.5 + f0))
+    mo = FFMC_COEFFICIENT * ((101.0 - f0) / (59.5 + f0))
     
     # Rain logic (Vectorized)
     # If precipitation > 0.5mm
@@ -85,7 +92,7 @@ def ffmc(temp, hum, wind, rain, f0) -> np.ndarray:
     # Neutral range: m = mr (already copied)
 
     # Final calculation of F
-    f = 59.5 * (250.0 - m) / (147.2 + m)
+    f = 59.5 * (250.0 - m) / (FFMC_COEFFICIENT + m)
     f = np.clip(f, 0.0, 101.0)  # Ensure bounds 0-101
     
     return f
@@ -114,6 +121,8 @@ def dmc(temp, hum, rain, p0, month) -> np.ndarray:
     Le_factors = [6.5, 7.5, 9.0, 12.8, 13.9, 13.9, 12.4, 10.9, 9.4, 8.0, 7.0, 6.0]
     le = Le_factors[int(month) - 1]  # Assume single month for entire map
     
+    hum = np.clip(hum, 0.0, 99.9999)
+
     # Ensure minimum temperature for calculation
     t_calc = np.maximum(temp, -1.1)
     
@@ -122,7 +131,8 @@ def dmc(temp, hum, rain, p0, month) -> np.ndarray:
     re = np.zeros_like(rain)
     re[rain_mask] = 0.92 * rain[rain_mask] - 1.27
     
-    mo = 20.0 + np.exp(5.6348 - (p0 / 43.43))
+    # This is the numerically accurate form used by the CFS cffdrs package.
+    mo = 20.0 + 280.0 * np.exp(-0.023 * p0)
     
     b = np.zeros_like(p0)
     # Calculate b based on p0
@@ -220,7 +230,7 @@ def isi(wind, f) -> np.ndarray:
         Weather Index System. Canadian Forest Service Publication 35.
     """
     f_u = np.exp(0.05039 * wind)
-    m = 147.2 * (101.0 - f) / (59.5 + f)
+    m = FFMC_COEFFICIENT * (101.0 - f) / (59.5 + f)
     f_f = 91.9 * np.exp(-0.1386 * m) * (1.0 + (m**5.31) / 4.93e7)
     r = 0.208 * f_u * f_f
     return r
@@ -245,13 +255,15 @@ def bui(p, d) -> np.ndarray:
     """
     u = np.zeros_like(p)
     
+    denominator = p + 0.4 * d
     mask1 = p <= 0.4 * d
     if np.any(mask1):
-        u[mask1] = 0.8 * p[mask1] * d[mask1] / (p[mask1] + 0.4 * d[mask1] + 1e-6)
+        nonzero = mask1 & (denominator > 0)
+        u[nonzero] = 0.8 * p[nonzero] * d[nonzero] / denominator[nonzero]
         
     mask2 = ~mask1
     if np.any(mask2):
-        u[mask2] = p[mask2] - (1.0 - (0.8 * d[mask2] / (p[mask2] + 0.4 * d[mask2] + 1e-6))) * \
+        u[mask2] = p[mask2] - (1.0 - (0.8 * d[mask2] / denominator[mask2])) * \
                    (0.92 + (0.0114 * p[mask2])**1.7)
                    
     u = np.maximum(u, 0.0)

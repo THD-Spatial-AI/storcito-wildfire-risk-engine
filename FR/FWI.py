@@ -1,4 +1,5 @@
 import os
+import json
 import rasterio
 
 import netCDF4 as nc
@@ -8,8 +9,10 @@ import matplotlib.pyplot as plt
 import FR.rutinas.FWI_Equations as Fwi
 # import tifffile as tif
 from FR.rutinas.setup import default_imshow, save_file
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from rasterio.transform import from_origin
 from scipy.interpolate import griddata
 import re
@@ -22,22 +25,17 @@ FWI_INIT_DEFAULTS = (85.0, 6.0, 15.0)
 
 
 def fwi_init_codes() -> tuple[float, float, float]:
-    try:
-        from FR.db_reconstruct import _pg_connect
-
-        with _pg_connect() as conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT ffmc, dmc, dc FROM fwi_init ORDER BY updated_at DESC LIMIT 1"
-            )
-            row = cur.fetchone()
-        if row is not None:
-            ffmc, dmc, dc = (float(v) for v in row)
-            print(f"[FWI] init codes from fwi_init table: FFMC={ffmc} DMC={dmc} DC={dc}")
-            return ffmc, dmc, dc
-    except Exception:
-        # Missing table / no database (e.g. station-file offline runs): use standards.
-        pass
-    return FWI_INIT_DEFAULTS
+    """Deterministic initial codes, optionally overridden by configuration."""
+    names = ("FWI_INIT_FFMC", "FWI_INIT_DMC", "FWI_INIT_DC")
+    raw = [os.environ.get(name, "").strip() for name in names]
+    if not any(raw):
+        return FWI_INIT_DEFAULTS
+    if not all(raw):
+        raise ValueError(f"set all of {', '.join(names)} or none of them")
+    values = tuple(float(value) for value in raw)
+    if not (0 <= values[0] <= 101 and values[1] >= 0 and values[2] >= 0):
+        raise ValueError("FWI initial codes require FFMC 0..101 and non-negative DMC/DC")
+    return values  # type: ignore[return-value]
 
 
 def rh_to_percent(rh):
@@ -52,6 +50,26 @@ def rh_to_percent(rh):
     return arr
 
 
+FWI_PRECIPITATION_NEGATIVE_TOLERANCE_MM = 0.1
+
+
+def normalize_fwi_precipitation(values, *, context: str = "") -> np.ndarray:
+    """Clamp harmless WRF rain undershoots while rejecting corrupt values.
+
+    WRF rain increments occasionally contain small negative floating-point
+    artifacts. Values down to -0.1 mm follow the tolerance already used by the
+    risk engine; anything lower is treated as invalid source data.
+    """
+    result = np.array(values, copy=True)
+    finite = result[np.isfinite(result)]
+    suffix = f" {context}" if context else ""
+    if not finite.size or finite.min() < -FWI_PRECIPITATION_NEGATIVE_TOLERANCE_MM:
+        raise ValueError(f"FWI precipitation values are invalid{suffix}")
+    result[~np.isfinite(result)] = np.nan
+    np.clip(result, 0.0, None, out=result)
+    return result
+
+
 # Moisture-code run-up window (days before the scoring window). Bounds the
 # archive scan so disjoint seasons never bleed into each other (e.g. a summer
 # drought state carrying across winter into the next spring's dates).
@@ -61,12 +79,67 @@ FWI_RUNUP_DAYS = 60
 # EFFIS "extreme" merged in). Region-independent; validated vs EFFIS (Galicia).
 FWI_CLASS_BOUNDS = (5.2, 11.2, 21.3, 38.0)
 
+# The Canadian FWI System is evaluated at noon local standard time. Galicia
+# uses Europe/Madrid: that is 12:00 CET in winter and 13:00 CEST on the clock
+# in summer. The separate operational weather view remains 16:00-17:00.
+FWI_STANDARD_TIMEZONE = "Europe/Madrid"
+FWI_STANDARD_LOCAL_HOUR = 12
+FWI_OPERATIONAL_START_HOUR = 16
+FWI_OPERATIONAL_END_HOUR = 17
 
 
-def assessment_hour_index(dataset, local_hour: int = 16, tz: str = "Europe/Madrid") -> int:
+@dataclass
+class FWIRunResult:
+    """Detailed result for callers that need coherent per-day FWI layers."""
+
+    risk_map: np.ndarray
+    continuous_map: np.ndarray
+    peak_date: date
+    peak_mean_fwi: float
+    daily_mean_fwi: dict[str, float] = field(default_factory=dict)
+    daily_risk_paths: dict[str, Path] = field(default_factory=dict)
+    daily_continuous_paths: dict[str, Path] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+def _standard_utc_offset_hours(day: date, tz: str = FWI_STANDARD_TIMEZONE) -> int:
+    """Base UTC offset for a zone, excluding daylight-saving time."""
+    from zoneinfo import ZoneInfo
+
+    local = datetime(day.year, day.month, day.day, 12, tzinfo=ZoneInfo(tz))
+    offset = local.utcoffset()
+    dst = local.dst()
+    if offset is None:
+        raise ValueError(f"Unable to resolve UTC offset for {tz}")
+    standard_seconds = offset.total_seconds() - (dst.total_seconds() if dst else 0)
+    standard_hours = standard_seconds / 3600.0
+    if not standard_hours.is_integer():
+        raise ValueError(f"FWI standard-time offset for {tz} is not an integer hour")
+    return int(standard_hours)
+
+
+def fwi_standard_utc_hour(day: date, tz: str = FWI_STANDARD_TIMEZONE) -> int:
+    """UTC hour corresponding to noon local standard time."""
+    return (FWI_STANDARD_LOCAL_HOUR - _standard_utc_offset_hours(day, tz)) % 24
+
+
+def fwi_standard_clock_hour(day: date, tz: str = FWI_STANDARD_TIMEZONE) -> int:
+    """Wall-clock hour at which noon local standard time occurs."""
+    from zoneinfo import ZoneInfo
+
+    local = datetime(day.year, day.month, day.day, 12, tzinfo=ZoneInfo(tz))
+    dst = local.dst()
+    return FWI_STANDARD_LOCAL_HOUR + int((dst.total_seconds() if dst else 0) // 3600)
+
+
+
+def assessment_hour_index(
+    dataset,
+    local_hour: int = FWI_OPERATIONAL_START_HOUR,
+    tz: str = FWI_STANDARD_TIMEZONE,
+) -> int:
     """Index of the time step whose *local* wall-clock hour is the assessment
-    hour. The WRF time axis is UTC, so a fixed index drifts with DST (index 15
-    is 18:00 CEST in summer). Falls back to index 15 if the axis is unreadable.
+    hour. The WRF time axis is UTC, so a fixed index drifts with DST.
     """
     try:
         from zoneinfo import ZoneInfo
@@ -77,9 +150,113 @@ def assessment_hour_index(dataset, local_hour: int = 16, tz: str = "Europe/Madri
             local = datetime(t.year, t.month, t.day, t.hour, tzinfo=_tz.utc).astimezone(ZoneInfo(tz))
             if local.hour == local_hour:
                 return idx
-    except Exception:
-        pass
-    return 15
+    except Exception as exc:
+        raise ValueError("Unable to read the FWI NetCDF time axis") from exc
+    raise ValueError(f"FWI NetCDF has no {local_hour:02d}:00 {tz} time step")
+
+
+def standard_fwi_hour_index(dataset, tz: str = FWI_STANDARD_TIMEZONE) -> int:
+    """Index of noon local standard time on a UTC NetCDF time axis.
+
+    Daylight-saving time deliberately does not move the scientific observation:
+    for Europe/Madrid this resolves to 11:00 UTC throughout the year (12:00 CET,
+    displayed as 13:00 CEST during summer).
+    """
+    try:
+        times = nc.num2date(dataset["time"][:24], dataset["time"].units)
+        for idx, timestamp in enumerate(times):
+            day = date(timestamp.year, timestamp.month, timestamp.day)
+            if timestamp.hour == fwi_standard_utc_hour(day, tz):
+                return idx
+    except Exception as exc:
+        raise ValueError("Unable to read the standard FWI NetCDF time axis") from exc
+    raise ValueError(
+        f"FWI NetCDF has no noon-local-standard-time observation for {tz}"
+    )
+
+
+def classify_fwi(values: np.ndarray) -> np.ndarray:
+    """Classify continuous FWI using the EFFIS bounds used by STORCITO.
+
+    Class 1 is very low and class 5 combines EFFIS very-high and extreme values
+    because the application exposes five risk classes.
+    """
+    values = np.asarray(values)
+    b1, b2, b3, b4 = FWI_CLASS_BOUNDS
+    valid = np.isfinite(values) & (values >= 0)
+    classified = np.select(
+        [
+            valid & (values < b1),
+            valid & (values >= b1) & (values < b2),
+            valid & (values >= b2) & (values < b3),
+            valid & (values >= b3) & (values < b4),
+            valid & (values >= b4),
+        ],
+        [1, 2, 3, 4, 5],
+        default=0,
+    )
+    return classified.astype("int32", copy=False)
+
+
+def _fwi_grid_transform(x_coord: np.ndarray, y_coord: np.ndarray, shape: tuple[int, int]):
+    pixel_size_x = (float(np.nanmax(x_coord)) - float(np.nanmin(x_coord))) / (shape[1] - 1)
+    pixel_size_y = (float(np.nanmax(y_coord)) - float(np.nanmin(y_coord))) / (shape[0] - 1)
+    return from_origin(
+        float(np.nanmin(x_coord)) - pixel_size_x / 2,
+        float(np.nanmax(y_coord)) + pixel_size_y / 2,
+        pixel_size_x,
+        pixel_size_y,
+    )
+
+
+def _mean_fwi_in_geometry(
+    values: np.ndarray,
+    transform,
+    geometry_wgs84,
+) -> float:
+    if geometry_wgs84 is None:
+        return float(np.nanmean(values))
+
+    from rasterio.features import geometry_mask
+    from shapely.geometry import mapping
+
+    selected = geometry_mask(
+        [mapping(geometry_wgs84)],
+        out_shape=values.shape,
+        transform=transform,
+        invert=True,
+        all_touched=True,
+    )
+    valid = selected & np.isfinite(values)
+    if not np.any(valid):
+        raise ValueError("The requested AOI does not overlap the FWI grid")
+    return float(np.nanmean(values[valid]))
+
+
+def _write_fwi_raster(
+    path: Path,
+    values: np.ndarray,
+    transform,
+    *,
+    crs: str,
+    dtype: str,
+    nodata: int | float = 0,
+) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    profile = {
+        "driver": "GTiff",
+        "count": 1,
+        "dtype": dtype,
+        "crs": crs,
+        "transform": transform,
+        "width": values.shape[1],
+        "height": values.shape[0],
+        "nodata": nodata,
+        "compress": "deflate",
+    }
+    with rasterio.open(path, "w", **profile) as dst:
+        dst.write(values.astype(dtype, copy=False), 1)
+    return path
 
 
 def _fwi_file_date(file: Path) -> date:
@@ -108,7 +285,6 @@ def highest_temperature_fwi_dates(input_folder: str | Path) -> list[date]:
     if not input_folder.exists():
         return []
 
-    VERTICAL_LEVEL = 15  # matches the level used by the FWI calculation
     best_per_year: dict[int, tuple[float, date]] = {}
 
     for file in input_folder.iterdir():
@@ -117,7 +293,7 @@ def highest_temperature_fwi_dates(input_folder: str | Path) -> list[date]:
         try:
             day = _fwi_file_date(file)
             with nc.Dataset(file) as dataset:
-                temperature = dataset["temp"][VERTICAL_LEVEL]
+                temperature = dataset["temp"][assessment_hour_index(dataset)]
             max_temp = float(ma.masked_invalid(temperature).max())
         except Exception:
             continue
@@ -132,10 +308,11 @@ def highest_temperature_fwi_dates(input_folder: str | Path) -> list[date]:
 
 def _select_fwi_files(input_folder: Path, start_date: date | None, target_date: date | None) -> list[Path]:
     """Select sorted FWI files, optionally bounded by exact start/end dates."""
-    files = sorted(
-        (file for file in input_folder.iterdir() if file.suffix == ".nc"),
-        key=_fwi_file_date,
-    )
+    by_date: dict[date, Path] = {}
+    for file in sorted(input_folder.iterdir()):
+        if file.suffix == ".nc":
+            by_date.setdefault(_fwi_file_date(file), file)
+    files = [by_date[day] for day in sorted(by_date)]
     if start_date is None and target_date is None:
         return files
 
@@ -168,40 +345,27 @@ def _select_fwi_files(input_folder: Path, start_date: date | None, target_date: 
     return selected_files
 
 
-def f_w_index(input_folder:str|Path,file_name:str='FWI_Risk_Map',output_folder:Path|str=Path('data/OUTPUT'),
-    export_image:bool=False,show_plots:bool=False,crs:str="EPSG:4326",
+def f_w_index(
+    input_folder: str | Path,
+    file_name: str = "FWI_Risk_Map",
+    output_folder: Path | str = Path("data/OUTPUT"),
+    export_image: bool = False,
+    show_plots: bool = False,
+    crs: str = "EPSG:4326",
     target_date: date | str | None = None,
-    start_date: date | str | None = None)->np.ndarray:
+    start_date: date | str | None = None,
+    *,
+    selection_geometry_wgs84=None,
+    export_daily: bool = False,
+    return_details: bool = False,
+) -> np.ndarray | FWIRunResult:
+    """Calculate standard daily Canadian FWI from a contiguous NetCDF series.
 
-    """Calculates Canadian Forest Fire Weather Index (FWI) from netCDF climate data.
-    
-    Reads daily netCDF files with meteorological data (temperature, humidity, wind, 
-    precipitation), interpolates to 360x360 grid, calculates FWI indices sequentially
-    maintaining state between days, and reclassifies into 5 risk levels.
-    
-    Args:
-        input_folder: Path to folder containing daily .nc files
-        file_name: Identifier for output files. Defaults to 'FWI_Risk_Map'
-        output_folder: Output folder for saving results. Defaults to 'OUTPUT'
-        export_image: Whether to save GeoTIFF/PNG files. Defaults to False
-        show_plots (bool, optional): _description_. Defaults to False.
-        crs: Coordinate reference system. Defaults to "EPSG:4326"
-        target_date: Optional exact day to stop the running FWI calculation at.
-        start_date: Optional exact day to start the running FWI calculation from.
-        
-    Returns:
-        Reclassified FWI array (int32) with values 1-5 for risk levels
-        
-    Raises:
-        ValueError: If no .nc files found in input_folder
-        
-    Notes:
-        - Uses Van Wagner FWI system (Canadian Forest Service)
-        - Maintains daily continuity: ffmc → dmc → dc across iterations
-        - Wind converted from m/s to km/h, temperature from K to °C
-        - Final reclassification: 1=low, 2=moderate, 3=high, 4=very high, 5=extreme
+    Moisture codes are advanced once through the complete run-up and requested
+    window. Each scored day is evaluated at noon local standard time. When an
+    AOI is supplied, peak-day selection uses the mean continuous FWI inside that
+    AOI instead of the mean over the complete Galicia weather grid.
     """
-
     input_folder = Path(input_folder)
     output_folder = Path(output_folder)
     if isinstance(target_date, str):
@@ -210,210 +374,229 @@ def f_w_index(input_folder:str|Path,file_name:str='FWI_Risk_Map',output_folder:P
         start_date = date.fromisoformat(start_date)
 
     print("Fire Weather Index Layer processing...")
-
-    # Whole-region engines call without target_date
     if target_date is None:
         available = available_fwi_dates(input_folder)
         if not available:
             raise ValueError("No netCDF files found in input folder")
         target_date = available[-1]
 
-    # Scoring window = reported day(s); earlier days only spin up the moisture
-    # codes. The map is the highest-FWI day in the window (peak-of-range).
     score_end = target_date
     score_start = start_date if start_date is not None else target_date
-
-    # Run-up + scoring window, capped to FWI_RUNUP_DAYS before the window.
     runup_start = score_start - timedelta(days=FWI_RUNUP_DAYS)
-    lista_nc = [
-        f for f in _select_fwi_files(input_folder, None, score_end)
-        if _fwi_file_date(f) >= runup_start
-    ]
-
-    if not lista_nc:
+    files = _select_fwi_files(input_folder, runup_start, score_end)
+    if not files:
         raise ValueError("No netCDF files found in input folder")
 
-    n_runup = sum(1 for f in lista_nc if _fwi_file_date(f) < score_start)
-    n_score = len(lista_nc) - n_runup
+    n_runup = sum(1 for path in files if _fwi_file_date(path) < score_start)
+    n_score = len(files) - n_runup
     print(
-        f"[FWI] plan: {n_runup} warm-up day(s) ({_fwi_file_date(lista_nc[0]).isoformat()} -> "
-        f"{score_start.isoformat()}) to build fuel-moisture memory, then score "
-        f"{n_score} requested day(s) {score_start.isoformat()}..{score_end.isoformat()}; "
-        f"the map = the highest-risk scored day. Assessment hour: 16:00 Europe/Madrid."
+        f"[FWI] plan: {n_runup} warm-up day(s) "
+        f"({_fwi_file_date(files[0]).isoformat()} -> {score_start.isoformat()}) "
+        f"to build fuel-moisture memory, then score {n_score} requested day(s) "
+        f"{score_start.isoformat()}..{score_end.isoformat()}; the map = the "
+        f"AOI peak scored day. Standard observation: 12:00 local standard time "
+        f"({FWI_STANDARD_TIMEZONE})."
     )
 
-    GRID_SIZE = 360
-
-    # Peak-of-range tracking: keep the scoring-window day with the highest mean FWI.
-    peak_fwi = None
+    grid_size = 360
     peak_mean = float("-inf")
-    peak_date = None
-    xf = yf = None
-    # FWI convention: rain = 24 h accumulation up to the assessment hour
-    # (previous day's post-16:00 tail + today through 16:00).
-    prev_rain_tail = None
+    peak_date: date | None = None
+    peak_continuous: np.ndarray | None = None
+    peak_classified: np.ndarray | None = None
+    peak_transform = None
+    daily_mean_fwi: dict[str, float] = {}
+    daily_risk_paths: dict[str, Path] = {}
+    daily_continuous_paths: dict[str, Path] = {}
+    daily_dir = output_folder / "FWI_daily"
 
-    # --------------------------------------------------------
-    # PROCESAMIENTO DE CADA ARCHIVO .NC
-    prev_day = None
-    for id_file, file in enumerate(lista_nc):
+    init_ffmc, init_dmc, init_dc = fwi_init_codes()
+    ffmc_previous = dmc_previous = dc_previous = None
+    previous_rain_tail = None
+    previous_day = None
+
+    for index, file in enumerate(files):
         day = _fwi_file_date(file)
-        if prev_day is not None and (day - prev_day).days > 7:
-            print(f"[FWI] {prev_day.isoformat()} -> {day.isoformat()}: "
-                  f"{(day - prev_day).days}-day data gap; resetting moisture codes to defaults")
-            f0 = p0 = d0 = None
-            prev_rain_tail = None
-        prev_day = day
+        if previous_day is not None and (day - previous_day).days != 1:
+            raise ValueError(f"FWI inputs are not daily-contiguous: {previous_day} -> {day}")
+        previous_day = day
 
         with nc.Dataset(file) as dataset:
+            n_hours = int(dataset["time"].shape[0])
+            observation_index = standard_fwi_hour_index(dataset)
+            x_coord = ma.filled(dataset["lon"][:], np.nan).astype("float64")
+            y_coord = ma.filled(dataset["lat"][:], np.nan).astype("float64")
+            wind = ma.filled(dataset["mod"][observation_index], np.nan).astype("float64")
+            humidity = ma.filled(dataset["rh"][observation_index], np.nan).astype("float64")
+            temperature = ma.filled(dataset["temp"][observation_index], np.nan).astype("float64")
 
-            n_hours = dataset["time"].shape[0]
-            # 16:00 local (Europe/Madrid); the UTC axis shifts with DST.
-            HOUR_1600 = assessment_hour_index(dataset)
-            selected_hour = nc.num2date(dataset["time"][HOUR_1600], dataset["time"].units)
+            if not np.isfinite(x_coord).all() or not np.isfinite(y_coord).all():
+                raise ValueError(f"FWI coordinate grid contains missing values: {file.name}")
+            for label, values, lower, upper in (
+                ("temperature", temperature, 180.0, 350.0),
+                ("humidity", humidity, 0.0, 100.0),
+                ("wind speed", wind, 0.0, 150.0),
+            ):
+                finite = values[np.isfinite(values)]
+                if not finite.size or finite.min() < lower or finite.max() > upper:
+                    raise ValueError(f"FWI {label} values are invalid in {file.name}")
 
-
-            x_coord = ma.getdata(dataset["lon"])
-            y_coord = ma.getdata(dataset["lat"])
-
-            wind = ma.getdata(dataset["mod"][HOUR_1600])
-            humidity = ma.getdata(dataset["rh"][HOUR_1600])
-            temperature = ma.getdata(dataset["temp"][HOUR_1600])
-
-            # 24 h rain: today's hours through 16:00 + previous day's tail.
             day_hours = min(n_hours, 24)
-            prec_day = ma.getdata(dataset["prec"][:day_hours])
-            rain = prec_day[: HOUR_1600 + 1].sum(axis=0)
-            if prev_rain_tail is not None:
-                rain = rain + prev_rain_tail
-            prev_rain_tail = prec_day[HOUR_1600 + 1 : day_hours].sum(axis=0)
+            precipitation = normalize_fwi_precipitation(
+                ma.filled(dataset["prec"][:day_hours], np.nan).astype("float64"),
+                context=f"in {file.name}",
+            )
+            rain = precipitation[: observation_index + 1].sum(axis=0)
+            if previous_rain_tail is not None:
+                rain = rain + previous_rain_tail
+            previous_rain_tail = precipitation[observation_index + 1 : day_hours].sum(axis=0)
+            month = int(nc.num2date(dataset["time"][0], dataset["time"].units).month)
 
-            mes = nc.num2date(dataset["time"][0], dataset["time"].units).month
+        x = np.linspace(float(x_coord.min()), float(x_coord.max()), grid_size)
+        y = np.linspace(float(y_coord.min()), float(y_coord.max()), grid_size)
+        grid_x, grid_y = np.meshgrid(x, y)
+        coordinates = (x_coord.ravel(), y_coord.ravel())
+        grid_coordinates = (grid_x, grid_y)
+        wind_grid = griddata(coordinates, wind.ravel() * 3.6, grid_coordinates, method="nearest")
+        rain_grid = griddata(coordinates, rain.ravel(), grid_coordinates, method="nearest")
+        humidity_grid = griddata(
+            coordinates, rh_to_percent(humidity).ravel(), grid_coordinates, method="nearest"
+        )
+        temperature_grid = griddata(
+            coordinates, temperature.ravel() - 273.15, grid_coordinates, method="nearest"
+        )
 
-        # Preparación de la malla de interpolación
-        xmin, xmax = x_coord.min(), x_coord.max()
-        ymin, ymax = y_coord.min(), y_coord.max()
+        if ffmc_previous is None:
+            ffmc_previous = np.full_like(humidity_grid, init_ffmc)
+            dmc_previous = np.full_like(humidity_grid, init_dmc)
+            dc_previous = np.full_like(humidity_grid, init_dc)
 
-        x = np.linspace(xmin, xmax, GRID_SIZE)
-        y = np.linspace(ymin, ymax, GRID_SIZE)
-        X, Y = np.meshgrid(x, y)
-
-        # Flatten una sola vez para todas las interpolaciones
-        xf = x_coord.flatten()
-        yf = y_coord.flatten()
-        coords = (xf, yf)
-        grid_coords = (X, Y)
-
-        # Interpolación con conversión de unidades
-        wind_m = griddata(coords, wind.flatten() * 3.6, grid_coords, method='nearest')  # m/s -> km/h
-        rain_m = griddata(coords, rain.flatten(), grid_coords, method='nearest')
-        hum_m = griddata(coords, rh_to_percent(humidity).flatten(), grid_coords, method='nearest')
-        temp_m = griddata(coords, temperature.flatten() - 273.15, grid_coords, method='nearest')  # K -> °C
-
-        # Initialise on the first step and after any data-gap reset.
-        if id_file == 0:
-            init_f, init_p, init_d = fwi_init_codes()
-            f0 = p0 = d0 = None
-        if f0 is None:
-            f0 = np.full_like(hum_m, init_f)
-            p0 = np.full_like(hum_m, init_p)
-            d0 = np.full_like(hum_m, init_d)
-
-        # Cálculo de índices FWI
-        f = Fwi.ffmc(temp_m, hum_m, wind_m, rain_m, f0) # type: ignore[name-defined]
-        p = Fwi.dmc(temp_m, hum_m, rain_m, p0, mes) # type: ignore[name-defined]
-        d = Fwi.dc(temp_m, rain_m, mes, d0) # type: ignore[name-defined]
-
-        # Actualización de condiciones previas para el siguiente día
-        f0, p0, d0 = f, p, d
+        ffmc = Fwi.ffmc(temperature_grid, humidity_grid, wind_grid, rain_grid, ffmc_previous)
+        dmc = Fwi.dmc(temperature_grid, humidity_grid, rain_grid, dmc_previous, month)
+        dc = Fwi.dc(temperature_grid, rain_grid, month, dc_previous)
+        ffmc_previous, dmc_previous, dc_previous = ffmc, dmc, dc
 
         in_window = score_start <= day <= score_end
         stage = "SCORING" if in_window else "warm-up"
         print(
-            f"[FWI] {id_file+1:>3}/{len(lista_nc)} {day.isoformat()} {stage:8s} "
-            f"drought-memory DC={np.max(d):6.1f}  DMC={np.max(p):6.1f}  FFMC={np.max(f):5.1f}"
+            f"[FWI] {index + 1:>3}/{len(files)} {day.isoformat()} {stage:8s} "
+            f"drought-memory DC={np.nanmax(dc):6.1f}  DMC={np.nanmax(dmc):6.1f}  "
+            f"FFMC={np.nanmax(ffmc):5.1f}"
         )
+        if not in_window:
+            continue
 
-        # Score only days inside the window; remember the peak (highest mean FWI).
-        if in_window:
-            isi_day = Fwi.isi(wind_m, f)# type: ignore[name-defined]
-            bui_day = Fwi.bui(p, d)# type: ignore[name-defined]
-            fwi_day = Fwi.fwi(isi_day, bui_day)# type: ignore[name-defined]
-            mean_fwi = float(np.nanmean(fwi_day))
-            if mean_fwi > peak_mean:
-                peak_mean = mean_fwi
-                peak_fwi = fwi_day
-                peak_date = day
+        isi = Fwi.isi(wind_grid, ffmc)
+        bui = Fwi.bui(dmc, dc)
+        continuous = Fwi.fwi(isi, bui)[::-1, :].astype("float32", copy=False)
+        transform = _fwi_grid_transform(x_coord, y_coord, continuous.shape)
+        classified = classify_fwi(continuous)
+        mean_fwi = _mean_fwi_in_geometry(
+            continuous, transform, selection_geometry_wgs84
+        )
+        day_key = day.isoformat()
+        daily_mean_fwi[day_key] = mean_fwi
 
-    # --------------------------------------------------------
-    # FWI final - peak day within the scoring window
-    # --------------------------------------------------------
-    if peak_fwi is None:
+        if export_daily:
+            daily_continuous_paths[day_key] = _write_fwi_raster(
+                daily_dir / f"FWI_Continuous_{day_key}.tif",
+                continuous,
+                transform,
+                crs=crs,
+                dtype="float32",
+                nodata=-9999.0,
+            )
+            daily_risk_paths[day_key] = _write_fwi_raster(
+                daily_dir / f"FWI_Risk_Map_{day_key}.tif",
+                classified,
+                transform,
+                crs=crs,
+                dtype="int32",
+            )
+
+        if mean_fwi > peak_mean:
+            peak_mean = mean_fwi
+            peak_date = day
+            peak_continuous = continuous.copy()
+            peak_classified = classified.copy()
+            peak_transform = transform
+
+    if peak_date is None or peak_continuous is None or peak_classified is None:
         raise ValueError("No FWI day fell within the scoring window")
 
-    print(f"Peak FWI day in window {score_start.isoformat()}..{score_end.isoformat()}: "
-          f"{peak_date.isoformat()} (mean FWI {peak_mean:.2f})")
+    selection_label = "AOI" if selection_geometry_wgs84 is not None else "weather-grid"
+    print(
+        f"Peak FWI day in window {score_start.isoformat()}..{score_end.isoformat()}: "
+        f"{peak_date.isoformat()} ({selection_label} mean FWI {peak_mean:.2f})"
+    )
 
-    FWI = peak_fwi
-    # Invertir eje Y (flip) sin guardar a disco
-    data = FWI[::-1, :]
-
-    # Calcular parámetros de transformación
-    pixel_size_x = (xf.max() - xf.min()) / (data.shape[1] - 1) # type: ignore[name-defined]
-    pixel_size_y = (yf.max() - yf.min()) / (data.shape[0] - 1) # type: ignore[name-defined]
-    transform = from_origin(xf.min(), yf.max(), pixel_size_x, pixel_size_y) # type: ignore[name-defined]
-    # crs = "EPSG:4326"
-
-    # --------------------------------------------------------
-    # RECLASIFICACIÓN
-    # --------------------------------------------------------
-    fwi_final = data.astype("float32")
-
-    fwi_clas = np.zeros_like(fwi_final, dtype="int32")
-
-    b1, b2, b3, b4 = FWI_CLASS_BOUNDS
-    selection =[fwi_final <= b1,
-                (fwi_final > b1) & (fwi_final <= b2),
-                (fwi_final > b2) & (fwi_final <= b3),
-                (fwi_final > b3) & (fwi_final <= b4),
-                fwi_final > b4]
-
-    choices=[1, 2, 3, 4, 5]
-
-    fwi_clas = np.select(selection, choices, default=0)
-    # --------------------------------------------------------
-    # METADATOS DEL RASTER
-    # --------------------------------------------------------
-    
-    # FIXME: widht and height may be swapped
-
-    meta = {
+    raster_meta = {
         "driver": "GTiff",
         "count": 1,
         "dtype": "int32",
         "crs": crs,
-        "transform": transform,
-        "width": fwi_clas.shape[1],
-        "height": fwi_clas.shape[0],
-        "nodata": -9999
+        "transform": peak_transform,
+        "width": peak_classified.shape[1],
+        "height": peak_classified.shape[0],
+        "nodata": 0,
     }
-
-    # --------------------------------------------------------
-    # GENERAR FIGURA
-    # --------------------------------------------------------
-
-    fig1,ax1=default_imshow(fwi_clas,'Fire Weather Index Risk Map',{'label':'Risk'})
-
+    figure, _axis = default_imshow(
+        peak_classified, "Fire Weather Index Risk Map", {"label": "Risk"}
+    )
     if show_plots:
         plt.show()
-
     if export_image:
+        save_file(
+            peak_classified,
+            file_name,
+            output_folder,
+            raster_meta,
+            extensions=["tif", "png"],
+            fig=figure,
+            meta_intact=True,
+        )
+    plt.close(figure)
 
-        save_file(fwi_clas, file_name, output_folder, meta, extensions=['tif','png'], fig=fig1, meta_intact=True)
+    result_metadata = {
+        "method": "Canadian FWI System",
+        "classification": "EFFIS five-class display; very-high and extreme merged into class 5",
+        "class_bounds": list(FWI_CLASS_BOUNDS),
+        "standard_observation": {
+            "local_standard_hour": FWI_STANDARD_LOCAL_HOUR,
+            "timezone": FWI_STANDARD_TIMEZONE,
+            "utc_hour": fwi_standard_utc_hour(peak_date),
+            "wall_clock_hour": fwi_standard_clock_hour(peak_date),
+        },
+        "operational_weather_window": {
+            "start_hour": FWI_OPERATIONAL_START_HOUR,
+            "end_hour": FWI_OPERATIONAL_END_HOUR,
+            "timezone": FWI_STANDARD_TIMEZONE,
+            "included_in_fwi_equations": False,
+        },
+        "score_start_date": score_start.isoformat(),
+        "score_end_date": score_end.isoformat(),
+        "peak_date": peak_date.isoformat(),
+        "peak_selection_scope": selection_label,
+        "peak_mean_fwi": peak_mean,
+        "daily_mean_fwi": daily_mean_fwi,
+    }
+    if export_image or export_daily:
+        output_folder.mkdir(parents=True, exist_ok=True)
+        (output_folder / "fwi_metadata.json").write_text(
+            json.dumps(result_metadata, indent=2), encoding="utf-8"
+        )
 
     print("Fire Weather Index Layer completed.")
-
-    return fwi_clas
+    details = FWIRunResult(
+        risk_map=peak_classified,
+        continuous_map=peak_continuous,
+        peak_date=peak_date,
+        peak_mean_fwi=peak_mean,
+        daily_mean_fwi=daily_mean_fwi,
+        daily_risk_paths=daily_risk_paths,
+        daily_continuous_paths=daily_continuous_paths,
+        metadata=result_metadata,
+    )
+    return details if return_details else peak_classified
 
 if __name__ == "__main__":
 

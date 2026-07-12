@@ -1,6 +1,6 @@
 # Geospatial tools container: QGIS + GDAL (incl. raster2pgsql) + archive/download utils.
 # Based on the official QGIS image (Ubuntu-based, ships QGIS desktop/server + GDAL).
-FROM qgis/qgis:latest
+FROM qgis/qgis:3.44.11-noble
 
 # raster2pgsql ships with the postgis package; unrar lives in the multiverse repo.
 RUN apt-get update \

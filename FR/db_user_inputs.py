@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import rasterio
 from rasterio.warp import transform_geom
 from shapely.geometry import shape
@@ -36,7 +37,7 @@ def _pg_params() -> dict[str, str]:
         "port": os.environ.get("PGPORT", "5432"),
         "dbname": os.environ.get("PGDATABASE", "gis"),
         "user": os.environ.get("PGUSER", "gis"),
-        "password": os.environ.get("PGPASSWORD", "gis"),
+        "password": os.environ.get("PGPASSWORD", ""),
     }
 
 
@@ -151,6 +152,54 @@ def _dtm_metadata(path: Path) -> tuple[int | None, dict[str, Any], dict[str, Any
         f"bounds_wgs84={bounds}"
     )
     return srid, footprint, metadata
+
+
+def _validate_raster_input(path: Path, kind: str) -> None:
+    max_bytes = int(
+        os.environ.get(
+            "STORCITO_MAX_DTM_UPLOAD_BYTES" if kind == KIND_DTM else "STORCITO_MAX_NDVI_UPLOAD_BYTES",
+            str(1024**3 if kind == KIND_DTM else 512 * 1024**2),
+        )
+    )
+    if not path.is_file() or path.stat().st_size == 0 or path.stat().st_size > max_bytes:
+        raise ValueError(f"{kind} raster is empty or exceeds the {max_bytes}-byte size limit")
+    valid_cells = 0
+    value_min = float("inf")
+    value_max = float("-inf")
+    with rasterio.open(path) as src:
+        if src.driver not in {"GTiff", "COG"} or src.count != 1 or src.crs is None:
+            raise ValueError(f"{kind} must be a single-band georeferenced GeoTIFF")
+        max_pixels = int(os.environ.get("STORCITO_MAX_RASTER_PIXELS", "250000000"))
+        if src.width * src.height > max_pixels:
+            raise ValueError(f"{kind} raster exceeds the {max_pixels}-pixel size limit")
+        coefficients = tuple(src.transform)[:6]
+        determinant = src.transform.a * src.transform.e - src.transform.b * src.transform.d
+        if (
+            src.width <= 0
+            or src.height <= 0
+            or not all(np.isfinite(coefficients))
+            or abs(determinant) < 1e-15
+        ):
+            raise ValueError(f"{kind} raster has an invalid grid")
+        for _index, window in src.block_windows(1):
+            block = src.read(1, window=window, masked=True).astype("float64")
+            values = block.compressed()
+            values = values[np.isfinite(values)]
+            if not values.size:
+                continue
+            valid_cells += int(values.size)
+            value_min = min(value_min, float(values.min()))
+            value_max = max(value_max, float(values.max()))
+    if valid_cells == 0:
+        raise ValueError(f"{kind} raster contains no valid finite cells")
+    if kind == KIND_DTM and not (-500 <= value_min <= value_max <= 9000):
+        raise ValueError(
+            f"DTM values must be plausible elevations in metres; found {value_min}..{value_max}"
+        )
+    if kind == KIND_NDVI and not (-1.05 <= value_min <= value_max <= 1.05):
+        raise ValueError(
+            f"Precomputed NDVI values must be in [-1, 1]; found {value_min}..{value_max}"
+        )
 
 
 def _upsert_user_input(
@@ -360,6 +409,7 @@ def store_dtm_file(
     content_type: str | None = None,
 ) -> dict[str, Any]:
     path = Path(path)
+    _validate_raster_input(path, KIND_DTM)
     _log(
         f"DTM database upload started user_id={user_id} model_id={model_id} "
         f"source_filename={source_filename or path.name}"
@@ -392,6 +442,7 @@ def store_ndvi_file(
     content_type: str | None = None,
 ) -> dict[str, Any]:
     path = Path(path)
+    _validate_raster_input(path, KIND_NDVI)
     _log(
         f"NDVI database upload started user_id={user_id} model_id={model_id} "
         f"source_filename={source_filename or path.name}"

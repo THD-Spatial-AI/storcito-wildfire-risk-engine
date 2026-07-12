@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
+import io
 import json
 import math
 import os
+import re
+import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -14,6 +19,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -31,6 +37,7 @@ CDSE_TOKEN_URL = (
     "protocol/openid-connect/token"
 )
 CDSE_PROCESS_URL = "https://sh.dataspace.copernicus.eu/process/v1"
+CDSE_OPENEO_RESULT_URL = "https://openeo.dataspace.copernicus.eu/openeo/1.2/result"
 
 METEOGALICIA_NCSS = (
     "https://thredds.meteogalicia.gal/thredds/ncss/grid/"
@@ -68,15 +75,9 @@ CLMS_DOWNLOAD_INFO = {
 CLMS_DATAREQUEST_POST = "https://land.copernicus.eu/api/@datarequest_post"
 CLMS_DATAREQUEST_SEARCH = "https://land.copernicus.eu/api/@datarequest_search"
 
-# Sentinel-3 SLSTR L2 land surface temperature
-S3_SLSTR_COLLECTION = "sentinel-3-slstr-l2"
-S3_LST_EVALSCRIPT = """//VERSION=3
-function setup() {
-  return {input: [{bands: ["LST"]}],
-          output: {id: "default", bands: 1, sampleType: "FLOAT32"}};
-}
-function evaluatePixel(s) { return [s.LST]; }
-"""
+# Sentinel-3 SLSTR Level-2 land surface temperature through CDSE openEO.
+S3_SLSTR_COLLECTION = "SENTINEL3_SLSTR_L2_LST"
+S3_LST_QUALITY_MASK = "confidence-summary-cloud-bit14+kelvin-220-340+daily-max-v1"
 
 # USGS M2M API for Landsat C2 L2 (optional 30 m LST alternative: lst-landsat).
 M2M_API = "https://m2m.cr.usgs.gov/api/api/json/stable"
@@ -137,15 +138,26 @@ def parse_bbox(value: str | None) -> tuple[float, float, float, float]:
         return GALICIA_BBOX
     parts = [p.strip() for p in value.split(",")]
     if len(parts) != 4:
-        raise argparse.ArgumentTypeError("bbox must be west,south,east,north")
-    return tuple(float(p) for p in parts)  # type: ignore[return-value]
+        raise FetchError("bbox must be west,south,east,north")
+    try:
+        bbox = tuple(float(p) for p in parts)
+    except ValueError as exc:
+        raise FetchError("bbox values must be numeric") from exc
+    west, south, east, north = bbox
+    if not all(math.isfinite(item) for item in bbox):
+        raise FetchError("bbox values must be finite")
+    if not (-180 <= west < east <= 180 and -90 <= south < north <= 90):
+        raise FetchError(
+            "bbox must satisfy -180 <= west < east <= 180 and -90 <= south < north <= 90"
+        )
+    return bbox  # type: ignore[return-value]
 
 
 def parse_date(value: str) -> date:
     try:
         return date.fromisoformat(value)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"invalid date: {value}") from exc
+        raise FetchError(f"invalid date: {value}") from exc
 
 
 def date_span(start: date, end: date) -> list[date]:
@@ -180,6 +192,206 @@ def file_record(path: Path) -> dict[str, Any]:
     }
 
 
+SECRET_ENV_NAMES = (
+    "ACCESS_TOKEN",
+    "SH_CLIENT_SECRET",
+    "CLMS_ACCESS_TOKEN",
+    "CLMS_SERVICE_KEY_JSON",
+    "CNIG_COOKIE",
+    "CNIG_BEARER_TOKEN",
+    "FIRMS_MAP_KEY",
+    "EROS_TOKEN",
+)
+
+
+def redact(value: object) -> str:
+    """Remove configured credentials before a URL or response reaches a log."""
+    text = str(value)
+    for name in SECRET_ENV_NAMES:
+        secret = os.environ.get(name, "").strip()
+        if secret:
+            text = text.replace(secret, "[REDACTED]")
+    return text
+
+
+def redact_url(url: str) -> str:
+    redacted = redact(url)
+    try:
+        parsed = urllib.parse.urlsplit(redacted)
+        return urllib.parse.urlunsplit(
+            (parsed.scheme, parsed.netloc, parsed.path, "[REDACTED]" if parsed.query else "", "")
+        )
+    except ValueError:
+        return redacted
+
+
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    ensure_dir(path.parent)
+    part = path.with_name(f".{path.name}.{os.getpid()}.part")
+    try:
+        part.write_bytes(data)
+        part.replace(path)
+    finally:
+        part.unlink(missing_ok=True)
+
+
+def atomic_write_json(path: Path, payload: Any) -> None:
+    atomic_write_bytes(
+        path,
+        (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+    )
+
+
+def marker_matches(path: Path, expected: Any) -> bool:
+    try:
+        return json.loads(path.read_text()) == expected
+    except (json.JSONDecodeError, OSError):
+        return False
+
+
+def cached_file_matches(path: Path, marker: Path, identity: dict[str, Any]) -> bool:
+    """Return true when a cached file and its request metadata still match."""
+    try:
+        metadata = json.loads(marker.read_text())
+    except (json.JSONDecodeError, OSError):
+        return False
+    return (
+        path.is_file()
+        and metadata.get("sha256") == sha256_file(path)
+        and {key: metadata.get(key) for key in identity} == identity
+    )
+
+
+def gdal_info(path: Path) -> dict[str, Any] | None:
+    if not path.is_file() or path.stat().st_size < 512 or not shutil.which("gdalinfo"):
+        return None
+    result = subprocess.run(
+        ["gdalinfo", "-json", str(path)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode:
+        return None
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+
+
+def valid_raster(
+    path: Path,
+    *,
+    width: int | None = None,
+    height: int | None = None,
+    bbox: tuple[float, float, float, float] | None = None,
+) -> bool:
+    info = gdal_info(path)
+    if not info or info.get("driverShortName") not in {"GTiff", "COG"}:
+        return False
+    size = info.get("size") or []
+    if len(size) != 2 or min(size) <= 0 or not info.get("bands"):
+        return False
+    if (width is not None and size[0] != width) or (height is not None and size[1] != height):
+        return False
+    if bbox is not None:
+        transform = info.get("geoTransform") or []
+        if len(transform) != 6 or transform[2] != 0 or transform[4] != 0:
+            return False
+        x0 = float(transform[0])
+        x1 = x0 + float(transform[1]) * int(size[0])
+        y1 = float(transform[3])
+        y0 = y1 + float(transform[5]) * int(size[1])
+        actual = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+        tolerance = max(abs(float(transform[1])), abs(float(transform[5]))) * 2.1 + 1e-7
+        if any(abs(got - wanted) > tolerance for got, wanted in zip(actual, bbox)):
+            return False
+    return True
+
+
+def valid_fwi_netcdf(path: Path, required_vars: tuple[str, ...]) -> bool:
+    try:
+        import netCDF4 as nc
+        import numpy as np
+
+        with nc.Dataset(path) as dataset:
+            if not set(required_vars).issubset(dataset.variables) or "time" not in dataset.variables:
+                return False
+            time_var = dataset["time"]
+            if time_var.size < 24 or not getattr(time_var, "units", ""):
+                return False
+            times = nc.num2date(time_var[:24], time_var.units)
+            if any((later - earlier).total_seconds() != 3600 for earlier, later in zip(times, times[1:])):
+                return False
+            grid_shape = dataset["lon"].shape
+            if len(grid_shape) != 2 or dataset["lat"].shape != grid_shape or min(grid_shape) < 1:
+                return False
+            for name in set(required_vars) - {"lon", "lat"}:
+                variable = dataset[name]
+                if variable.ndim != 3 or variable.shape[0] < 24 or variable.shape[-2:] != grid_shape:
+                    return False
+            temperature = np.ma.filled(dataset["temp"][0], np.nan).astype("float64")
+            finite = temperature[np.isfinite(temperature)]
+            return bool(finite.size and 180 <= finite.min() <= finite.max() <= 350)
+    except ImportError:
+        pass
+    except (OSError, KeyError, TypeError, ValueError):
+        return False
+
+    # Lightweight host installations may have GDAL's NetCDF driver but not the
+    # Python netCDF4 package. The loader performs the full structural check again.
+    info = gdal_info(path)
+    if not info or info.get("driverShortName") != "netCDF":
+        return False
+    metadata = (info.get("metadata") or {}).get("SUBDATASETS") or {}
+    descriptions = {
+        value.rsplit(":", 1)[-1]: str(metadata.get(key.replace("_NAME", "_DESC"), ""))
+        for key, value in metadata.items()
+        if key.endswith("_NAME") and isinstance(value, str)
+    }
+    if not set(required_vars).issubset(descriptions):
+        return False
+    for name in set(required_vars) - {"lon", "lat"}:
+        match = re.match(r"\[(\d+)x", descriptions[name])
+        if not match or int(match.group(1)) < 24:
+            return False
+    return True
+
+
+def valid_lst_raster(
+    path: Path,
+    *,
+    width: int,
+    height: int,
+    bbox: tuple[float, float, float, float],
+) -> bool:
+    if not valid_raster(path, width=width, height=height, bbox=bbox):
+        return False
+    result = subprocess.run(
+        ["gdalinfo", "-json", "-stats", str(path)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode:
+        return False
+    try:
+        bands = json.loads(result.stdout)["bands"]
+        if len(bands) != 1:
+            return False
+        band = bands[0]
+        minimum = float(band["minimum"])
+        maximum = float(band["maximum"])
+        valid_percent = float(band.get("metadata", {}).get("", {}).get(
+            "STATISTICS_VALID_PERCENT", "100"
+        ))
+    except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return 220 < minimum <= maximum < 340 and valid_percent > 0
+
+
 # Some hosts (e.g. copernicus-fme.eea.europa.eu) 403 the default urllib User-Agent.
 USER_AGENT = "storcito-fetch/1.0"
 
@@ -203,10 +415,12 @@ def request_bytes(
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.read()
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise FetchError(f"HTTP {exc.code} for {url}: {body[:1000]}") from exc
+        body = redact(exc.read().decode("utf-8", errors="replace"))
+        raise FetchError(f"HTTP {exc.code} for {redact_url(url)}: {body[:1000]}") from exc
     except urllib.error.URLError as exc:
-        raise FetchError(f"request failed for {url}: {exc}") from exc
+        raise FetchError(
+            f"request failed for {redact_url(url)}: {redact(exc.reason)}"
+        ) from exc
 
 
 def request_json(
@@ -224,7 +438,7 @@ def request_json(
 def download_url(url: str, dest: Path, *, headers: dict[str, str] | None = None) -> Path:
     ensure_dir(dest.parent)
     part = dest.with_name(dest.name + ".part")
-    log(f"downloading {url} -> {dest}")
+    log(f"downloading {redact_url(url)} -> {dest}")
     req = urllib.request.Request(url, headers=with_user_agent(headers))
     try:
         with urllib.request.urlopen(req, timeout=1800) as resp, part.open("wb") as fh:
@@ -234,6 +448,17 @@ def download_url(url: str, dest: Path, *, headers: dict[str, str] | None = None)
                     break
                 fh.write(chunk)
         part.replace(dest)
+    except urllib.error.HTTPError as exc:
+        if part.exists():
+            part.unlink()
+        body = redact(exc.read().decode("utf-8", errors="replace"))
+        raise FetchError(f"HTTP {exc.code} for {redact_url(url)}: {body[:1000]}") from exc
+    except urllib.error.URLError as exc:
+        if part.exists():
+            part.unlink()
+        raise FetchError(
+            f"download failed for {redact_url(url)}: {redact(exc.reason)}"
+        ) from exc
     except Exception:
         if part.exists():
             part.unlink()
@@ -251,7 +476,7 @@ def write_manifest(out_dir: Path, source: str, params: dict[str, Any], files: li
         "params": params,
         "files": [file_record(p) for p in files if p.exists()],
     }
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    atomic_write_json(path, payload)
     log(f"manifest written: {path}")
     return path
 
@@ -329,12 +554,15 @@ def cmd_fwi(args: argparse.Namespace) -> int:
     else:
         start = end = datetime.now(timezone.utc).date() - timedelta(days=1)
 
+    requested_vars = tuple(v.strip() for v in args.vars.split(",") if v.strip())
+    if not requested_vars:
+        raise FetchError("at least one NetCDF variable is required")
     files = []
     for day in date_span(start, end):
         stamp = day.strftime("%Y%m%d")
         t0 = f"{day.isoformat()}T01:00:00Z"
         t1 = f"{(day + timedelta(days=4)).isoformat()}T00:00:00Z"
-        query: list[tuple[str, str]] = [(f"var", v) for v in args.vars.split(",")]
+        query: list[tuple[str, str]] = [("var", v) for v in requested_vars]
         query.extend(
             [
                 ("north", str(bbox[3])),
@@ -352,11 +580,31 @@ def cmd_fwi(args: argparse.Namespace) -> int:
             + urllib.parse.urlencode(query)
         )
         dest = out_dir / f"wrf_arw_det_history_d02_{stamp}_0000.nc4.nc"
-        if dest.exists() and dest.stat().st_size > 0:
+        marker = dest.with_suffix(dest.suffix + ".request.json")
+        request_identity = {
+            "source": METEOGALICIA_NCSS,
+            "run_date": day.isoformat(),
+            "time_start": t0,
+            "time_end": t1,
+            "bbox": list(bbox),
+            "variables": list(requested_vars),
+            "horizontal_stride": 1,
+            "format": "netcdf3",
+        }
+        if cached_file_matches(
+            dest, marker, request_identity
+        ) and valid_fwi_netcdf(dest, requested_vars):
             log(f"skip {dest.name}: already downloaded")
-            files.append(dest)
+            files.extend((dest, marker))
             continue
-        files.append(download_url(url, dest))
+        dest.unlink(missing_ok=True)
+        marker.unlink(missing_ok=True)
+        download_url(url, dest)
+        if not valid_fwi_netcdf(dest, requested_vars):
+            dest.unlink(missing_ok=True)
+            raise FetchError(f"downloaded FWI file is incomplete or unreadable: {dest}")
+        atomic_write_json(marker, {**request_identity, "sha256": sha256_file(dest)})
+        files.extend((dest, marker))
 
     write_manifest(
         args.out_dir,
@@ -366,7 +614,7 @@ def cmd_fwi(args: argparse.Namespace) -> int:
             "start": start.isoformat(),
             "end": end.isoformat(),
             "bbox": bbox,
-            "vars": args.vars.split(","),
+            "vars": list(requested_vars),
             "auth": "none",
         },
         files,
@@ -380,18 +628,21 @@ def cmd_fwi(args: argparse.Namespace) -> int:
 
 
 def cdse_access_token() -> str:
-    existing = os.environ.get("ACCESS_TOKEN", "").strip()
-    if existing:
-        return existing
     client_id = os.environ.get("SH_CLIENT_ID", "").strip()
     client_secret = os.environ.get("SH_CLIENT_SECRET", "").strip()
+    existing = os.environ.get("ACCESS_TOKEN", "").strip()
+    # Prefer a fresh client-credential grant. ACCESS_TOKEN is a fallback for
+    # installations that deliberately provide a short-lived token only.
     if not client_id or not client_secret:
+        if existing:
+            return existing
         raise FetchError("set ACCESS_TOKEN or SH_CLIENT_ID and SH_CLIENT_SECRET")
     form = urllib.parse.urlencode(
         {
             "grant_type": "client_credentials",
             "client_id": client_id,
             "client_secret": client_secret,
+            "scope": "openid email",
         }
     ).encode("utf-8")
     token = request_json(
@@ -408,17 +659,18 @@ def cdse_access_token() -> str:
 
 
 def sentinel_evalscript(bands: list[str]) -> str:
-    """Band-passthrough evalscript with SCL cloud masking.
+    """Band-passthrough evalscript with per-pixel SCL cloud gap filling.
 
-    Cloud shadow (3), medium/high-probability cloud (8/9) and thin cirrus (10)
-    pixels are written as 0 (the engines' nodata) instead of contaminating
-    NDVI/NDMI with cloud reflectance. leastCC mosaicking minimises the gaps.
+    Samples arrive in the requested mosaicking order.  The first clear sample
+    is used for each pixel, so a cloudy acquisition can be filled by another
+    acquisition in the same window instead of silently becoming nodata.
     """
     outputs = ",\n      ".join(
-        f'{{ id: "{band}", bands: 1, sampleType: "UINT16" }}' for band in bands
+        f'{{ id: "{band}", bands: 1, sampleType: "UINT16", nodataValue: 0 }}'
+        for band in bands
     )
-    band_list = ",".join(f'"{band}"' for band in bands + ["SCL"])
-    values = ", ".join(f"{band}:[s.{band}]" for band in bands)
+    band_list = ",".join(f'"{band}"' for band in bands + ["SCL", "dataMask"])
+    values = ", ".join(f"{band}:[sample.{band}]" for band in bands)
     zeros = ", ".join(f"{band}:[0]" for band in bands)
     return f"""//VERSION=3
 function setup() {{
@@ -426,14 +678,17 @@ function setup() {{
     input: [{{ bands: [{band_list}], units: "DN" }}],
     output: [
       {outputs}
-    ]
+    ],
+    mosaicking: "ORBIT"
   }};
 }}
-function evaluatePixel(s) {{
-  if (s.SCL === 3 || s.SCL === 8 || s.SCL === 9 || s.SCL === 10) {{
-    return {{ {zeros} }};
+function evaluatePixel(samples) {{
+  for (const sample of samples) {{
+    if (sample.dataMask === 1 && ![0, 1, 3, 7, 8, 9, 10, 11].includes(sample.SCL)) {{
+      return {{ {values} }};
+    }}
   }}
-  return {{ {values} }};
+  return {{ {zeros} }};
 }}
 """
 
@@ -509,8 +764,7 @@ def sentinel_windows(args: argparse.Namespace) -> list[tuple[date, date]]:
     return windows
 
 
-def sentinel_process_request(
-    token: str,
+def sentinel_request_body(
     bbox: tuple[float, float, float, float],
     width: int,
     height: int,
@@ -518,9 +772,8 @@ def sentinel_process_request(
     date_to: date,
     bands: list[str],
     args: argparse.Namespace,
-    out_dir: Path,
-) -> list[Path]:
-    body = {
+) -> dict[str, Any]:
+    return {
         "input": {
             "bounds": {
                 "bbox": [bbox[0], bbox[1], bbox[2], bbox[3]],
@@ -549,7 +802,16 @@ def sentinel_process_request(
         },
         "evalscript": sentinel_evalscript(bands),
     }
-    ensure_dir(out_dir)
+
+
+def sentinel_process_request(
+    token: str,
+    body: dict[str, Any],
+    bands: list[str],
+    out_dir: Path,
+) -> list[Path]:
+    ensure_dir(out_dir.parent)
+    stage = Path(tempfile.mkdtemp(prefix=f".{out_dir.name}.stage-", dir=out_dir.parent))
     with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as tmp:
         archive = Path(tmp.name)
     try:
@@ -565,13 +827,40 @@ def sentinel_process_request(
             timeout=900,
         )
         archive.write_bytes(raw)
-        files = safe_extract_tar(archive, out_dir)
+        safe_extract_tar(archive, stage)
+        width = int(body["output"]["width"])
+        height = int(body["output"]["height"])
+        request_bbox = tuple(body["input"]["bounds"]["bbox"])
+        expected = [stage / f"{band}.tif" for band in bands]
+        invalid = [
+            p.name
+            for p in expected
+            if not valid_raster(
+                p,
+                width=width,
+                height=height,
+                bbox=request_bbox,  # type: ignore[arg-type]
+            )
+        ]
+        if invalid:
+            raise FetchError(f"Sentinel response has missing or invalid band(s): {', '.join(invalid)}")
+        atomic_write_json(stage / "request.json", body)
+
+        backup = out_dir.with_name(f".{out_dir.name}.old-{os.getpid()}")
+        shutil.rmtree(backup, ignore_errors=True)
+        if out_dir.exists():
+            out_dir.replace(backup)
+        try:
+            stage.replace(out_dir)
+        except Exception:
+            if backup.exists() and not out_dir.exists():
+                backup.replace(out_dir)
+            raise
+        shutil.rmtree(backup, ignore_errors=True)
     finally:
         archive.unlink(missing_ok=True)
-    # Marker written last: a failed download must not certify stale TIFFs.
-    (out_dir / "request.json").write_text(json.dumps(body, indent=2) + "\n")
-    files.append(out_dir / "request.json")
-    return files
+        shutil.rmtree(stage, ignore_errors=True)
+    return [*(out_dir / f"{band}.tif" for band in bands), out_dir / "request.json"]
 
 
 def cmd_sentinel(args: argparse.Namespace) -> int:
@@ -579,9 +868,29 @@ def cmd_sentinel(args: argparse.Namespace) -> int:
     bands = [b.strip().upper() for b in args.bands.split(",") if b.strip()]
     if not bands:
         raise FetchError("at least one band is required")
+    supported_bands = {f"B{number:02d}" for number in range(1, 13)} | {"B8A"}
+    invalid_bands = sorted(set(bands) - supported_bands)
+    if invalid_bands or len(set(bands)) != len(bands):
+        raise FetchError(f"unsupported or duplicate Sentinel bands: {invalid_bands or bands}")
+    if not 0 <= args.max_cloud <= 100:
+        raise FetchError("--max-cloud must be between 0 and 100")
+    if args.mosaicking_order not in {"leastCC", "mostRecent", "leastRecent"}:
+        raise FetchError("--mosaicking-order must be leastCC, mostRecent, or leastRecent")
+    if args.interval_days < 1:
+        raise FetchError("--interval-days must be at least 1")
+    if args.resolution is not None and args.resolution <= 0:
+        raise FetchError("--resolution must be positive")
+    if not 1 <= args.width <= 2500 or not 1 <= args.height <= 2500:
+        raise FetchError("--width and --height must be between 1 and 2500")
     windows = sentinel_windows(args)
     if not windows:
         raise FetchError("no fetch windows: requested seasons are entirely in the future")
+    today = datetime.now(timezone.utc).date()
+    for date_from, date_to in windows:
+        if date_from > date_to:
+            raise FetchError("Sentinel date-from must be on or before date-to")
+        if date_to > today:
+            raise FetchError("Sentinel date-to must not be in the future")
     if args.resolution:
         tiles = sentinel_grid(bbox, args.resolution)
     else:
@@ -601,36 +910,63 @@ def cmd_sentinel(args: argparse.Namespace) -> int:
     failures: list[str] = []
     for date_from, date_to in windows:
         window_dir = args.out_dir / "sentinel" / f"{date_from:%Y%m%d}_{date_to:%Y%m%d}"
+        complete_marker = window_dir / "_complete.json"
+        complete_marker.unlink(missing_ok=True)
+        request_records: list[dict[str, Any]] = []
+        window_failed = False
         for ix, iy, tile_bbox, width, height in tiles:
             tile_dir = window_dir / f"tile_{ix:02d}_{iy:02d}" if len(tiles) > 1 else window_dir
-            # Cache is only valid if it was fetched with the current evalscript
-            # (e.g. the SCL cloud mask); otherwise re-fetch the window.
-            evalscript_current = sentinel_evalscript(bands)
+            body = sentinel_request_body(
+                tile_bbox, width, height, date_from, date_to, bands, args
+            )
             cached_request = tile_dir / "request.json"
-            cache_valid = False
-            if any(tile_dir.glob("*.tif")) and cached_request.exists():
-                try:
-                    cache_valid = json.loads(cached_request.read_text()).get("evalscript") == evalscript_current
-                except (json.JSONDecodeError, OSError):
-                    cache_valid = False
+            expected_files = [tile_dir / f"{band}.tif" for band in bands]
+            cache_valid = marker_matches(cached_request, body) and all(
+                valid_raster(path, width=width, height=height, bbox=tile_bbox)
+                for path in expected_files
+            )
             if cache_valid:
                 log(f"skip {tile_dir}: already downloaded")
-                continue
-            try:
-                files.extend(
-                    sentinel_process_request(
-                        token(), tile_bbox, width, height, date_from, date_to, bands, args, tile_dir
-                    )
-                )
-            except FetchError as exc:
-                failures.append(f"{date_from}..{date_to} tile {ix},{iy}: {exc}")
-                log(f"FAILED {date_from}..{date_to} tile {ix},{iy}: {exc}")
+                files.extend((*expected_files, cached_request))
+            else:
+                try:
+                    files.extend(sentinel_process_request(token(), body, bands, tile_dir))
+                except FetchError as exc:
+                    failures.append(f"{date_from}..{date_to} tile {ix},{iy}: {exc}")
+                    log(f"FAILED {date_from}..{date_to} tile {ix},{iy}: {exc}")
+                    window_failed = True
+                    continue
+            request_records.append(
+                {
+                    "tile": tile_dir.name if len(tiles) > 1 else ".",
+                    "request_sha256": hashlib.sha256(
+                        json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                    ).hexdigest(),
+                    "width": width,
+                    "height": height,
+                    "files": {band: sha256_file(tile_dir / f"{band}.tif") for band in bands},
+                }
+            )
+
+        if not window_failed:
+            complete = {
+                "api": CDSE_PROCESS_URL,
+                "date_from": date_from.isoformat(),
+                "date_to": date_to.isoformat(),
+                "bands": bands,
+                "tile_count": len(tiles),
+                "requests": request_records,
+            }
+            atomic_write_json(complete_marker, complete)
+            files.append(complete_marker)
 
     if failures:
         failures_path = args.out_dir / "sentinel" / "failures.txt"
         ensure_dir(failures_path.parent)
         failures_path.write_text("\n".join(failures) + "\n")
         log(f"{len(failures)} request(s) failed; see {failures_path}")
+    else:
+        (args.out_dir / "sentinel" / "failures.txt").unlink(missing_ok=True)
     write_manifest(
         args.out_dir,
         "sentinel_cdse",
@@ -661,7 +997,18 @@ def cmd_borders(args: argparse.Namespace) -> int:
     files = []
     for label, dataset in BORDER_DATASETS.items():
         url = f"{OPENDATASOFT_BASE}/{dataset}/exports/geojson"
-        files.append(download_url(url, out_dir / f"spain-{label.replace('_', '-')}.geojson"))
+        path = download_url(url, out_dir / f"spain-{label.replace('_', '-')}.geojson")
+        marker = path.with_suffix(path.suffix + ".request.json")
+        atomic_write_json(
+            marker,
+            {
+                "api": OPENDATASOFT_BASE,
+                "dataset": dataset,
+                "url": url,
+                "sha256": sha256_file(path),
+            },
+        )
+        files.extend([path, marker])
     write_manifest(
         args.out_dir,
         "borders_opendatasoft",
@@ -713,7 +1060,19 @@ def cmd_osm_infra(args: argparse.Namespace) -> int:
         expected = geofabrik_expected_md5(md5_dest)
         download_url(url, dest)
         verify_md5(dest, expected)
-        files.extend([dest, md5_dest])
+        marker = dest.with_suffix(dest.suffix + ".request.json")
+        atomic_write_json(
+            marker,
+            {
+                "api": "https://download.geofabrik.de",
+                "url": url,
+                "md5_url": f"{url}.md5",
+                "upstream_md5": expected.lower(),
+                "md5_sha256": sha256_file(md5_dest),
+                "sha256": sha256_file(dest),
+            },
+        )
+        files.extend([dest, md5_dest, marker])
     write_manifest(
         args.out_dir,
         "osm_geofabrik",
@@ -729,11 +1088,13 @@ def cmd_osm_infra(args: argparse.Namespace) -> int:
 
 
 def clms_access_token(args: argparse.Namespace) -> str:
-    existing = args.access_token or os.environ.get("CLMS_ACCESS_TOKEN", "").strip()
-    if existing:
-        return existing
+    if args.access_token:
+        return str(args.access_token).strip()
     service_key_path = args.service_key or os.environ.get("CLMS_SERVICE_KEY_JSON", "").strip()
     if not service_key_path:
+        existing = os.environ.get("CLMS_ACCESS_TOKEN", "").strip()
+        if existing:
+            return existing
         raise FetchError("set CLMS_ACCESS_TOKEN or CLMS_SERVICE_KEY_JSON")
     try:
         import jwt  # type: ignore[import-not-found]
@@ -815,13 +1176,13 @@ def clms_wait_for_task(args: argparse.Namespace, task_id: str, out_dir: Path) ->
         log(f"CLMS task {task_id}: {status}")
         result_path = out_dir / "datarequest_result.json"
         if info.get("DownloadURL"):
-            result_path.write_text(json.dumps(info, indent=2) + "\n")
+            atomic_write_json(result_path, info)
             return info
         if status in ("Finished_nok", "Cancelled", "Rejected", "Timed_out"):
-            result_path.write_text(json.dumps(info, indent=2) + "\n")
+            atomic_write_json(result_path, info)
             raise FetchError(f"CLMS task {task_id} ended as {status}; inspect {result_path}")
         if status.startswith("Finished"):
-            result_path.write_text(json.dumps(info, indent=2) + "\n")
+            atomic_write_json(result_path, info)
             raise FetchError(
                 f"CLMS task {task_id} finished without DownloadURL; inspect {result_path}"
             )
@@ -844,11 +1205,14 @@ def cmd_clc(args: argparse.Namespace) -> int:
             available = ", ".join(f"{d}/{f}" for d, f in sorted(CLMS_DOWNLOAD_INFO))
             raise FetchError(f"no {args.format} download for {args.dataset}; available: {available}")
         download_info_id, output_format, source = CLMS_DOWNLOAD_INFO[key]
+        output_gcs = args.gcs or (
+            "EPSG:3035" if args.dataset.startswith("clcplus-") else "EPSG:4326"
+        )
         dataset_request: dict[str, object] = {
             "DatasetID": CLMS_DATASET_UIDS[args.dataset],
             "DatasetDownloadInformationID": download_info_id,
             "OutputFormat": output_format,
-            "OutputGCS": args.gcs,
+            "OutputGCS": output_gcs,
         }
         # WEKEO-hosted datasets are clipped by bbox; EEA-hosted ones prefer NUTS.
         if source == "wekeo" or args.bbox:
@@ -860,27 +1224,86 @@ def cmd_clc(args: argparse.Namespace) -> int:
             clip = {"nuts": args.nuts}
         else:
             clip = {}
-        token = clms_access_token(args)
-        response = request_json(
-            CLMS_DATAREQUEST_POST,
-            method="POST",
-            headers={
-                "Accept": "application/json",
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-            },
-            data=json.dumps({"Datasets": [dataset_request]}).encode("utf-8"),
-            timeout=120,
-        )
-        task_ids = [t.get("TaskID") for t in response.get("TaskIds", []) if t.get("TaskID")]
-        if not task_ids:
-            raise FetchError(f"CLMS datarequest was not accepted: {json.dumps(response)[:500]}")
-        task_id = str(task_ids[0])
-        log(f"CLMS accepted datarequest, task {task_id}; polling until ready")
-        info = clms_wait_for_task(args, task_id, out_dir)
-        url = str(info["DownloadURL"])
-        dest = out_dir / filename_from_url(url, f"{args.dataset}_{args.format}.zip")
-        files = [out_dir / "datarequest_result.json", download_url(url, dest)]
+        request_identity = {"Datasets": [dataset_request]}
+        completion_path = out_dir / "request.json"
+        pending_path = out_dir / "pending_request.json"
+        cached = False
+        try:
+            completion = json.loads(completion_path.read_text())
+            cached_dest = out_dir / str(completion["file"])
+            cached = (
+                completion.get("api") == CLMS_DATAREQUEST_POST
+                and completion.get("request") == request_identity
+                and cached_dest.is_file()
+                and zipfile.is_zipfile(cached_dest)
+                and completion.get("sha256") == sha256_file(cached_dest)
+            )
+        except (OSError, KeyError, TypeError, json.JSONDecodeError):
+            cached = False
+        if cached:
+            task_id = str(completion["task_id"])
+            files = [cached_dest, completion_path]
+            log(f"skip {cached_dest.name}: completed CLMS request already downloaded")
+        else:
+            task_id = ""
+            try:
+                pending = json.loads(pending_path.read_text())
+                if pending.get("request") == request_identity:
+                    task_id = str(pending["task_id"])
+                    log(f"resuming CLMS task {task_id}")
+            except (OSError, KeyError, TypeError, json.JSONDecodeError):
+                pass
+            if not task_id:
+                token = clms_access_token(args)
+                response = request_json(
+                    CLMS_DATAREQUEST_POST,
+                    method="POST",
+                    headers={
+                        "Accept": "application/json",
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                    data=json.dumps(request_identity).encode("utf-8"),
+                    timeout=120,
+                )
+                task_ids = [
+                    t.get("TaskID") for t in response.get("TaskIds", []) if t.get("TaskID")
+                ]
+                if not task_ids:
+                    raise FetchError(
+                        f"CLMS datarequest was not accepted: {json.dumps(response)[:500]}"
+                    )
+                task_id = str(task_ids[0])
+                atomic_write_json(
+                    pending_path, {"request": request_identity, "task_id": task_id}
+                )
+                log(f"CLMS accepted datarequest, task {task_id}; polling until ready")
+            info = clms_wait_for_task(args, task_id, out_dir)
+            url = str(info["DownloadURL"])
+            dest = out_dir / filename_from_url(url, f"{args.dataset}_{args.format}.zip")
+            download_url(url, dest)
+            try:
+                if not zipfile.is_zipfile(dest):
+                    raise zipfile.BadZipFile("missing ZIP central directory")
+                with zipfile.ZipFile(dest) as archive:
+                    damaged_member = archive.testzip()
+                if damaged_member:
+                    raise zipfile.BadZipFile(f"CRC failure in {damaged_member}")
+            except (OSError, zipfile.BadZipFile) as exc:
+                dest.unlink(missing_ok=True)
+                raise FetchError(f"CLMS download is not a valid ZIP archive: {dest}") from exc
+            atomic_write_json(
+                completion_path,
+                {
+                    "api": CLMS_DATAREQUEST_POST,
+                    "request": request_identity,
+                    "task_id": task_id,
+                    "file": dest.name,
+                    "sha256": sha256_file(dest),
+                },
+            )
+            pending_path.unlink(missing_ok=True)
+            files = [out_dir / "datarequest_result.json", dest, completion_path]
     write_manifest(
         args.out_dir,
         "clc_clms",
@@ -920,6 +1343,9 @@ def cmd_dtm_cnig(args: argparse.Namespace) -> int:
     log(f"MDT {args.resolution} m: {nx} x {ny} = {nx * ny} WCS tiles")
 
     files = []
+    complete_marker = out_dir / "_complete.json"
+    complete_marker.unlink(missing_ok=True)
+    tile_records: list[dict[str, Any]] = []
     failures = 0
     done = 0
     total = nx * ny
@@ -928,11 +1354,33 @@ def cmd_dtm_cnig(args: argparse.Namespace) -> int:
             x0, x1 = west + ix * step, min(west + (ix + 1) * step, east)
             y0, y1 = south + iy * step, min(south + (iy + 1) * step, north)
             dest = out_dir / f"mdt_{args.resolution}m_{ix:02d}_{iy:02d}.tif"
+            marker = dest.with_suffix(dest.suffix + ".request.json")
             done += 1
-            if dest.exists() and dest.stat().st_size > 0:
+            request_identity = {
+                "api": IDEE_MDT_WCS,
+                "version": "2.0.1",
+                "coverage": f"Elevacion4258_{args.resolution}",
+                "bbox": [round(x0, 6), round(y0, 6), round(x1, 6), round(y1, 6)],
+                "format": "image/tiff",
+            }
+            tile_record = {
+                "file": dest.name,
+                "request_sha256": hashlib.sha256(
+                    json.dumps(
+                        request_identity, sort_keys=True, separators=(",", ":")
+                    ).encode("utf-8")
+                ).hexdigest(),
+            }
+            if marker_matches(marker, request_identity) and valid_raster(
+                dest, bbox=(x0, y0, x1, y1)
+            ):
                 files.append(dest)
+                files.append(marker)
+                tile_record["sha256"] = sha256_file(dest)
+                tile_records.append(tile_record)
                 progress(done, total, f"{dest.name} (cached)")
                 continue
+            marker.unlink(missing_ok=True)
             query = urllib.parse.urlencode(
                 [
                     ("version", "2.0.1"),
@@ -956,9 +1404,33 @@ def cmd_dtm_cnig(args: argparse.Namespace) -> int:
                 log(f"FAILED tile {ix},{iy}: response is not a TIFF ({data[:80]!r})")
                 failures += 1
                 continue
-            dest.write_bytes(data)
-            files.append(dest)
+            atomic_write_bytes(dest, data)
+            if not valid_raster(dest, bbox=(x0, y0, x1, y1)):
+                dest.unlink(missing_ok=True)
+                marker.unlink(missing_ok=True)
+                sys.stdout.write("\n")
+                log(f"FAILED tile {ix},{iy}: unreadable raster or unexpected extent")
+                failures += 1
+                continue
+            atomic_write_json(marker, request_identity)
+            files.extend((dest, marker))
+            tile_record["sha256"] = sha256_file(dest)
+            tile_records.append(tile_record)
             progress(done, total, dest.name)
+
+    if not failures:
+        atomic_write_json(
+            complete_marker,
+            {
+                "api": IDEE_MDT_WCS,
+                "coverage": f"Elevacion4258_{args.resolution}",
+                "resolution_m": args.resolution,
+                "bbox": [west, south, east, north],
+                "tile_count": total,
+                "tiles": tile_records,
+            },
+        )
+        files.append(complete_marker)
 
     write_manifest(
         args.out_dir,
@@ -990,32 +1462,65 @@ def cmd_fuels(args: argparse.Namespace) -> int:
     except OSError as exc:
         raise FetchError(f"cannot write to {out_dir}: {exc}") from exc
 
-    features: list[dict] = []
     url = (
         f"{MITECO_FEATURES_API}/collections/{MFE_COLLECTION}/items"
         f"?f=json&limit={MFE_PAGE_SIZE}&bbox={bbox_text}"
     )
     total = None
-    while url:
-        page = json.loads(request_bytes(url, timeout=300).decode("utf-8"))
-        if total is None:
-            total = int(page.get("numberMatched") or 0)
-            log(f"MFE features matched: {total}")
-        for feat in page.get("features", []):
-            props = feat.get("properties", {})
-            label = str(props.get("modelocombustible") or "")
-            digits = "".join(ch for ch in label if ch.isdigit())
-            props["modcom"] = int(digits) if digits else 14
-            features.append(feat)
-        progress(len(features), max(total, 1), "MFE polygons")
-        url = next(
-            (l.get("href") for l in page.get("links", []) if l.get("rel") == "next"), None
-        )
-
-    if not features:
-        raise FetchError(f"no MFE features returned for bbox {bbox_text}")
-    dest.write_text(json.dumps({"type": "FeatureCollection", "features": features}))
-    log(f"{dest} ({len(features)} polygons, {dest.stat().st_size} bytes)")
+    feature_count = 0
+    seen_pages: set[str] = set()
+    stage = dest.with_name(f".{dest.name}.{os.getpid()}.part")
+    try:
+        with stage.open("w") as output:
+            output.write('{"type":"FeatureCollection","features":[')
+            while url:
+                if url in seen_pages:
+                    raise FetchError("MFE paging loop detected")
+                seen_pages.add(url)
+                page = json.loads(request_bytes(url, timeout=300).decode("utf-8"))
+                if total is None:
+                    total = int(page.get("numberMatched") or 0)
+                    log(f"MFE features matched: {total}")
+                for feat in page.get("features", []):
+                    props = feat.get("properties", {})
+                    label = str(props.get("modelocombustible") or "").strip()
+                    match = re.fullmatch(r"Modelo\s+(\d{1,2})", label, flags=re.IGNORECASE)
+                    if match:
+                        code = int(match.group(1))
+                        if not 1 <= code <= 13:
+                            raise FetchError(f"unsupported MFE fuel model label: {label!r}")
+                    elif label in {"", "-"}:
+                        code = 14
+                    else:
+                        raise FetchError(f"unrecognized MFE fuel model label: {label!r}")
+                    props["modcom"] = code
+                    if feature_count:
+                        output.write(",")
+                    json.dump(feat, output, separators=(",", ":"))
+                    feature_count += 1
+                progress(feature_count, max(total or 0, 1), "MFE polygons")
+                url = next(
+                    (l.get("href") for l in page.get("links", []) if l.get("rel") == "next"),
+                    None,
+                )
+            output.write("]}")
+        if feature_count == 0:
+            raise FetchError(f"no MFE features returned for bbox {bbox_text}")
+        stage.replace(dest)
+    finally:
+        stage.unlink(missing_ok=True)
+    log(f"{dest} ({feature_count} polygons, {dest.stat().st_size} bytes)")
+    marker = dest.with_suffix(dest.suffix + ".request.json")
+    atomic_write_json(
+        marker,
+        {
+            "api": MITECO_FEATURES_API,
+            "collection": MFE_COLLECTION,
+            "bbox": list(bbox),
+            "features": feature_count,
+            "sha256": sha256_file(dest),
+        },
+    )
     write_manifest(
         args.out_dir,
         "fuels_mfe_miteco",
@@ -1023,11 +1528,11 @@ def cmd_fuels(args: argparse.Namespace) -> int:
             "api": MITECO_FEATURES_API,
             "collection": MFE_COLLECTION,
             "bbox": list(bbox),
-            "features": len(features),
+            "features": feature_count,
             "fuel_attribute": "modcom (parsed from modelocombustible; 0 = none)",
             "auth": "none",
         },
-        [dest],
+        [dest, marker],
     )
     return 0
 
@@ -1043,6 +1548,8 @@ def cmd_firms(args: argparse.Namespace) -> int:
     years = [int(y.strip()) for y in args.years.split(",")]
     start_m, start_d = (int(p) for p in args.season_start.split("-"))
     end_m, end_d = (int(p) for p in args.season_end.split("-"))
+    if not 0 <= args.min_confidence <= 100:
+        raise FetchError("--min-confidence must be between 0 and 100")
 
     # The SP (standard processing) archive lags ~4 months; recent dates live in
     # the NRT source. Find the SP cutoff so requests can stitch the two.
@@ -1065,8 +1572,12 @@ def cmd_firms(args: argparse.Namespace) -> int:
         if start > year_end:
             log(f"skip {year}: in the future")
             continue
-        rows: list[str] = []
-        header: str | None = None
+        rows: list[dict[str, str]] = []
+        fieldnames: list[str] | None = None
+        chunks: list[dict[str, Any]] = []
+        dest = out_dir / f"hotspots_MODIS_{year}.csv"
+        marker = dest.with_suffix(dest.suffix + ".request.json")
+        marker.unlink(missing_ok=True)
         cur = start
         while cur <= year_end:
             days = min(FIRMS_MAX_DAYS, (year_end - cur).days + 1)
@@ -1077,19 +1588,58 @@ def cmd_firms(args: argparse.Namespace) -> int:
                 days = (sp_max - cur).days + 1  # stop the SP chunk at the cutoff
             url = f"{FIRMS_AREA_API}/{map_key}/{source}/{area}/{days}/{cur.isoformat()}"
             text = request_bytes(url, timeout=120).decode("utf-8").strip()
-            lines = text.splitlines()
-            if not lines or "," not in lines[0]:
+            reader = csv.DictReader(io.StringIO(text))
+            if not reader.fieldnames or "confidence" not in reader.fieldnames:
                 raise FetchError(f"unexpected FIRMS response for {cur}: {text[:200]}")
-            if header is None:
-                header = lines[0]
-            rows.extend(lines[1:])
+            if fieldnames is None:
+                fieldnames = list(reader.fieldnames)
+            elif fieldnames != reader.fieldnames:
+                raise FetchError(f"FIRMS columns changed within {year} at {cur}")
+            chunk_rows = list(reader)
+            for row in chunk_rows:
+                try:
+                    confidence = int(row["confidence"])
+                    acquisition = date.fromisoformat(row["acq_date"])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise FetchError(f"invalid FIRMS row for {cur}: {row}") from exc
+                if not cur <= acquisition <= cur + timedelta(days=days - 1):
+                    raise FetchError(
+                        f"FIRMS returned acquisition {acquisition} outside requested chunk {cur}"
+                    )
+                if confidence >= args.min_confidence:
+                    rows.append(row)
+            chunks.append(
+                {
+                    "date_from": cur.isoformat(),
+                    "days": days,
+                    "source": source,
+                    "returned_rows": len(chunk_rows),
+                }
+            )
             cur += timedelta(days=days)
         # Fixed name regardless of SP/NRT stitching (per-row source is in
         # the CSV's `version` column); the Makefile loads this exact name.
-        dest = out_dir / f"hotspots_MODIS_{year}.csv"
-        dest.write_text("\n".join([header or "", *rows]) + "\n")
+        if fieldnames is None:
+            raise FetchError(f"FIRMS returned no CSV header for {year}")
+        output = io.StringIO(newline="")
+        writer = csv.DictWriter(output, fieldnames=fieldnames, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+        atomic_write_bytes(dest, output.getvalue().encode("utf-8"))
+        metadata = {
+            "api": FIRMS_AREA_API,
+            "year": year,
+            "date_from": start.isoformat(),
+            "date_to": year_end.isoformat(),
+            "bbox": list(bbox),
+            "min_confidence": args.min_confidence,
+            "chunks": chunks,
+            "rows": len(rows),
+            "sha256": sha256_file(dest),
+        }
+        atomic_write_json(marker, metadata)
         log(f"{dest.name}: {len(rows)} detections")
-        files.append(dest)
+        files.extend((dest, marker))
 
     write_manifest(
         args.out_dir,
@@ -1099,6 +1649,7 @@ def cmd_firms(args: argparse.Namespace) -> int:
             "source": args.source,
             "years": years,
             "bbox": bbox,
+            "min_confidence": args.min_confidence,
             "auth": "FIRMS_MAP_KEY",
         },
         files,
@@ -1130,91 +1681,247 @@ def m2m_login() -> str:
     return str(m2m_call("login-token", {"username": username, "token": token}))
 
 
+def openeo_lst_process_graph(day: date, bbox: tuple[float, float, float, float]) -> dict[str, Any]:
+    """Daily, cloud-masked Level-2 LST graph using the authoritative CDSE collection."""
+    callback = {
+        "lst": {
+            "process_id": "array_element",
+            "arguments": {"data": {"from_parameter": "data"}, "label": "LST"},
+        },
+        "confidence": {
+            "process_id": "array_element",
+            "arguments": {"data": {"from_parameter": "data"}, "label": "confidence_in"},
+        },
+        "cloud_word": {
+            "process_id": "floor",
+            "arguments": {
+                "x": {
+                    "from_node": "confidence_divisor",
+                }
+            },
+        },
+        "confidence_divisor": {
+            "process_id": "divide",
+            "arguments": {"x": {"from_node": "confidence"}, "y": 16384},
+        },
+        "cloud_bit": {
+            "process_id": "mod",
+            "arguments": {"x": {"from_node": "cloud_word"}, "y": 2},
+        },
+        "clear": {
+            "process_id": "eq",
+            "arguments": {"x": {"from_node": "cloud_bit"}, "y": 0},
+        },
+        "warm_enough": {
+            "process_id": "gt",
+            "arguments": {"x": {"from_node": "lst"}, "y": 220},
+        },
+        "cool_enough": {
+            "process_id": "lt",
+            "arguments": {"x": {"from_node": "lst"}, "y": 340},
+        },
+        "physical": {
+            "process_id": "and",
+            "arguments": {
+                "x": {"from_node": "warm_enough"},
+                "y": {"from_node": "cool_enough"},
+            },
+        },
+        "valid": {
+            "process_id": "and",
+            "arguments": {"x": {"from_node": "clear"}, "y": {"from_node": "physical"}},
+        },
+        "masked": {
+            "process_id": "if",
+            "arguments": {"value": {"from_node": "valid"}, "accept": {"from_node": "lst"}},
+            "result": True,
+        },
+    }
+    return {
+        "load": {
+            "process_id": "load_collection",
+            "arguments": {
+                "id": S3_SLSTR_COLLECTION,
+                "spatial_extent": {
+                    "west": bbox[0],
+                    "south": bbox[1],
+                    "east": bbox[2],
+                    "north": bbox[3],
+                    "crs": 4326,
+                },
+                "temporal_extent": [
+                    f"{day.isoformat()}T00:00:00Z",
+                    f"{(day + timedelta(days=1)).isoformat()}T00:00:00Z",
+                ],
+                "bands": ["LST", "confidence_in"],
+            },
+        },
+        "quality_mask": {
+            "process_id": "apply_dimension",
+            "arguments": {
+                "data": {"from_node": "load"},
+                "dimension": "bands",
+                "process": {"process_graph": callback},
+            },
+        },
+        "daily_max": {
+            "process_id": "reduce_dimension",
+            "arguments": {
+                "data": {"from_node": "quality_mask"},
+                "dimension": "t",
+                "reducer": {
+                    "process_graph": {
+                        "max": {
+                            "process_id": "max",
+                            "arguments": {"data": {"from_parameter": "data"}},
+                            "result": True,
+                        }
+                    }
+                },
+            },
+        },
+        "save": {
+            "process_id": "save_result",
+            "arguments": {"data": {"from_node": "daily_max"}, "format": "GTiff"},
+            "result": True,
+        },
+    }
+
+
 def cmd_lst(args: argparse.Namespace) -> int:
-    """Fetch Sentinel-3 SLSTR L2 land surface temperature (Kelvin) from CDSE.
+    """Fetch Sentinel-3 SLSTR L2 land surface temperature (Kelvin) from CDSE openEO.
 
     --date fetches one day; --start [--end] fetches a daily series.
     """
     bbox = parse_bbox(args.bbox)
     out_dir = ensure_dir(args.out_dir / "lst")
+    if args.days != 1:
+        raise FetchError(
+            "--days must be 1; older valid captures remain separate dated rows in lst_ts"
+        )
+    if args.orbit != "DESCENDING":
+        raise FetchError(
+            "only the daytime daily-maximum LST composite is supported"
+        )
+    if not 500 <= args.resolution <= 5000:
+        raise FetchError("--resolution must be between 500 and 5000 metres for SLSTR L2 LST")
     yesterday = datetime.now(timezone.utc).date() - timedelta(days=1)
     if args.start:
         series = date_span(parse_date(args.start),
                            parse_date(args.end) if args.end else yesterday)
     else:
         series = [parse_date(args.date) if args.date else yesterday]
+    if series[-1] > yesterday:
+        raise FetchError("LST dates must not be later than yesterday UTC")
 
-    # ~1 km native product; size the request to the chosen output resolution.
+    # ~1 km native product; normalize the result to a stable WGS84 target grid.
     lat = (bbox[1] + bbox[3]) / 2.0
     m_per_deg_lon = M_PER_DEG_LAT * math.cos(math.radians(lat))
     width = max(1, min(2500, round((bbox[2] - bbox[0]) * m_per_deg_lon / args.resolution)))
     height = max(1, min(2500, round((bbox[3] - bbox[1]) * M_PER_DEG_LAT / args.resolution)))
 
-    token = cdse_access_token()
+    token_state = {"value": "", "born": 0.0}
+
+    def token() -> str:
+        if not token_state["value"] or time.time() - token_state["born"] > 480:
+            token_state["value"] = cdse_access_token()
+            token_state["born"] = time.time()
+        return str(token_state["value"])
+
     files = []
     for done, day in enumerate(series, start=1):
         dest = out_dir / f"LST_{day.isoformat()}.tif"
-        if dest.exists() and dest.stat().st_size > 0:
-            files.append(dest)
+        marker = dest.with_suffix(dest.suffix + ".request.json")
+        process_graph = openeo_lst_process_graph(day, bbox)
+        identity = {
+            "api": CDSE_OPENEO_RESULT_URL,
+            "collection": S3_SLSTR_COLLECTION,
+            "date": day.isoformat(),
+            "bbox": list(bbox),
+            "resolution_m": args.resolution,
+            "width": width,
+            "height": height,
+            "quality_mask": S3_LST_QUALITY_MASK,
+            "process_graph": process_graph,
+        }
+        if cached_file_matches(dest, marker, identity) and valid_lst_raster(
+            dest, width=width, height=height, bbox=bbox
+        ):
+            files.extend((dest, marker))
             progress(done, len(series), f"{dest.name} (cached)")
             continue
-        date_from = day - timedelta(days=args.days - 1)
-        body = {
-            "input": {
-                "bounds": {
-                    "bbox": list(bbox),
-                    "properties": {"crs": "http://www.opengis.net/def/crs/OGC/1.3/CRS84"},
-                },
-                "data": [
-                    {
-                        "type": S3_SLSTR_COLLECTION,
-                        "dataFilter": {
-                            "timeRange": {
-                                "from": f"{date_from.isoformat()}T00:00:00Z",
-                                "to": f"{day.isoformat()}T23:59:59Z",
-                            },
-                            # Descending node ~10:00 local = daytime temperatures,
-                            # matching the engine's percentile classification.
-                            "orbitDirection": args.orbit,
-                            "mosaickingOrder": "mostRecent",
-                        },
-                    }
-                ],
-            },
-            "output": {
-                "width": width,
-                "height": height,
-                "responses": [{"identifier": "default", "format": {"type": "image/tiff"}}],
-            },
-            "evalscript": S3_LST_EVALSCRIPT,
-        }
+        marker.unlink(missing_ok=True)
         raw = request_bytes(
-            CDSE_PROCESS_URL,
+            CDSE_OPENEO_RESULT_URL,
             method="POST",
             headers={
-                "Authorization": f"Bearer {token}",
+                "Authorization": f"Bearer oidc/CDSE/{token()}",
                 "Content-Type": "application/json",
                 "Accept": "image/tiff",
             },
-            data=json.dumps(body).encode("utf-8"),
-            timeout=600,
+            data=json.dumps({"process": {"process_graph": process_graph}}).encode("utf-8"),
+            timeout=1800,
         )
         if not raw.startswith((b"II", b"MM")):
-            raise FetchError(f"CDSE did not return a TIFF for {day}: {raw[:300]!r}")
-        dest.write_bytes(raw)
-        files.append(dest)
+            raise FetchError(f"CDSE openEO did not return a TIFF for {day}: {redact(raw[:300])}")
+        raw_stage = dest.with_name(f".{dest.name}.{os.getpid()}.source.tif")
+        stage = dest.with_name(f".{dest.name}.{os.getpid()}.part")
+        try:
+            atomic_write_bytes(raw_stage, raw)
+            warp = subprocess.run(
+                [
+                    "gdalwarp",
+                    "-overwrite",
+                    "-of",
+                    "GTiff",
+                    "-t_srs",
+                    "EPSG:4326",
+                    "-te",
+                    *(str(value) for value in bbox),
+                    "-ts",
+                    str(width),
+                    str(height),
+                    "-r",
+                    "bilinear",
+                    "-dstnodata",
+                    "0",
+                    "-ot",
+                    "Float32",
+                    "-co",
+                    "COMPRESS=DEFLATE",
+                    str(raw_stage),
+                    str(stage),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if warp.returncode:
+                detail = redact((warp.stderr or warp.stdout).strip())[:1000]
+                raise FetchError(f"could not normalize CDSE LST raster for {day}: {detail}")
+            if not valid_lst_raster(stage, width=width, height=height, bbox=bbox):
+                raise FetchError(
+                    f"CDSE returned an unreadable, empty, or non-Kelvin LST raster for {day}"
+                )
+            stage.replace(dest)
+        finally:
+            raw_stage.unlink(missing_ok=True)
+            stage.unlink(missing_ok=True)
+        atomic_write_json(marker, {**identity, "sha256": sha256_file(dest)})
+        files.extend((dest, marker))
         progress(done, len(series), dest.name)
 
     write_manifest(
         args.out_dir,
         "lst_sentinel3_slstr",
         {
-            "api": CDSE_PROCESS_URL,
+            "api": CDSE_OPENEO_RESULT_URL,
             "collection": S3_SLSTR_COLLECTION,
             "date_from": series[0].isoformat(),
             "date_to": series[-1].isoformat(),
-            "window_days": args.days,
-            "orbit": args.orbit,
+            "window_days": 1,
+            "daytime_method": "daily maximum of clear observations",
+            "quality_mask": S3_LST_QUALITY_MASK,
             "bbox": list(bbox),
             "resolution_m": args.resolution,
             "auth": "SH_CLIENT_ID/SH_CLIENT_SECRET",
@@ -1418,7 +2125,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--resolution",
         type=float,
-        help="target metres/pixel (e.g. 10); tiles the bbox and overrides --width/--height",
+        default=20,
+        help="target metres/pixel (default 20); tiles the bbox and overrides --width/--height",
     )
     p.add_argument("--width", type=int, default=2048)
     p.add_argument("--height", type=int, default=2048)
@@ -1463,7 +2171,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="NUTS region clip for EEA-hosted datasets (default Galicia; empty for full Europe)",
     )
     p.add_argument("--bbox", help="west,south,east,north clip; default Galicia for WEKEO datasets")
-    p.add_argument("--gcs", default="EPSG:4326", help="output coordinate system")
+    p.add_argument(
+        "--gcs",
+        help="output CRS (default EPSG:3035 for CLC+ raster, otherwise EPSG:4326)",
+    )
     p.add_argument(
         "--poll-timeout", type=int, default=3600, help="seconds to wait for CLMS to prepare the file"
     )
@@ -1491,6 +2202,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--years", required=True, help="comma-separated years, e.g. 2025 or 2016,2017")
     p.add_argument("--bbox", help="west,south,east,north; default tight Galicia bbox")
     p.add_argument("--source", default=FIRMS_SOURCE, help="FIRMS source (default MODIS_SP archive)")
+    p.add_argument(
+        "--min-confidence",
+        type=int,
+        default=int(os.environ.get("FIRMS_MIN_CONFIDENCE", "30")),
+        help="minimum MODIS confidence (0-100; default 30, nominal or high)",
+    )
     p.add_argument("--season-start", default="05-01", help="MM-DD season start (default May 1)")
     p.add_argument("--season-end", default="10-31", help="MM-DD season end (default Oct 31)")
     p.set_defaults(func=cmd_firms)
@@ -1500,9 +2217,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--date", help="YYYY-MM-DD; default yesterday UTC")
     p.add_argument("--start", help="series start YYYY-MM-DD; fetches one file per day")
     p.add_argument("--end", help="series end YYYY-MM-DD; default yesterday UTC")
-    p.add_argument("--days", type=int, default=3, help="per-day trailing mosaic window (cloud gap-fill)")
+    p.add_argument("--days", type=int, default=1, help="exact per-day window (must be 1)")
     p.add_argument("--orbit", default="DESCENDING", choices=["DESCENDING", "ASCENDING"],
-                   help="DESCENDING = daytime pass (default)")
+                   help="compatibility option; only DESCENDING/daytime daily-max is supported")
     p.add_argument("--resolution", type=float, default=1000, help="output metres/pixel")
     p.add_argument("--bbox", help="west,south,east,north; default Galicia bbox")
     p.set_defaults(func=cmd_lst)

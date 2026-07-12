@@ -87,10 +87,11 @@ layer follows the same two-stage flow, wrapped in one `make` target:
 ```
 
 The staging directory (`data/OUTPUT/source_data/`) is a cache, not a
-dependency: after seeding, the app reads only from PostGIS. Re-running a
-target reuses staged files and skips finished downloads, so every command is
-resumable and idempotent. Delete a layer's staging folder to force a fresh
-download from the source.
+dependency: after seeding, the app reads only from PostGIS. Loaders accept
+existing staged files without adjacent metadata. Before loading, they validate
+the actual file format, grid or schema, coverage, dates, required fields, and
+physical value ranges. Multi-file replacements use staging tables plus an
+atomic swap. Delete a layer's staging folder only to force a fresh download.
 
 ### Data sources
 
@@ -101,8 +102,8 @@ download from the source.
 | `twi` | `twi` | Topographic Wetness Index | computed from `dtm` tiles (GRASS `r.fill.dir` + `r.topidx`) | 25 m | none |
 | `mdt` | `mdt` | reference grid resampled from the IGN MDT tiles | derived locally (no fetch) | 30 m | none |
 | `fwi` | `fwi_files` | WRF 1 km weather forecast | MeteoGalicia THREDDS NCSS — `thredds.meteogalicia.gal` | 1 km, daily NetCDF | none |
-| `sentinel` | `sentinel_b4/b8/b8a/b11` + `_ts` | Sentinel-2 L2A bands B04/B08/B8A/B11 | Copernicus Data Space Process API — `sh.dataspace.copernicus.eu` | weekly mosaics | `SH_CLIENT_ID` + `SH_CLIENT_SECRET` |
-| `lst` | `lst` + `lst_ts` | Sentinel-3 SLSTR L2 land surface temperature | Copernicus Data Space Process API | ~1 km, Kelvin | `SH_CLIENT_ID` + `SH_CLIENT_SECRET` |
+| `sentinel` | `sentinel_b4/b8/b8a/b11` + `_ts` | Sentinel-2 L2A bands B04/B08/B8A/B11 | Copernicus Data Space Process API — `sh.dataspace.copernicus.eu` | 20 m weekly mosaics | `SH_CLIENT_ID` + `SH_CLIENT_SECRET` |
+| `lst` | `lst` + `lst_ts` | Sentinel-3 SLSTR L2 LST (`SENTINEL3_SLSTR_L2_LST`) | Copernicus Data Space openEO API | ~1 km, Kelvin | `SH_CLIENT_ID` + `SH_CLIENT_SECRET` |
 | `infra` | `infra` | OSM roads + railways | Geofabrik extracts — `download.geofabrik.de` | vector | none |
 | `fuels` | `fuels` | MFE forest map, Rothermel fuel model (`modelocombustible`) | MITECO OGC API-Features — `wmts.mapama.gob.es/sig-api` | 20 m (rasterized) | none |
 | `hist` | `hist` | MODIS active-fire hotspots (SP archive + NRT, auto-stitched) | NASA FIRMS area API | points | `FIRMS_MAP_KEY` |
@@ -123,7 +124,7 @@ make borders                        # 1. Spain admin boundaries  (~1 min)
 make dtm                            # 2. IGN elevation 25 m      (~5 min)
 make twi                            # 3. TWI, computed from 2's staged tiles (15-40 min GRASS)
 make mdt                            # 4. reference grid from step 2's tiles (~2 min)
-make fwi START=2026-05-01           # 5. weather, May 1 2026 -> latest available day (long: ~330 MB/day)
+make fwi START=2026-03-02           # 5. weather, 60-day run-up before May 1 -> latest (large: ~330 MB/day)
 make sentinel START=2026-05-01      # 6. Sentinel-2 weekly mosaics, May 1 2026 -> latest image (~30 min)
 make lst START=2026-05-01           # 7. surface temperature, one raster per day May 1 2026 -> latest (~10 min)
 make infra                          # 8. OSM roads + railways    (~10 min)
@@ -137,7 +138,9 @@ make iuf                            # 13. CORINE CLC2018 vector -> iuf, the WUI/
 The explicit `START=` dates make the fetched range visible; the bare forms
 (`make sentinel`, `make hist`) fetch exactly the same "current season so far"
 range by default. Adjust the year in `START=` to backfill another season
-(e.g. `make sentinel START=2025-05-01` for all of 2025).
+(e.g. `make sentinel START=2025-05-01` for all of 2025). FWI assessments
+require every date in the preceding 60-day moisture-code run-up; seed that
+run-up as shown rather than starting on the first assessment day.
 
 Constraints: `hist` clips against the Galicia polygon from `borders` (1 before
 10); `twi` and `mdt` build from the tiles staged by `dtm` (2 before 3 and 4). Everything
@@ -171,7 +174,7 @@ omitted:
 | `make hist START=... [END=...]` / `YEAR=...` | sub-season / whole year |
 | `make lst` | yesterday's Sentinel-3 daytime pass |
 | `make lst DATE=2026-06-15` | a specific day |
-| `make lst START=2026-05-01 [END=...]` | daily series into `lst_ts` — the engine picks the raster matching each run's assessment date from it (falling back to the nearest earlier day); the newest day also refreshes the `lst` fallback table |
+| `make lst START=2026-05-01 [END=...]` | daily series into `lst_ts`; the engine uses that date or an earlier capture no more than `STORCITO_MAX_LST_AGE_DAYS` old (default 3), never a future capture |
 
 Notes:
 
@@ -204,8 +207,9 @@ Suggested cron for a server (all commands are argument-free thanks to the
 ```cron
 15 8 * * *      cd /path/to/STORCITO && ./scripts/daily_update.sh     # daily: FWI through today, LST, fire hotspots
 30 9 * * *      cd /path/to/STORCITO && ./scripts/nightly_process.sh  # daily: precompute the regional dynamic map
-0  9 * * 1      cd /path/to/STORCITO && make sentinel                 # weekly (May-Oct)
 ```
+
+`daily_update.sh` also refreshes Sentinel-2 each Monday during May-October.
 
 ### Precomputed regional results
 
@@ -233,8 +237,10 @@ day's WRF file in the morning - there is nothing new to fetch at 00:15.
 pulls today's forecast file once it is published.
 
 Every fetch writes a JSON manifest (URL, parameters, SHA-256 of each file,
-timestamp) under `data/OUTPUT/source_data/manifests/` — the audit trail of
-exactly what was downloaded when.
+timestamp) under `data/OUTPUT/source_data/manifests/`. Load-critical files
+may also carry adjacent request metadata for download caching, but loaders do
+not require it. OSM is checked against Geofabrik's published checksum when the
+checksum file is present.
 
 ## Database
 
@@ -318,20 +324,41 @@ For wildfire-platform compatibility, STORCITO also accepts the generic wildfire
 calculation payload at `/run-static-aoi-wildfire` and `/calliope/start`.
 
 - `coordinates` must be GeoJSON geometry.
-- `start_date` and `end_date` must represent `16:00-17:00` in `Europe/Berlin`.
-- The current model is still daily, so the local date selects the FWI day; the
-  hour window is validated and recorded as request metadata.
+- `start_date` and `end_date` define an inclusive local-date window in
+  `Europe/Madrid`. The submitted 16:00-17:00 interval is retained as the
+  operational weather window; it does not replace the standard FWI observation.
+- The current model is daily. Dynamic mode scores the complete selected date
+  window, selects the peak FWI day inside the requested AOI, and returns that
+  day's coherent risk map. Static mode uses the submitted year,
+  then evaluates that year's hottest eligible FWI day from May 1 through
+  October 31.
+- Canadian FWI is calculated at 12:00 local standard time (12:00 CET or 13:00
+  CEST in Galicia) with assessment-to-assessment precipitation. Weather shown
+  for 16:00 is a separate operational snapshot and is not classified with the
+  standard EFFIS thresholds.
+- Every dynamic timeline frame uses FWI for that date and LST/Sentinel captures
+  on or before that date. LST and TWI gaps are handled by per-pixel weight
+  renormalization and reported in `data_coverage.tif`; core-layer gaps remain
+  nodata.
+- Historical fire is delivered as an informational overlay and is not included
+  in the AHP risk score.
 - If `buffer_distance` is greater than zero, it expands the supplied GeoJSON AOI.
-- `parameters.context_buffer_m` is optional and defaults to `3000`.
+- `parameters.context_buffer_m` is optional, defaults to `3000`, and is limited
+  to 0-100000 metres.
 - `parameters.calculation_mode` defaults to `static`; `dynamic` uses the
-  dynamic AHP layer set and date range from `start_date` to `end_date`.
+  dynamic AHP layer set. A static window must remain within one calendar year.
+- `resolution` is optional (10-1000 metres) and controls the delivered raster
+  grid for both computed and precomputed results. Production Sentinel inputs
+  are 20 m; FWI and LST remain approximately kilometre-scale drivers, so a 20 m
+  output grid does not imply 20 m meteorological precision.
 - `parameters.risk_profile` may be `regional` or `finca`. `finca` keeps the
   old parcel behavior: smaller infrastructure/WUI buffers, native DTM grid
   rasterization, uploaded station FWI class bounds, and uploaded precomputed
   NDVI support.
 - `parameters.user_inputs` may include signed/downloadable URLs for `dtm`,
   `ndvi`, and `station_data`. `ndvi` is a precomputed finca NDVI GeoTIFF;
-  `station_data` may be Excel/CSV and is normalized before storage.
+  `station_data` may be Excel/CSV and is normalized before storage. Uploaded
+  rasters must contain valid pixels across the complete requested AOI.
 
 Example request body:
 

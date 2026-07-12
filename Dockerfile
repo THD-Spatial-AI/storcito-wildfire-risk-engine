@@ -16,9 +16,10 @@ RUN mkdir -p /app/data/INPUT /app/data/OUTPUT \
 ENV MPLBACKEND=Agg \
     TERM=xterm-256color \
     PYTHONPATH=/app:/app/FR \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
 
-EXPOSE 8090
+EXPOSE 8085
 
 ENTRYPOINT ["micromamba", "run", "-n", "storcito"]
-CMD ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "8090"]
+CMD ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "8085"]

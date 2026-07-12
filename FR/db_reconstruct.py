@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Iterable
 
 from shapely.geometry import mapping
 from shapely.geometry.base import BaseGeometry
@@ -44,20 +45,24 @@ def _pg_params() -> dict[str, str]:
         "port": os.environ.get("PGPORT", "5432"),
         "dbname": os.environ.get("PGDATABASE", "gis"),
         "user": os.environ.get("PGUSER", "gis"),
-        "password": os.environ.get("PGPASSWORD", "gis"),
+        "password": os.environ.get("PGPASSWORD", ""),
     }
+
+
+def _conninfo_value(value: str) -> str:
+    return "'" + str(value).replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
 def _ogr_dsn() -> str:
     """OGR/vector PG connection string."""
     p = _pg_params()
-    return "PG:" + " ".join(f"{k}={v}" for k, v in p.items())
+    return "PG:" + " ".join(f"{k}={_conninfo_value(v)}" for k, v in p.items())
 
 
 def _gdal_raster_dsn(table: str, *, schema: str = "public") -> str:
     """GDAL PostGISRaster connection string (mode=2 = one coverage per table)."""
     p = _pg_params()
-    parts = [f"{k}={v}" for k, v in p.items()]
+    parts = [f"{k}={_conninfo_value(v)}" for k, v in p.items()]
     parts += [f"schema='{schema}'", f"table='{table}'", "mode='2'"]
     return "PG:" + " ".join(parts)
 
@@ -109,6 +114,7 @@ def export_raster_table(
     clip_geom: BaseGeometry | None = None,
     clip_geom_crs: str = "EPSG:4326",
     target_srs: str | None = None,
+    resampling: str = "near",
 ) -> Path:
     """Export a PostGIS raster table to a GeoTIFF, optionally clipped/reprojected.
 
@@ -122,7 +128,7 @@ def export_raster_table(
     src = _gdal_raster_dsn(table)
 
     if clip_geom is None:
-        cmd = ["gdalwarp", "-of", "GTiff", "-co", "TILED=YES", "-overwrite"]
+        cmd = ["gdalwarp", "-of", "GTiff", "-co", "TILED=YES", "-r", resampling, "-overwrite"]
         if target_srs is not None:
             cmd += ["-t_srs", target_srs]
         cmd += [src, str(dest_tif)]
@@ -131,7 +137,7 @@ def export_raster_table(
 
     cutline = _write_cutline(clip_geom, clip_geom_crs, dest_tif.parent)
     try:
-        cmd = ["gdalwarp", "-of", "GTiff",
+        cmd = ["gdalwarp", "-of", "GTiff", "-r", resampling,
                "-cutline", str(cutline), "-crop_to_cutline", "-overwrite"]
         if target_srs is not None:
             cmd += ["-t_srs", target_srs]
@@ -142,37 +148,119 @@ def export_raster_table(
     return dest_tif
 
 
-def _ts_date_for(ts_table: str, target_date) -> str | None:
-    try:
-        with _pg_connect() as conn, conn.cursor() as cur:
-            cur.execute("SELECT to_regclass(%s)", (f"public.{ts_table}",))
-            if cur.fetchone()[0] is None:
-                return None
-            cur.execute(
-                f"SELECT max(capture_date) FROM {ts_table} WHERE capture_date <= %s",
-                (target_date,),
-            )
-            row = cur.fetchone()
-            if row and row[0]:
-                return row[0].isoformat()
-            cur.execute(
-                f"SELECT min(capture_date) FROM {ts_table} WHERE capture_date > %s",
-                (target_date,),
-            )
-            row = cur.fetchone()
-            if row and row[0]:
-                if (row[0] - target_date).days > 16:
-                    raise LookupError(
-                        f"{ts_table} has no data on/before {target_date} and the "
-                        f"nearest later capture ({row[0]}) is too far ahead; seed "
-                        f"the missing period first."
-                    )
-                return row[0].isoformat()
+def _ts_date_for(ts_table: str, target_date, *, max_age_days: int | None = None) -> str | None:
+    """Newest capture on or before the assessment date; never look forward."""
+    if isinstance(target_date, str):
+        target_date = date.fromisoformat(target_date)
+    with _pg_connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT to_regclass(%s)", (f"public.{ts_table}",))
+        if cur.fetchone()[0] is None:
             return None
-    except LookupError:
-        raise
+        cur.execute(
+            f"SELECT max(capture_date) FROM {ts_table} WHERE capture_date <= %s",
+            (target_date,),
+        )
+        row = cur.fetchone()
+        capture = row[0] if row and row[0] else None
+    if capture is not None and max_age_days is not None:
+        age = (target_date - capture).days
+        if age > max_age_days:
+            raise LookupError(
+                f"{ts_table} newest capture {capture} is {age} days old; "
+                f"maximum allowed is {max_age_days}"
+            )
+    return capture.isoformat() if capture else None
+
+
+def _common_ts_dates(
+    ts_tables: tuple[str, ...], target_date, *, max_age_days: int
+) -> list[str]:
+    """Common capture dates, newest first, within the freshness window."""
+    if isinstance(target_date, str):
+        target_date = date.fromisoformat(target_date)
+    if not ts_tables or any(not table.replace("_", "").isalnum() for table in ts_tables):
+        raise ValueError("invalid time-series table list")
+    with _pg_connect() as conn, conn.cursor() as cur:
+        for table in ts_tables:
+            cur.execute("SELECT to_regclass(%s)", (f"public.{table}",))
+            if cur.fetchone()[0] is None:
+                raise LookupError(f"required time-series table is missing: {table}")
+        intersection = " INTERSECT ".join(
+            f"SELECT capture_date FROM {table} WHERE capture_date <= %s" for table in ts_tables
+        )
+        cur.execute(
+            f"SELECT capture_date FROM ({intersection}) common_dates "
+            "ORDER BY capture_date DESC",
+            (target_date,) * len(ts_tables),
+        )
+        captures = [row[0] for row in cur.fetchall()]
+    if not captures:
+        raise LookupError(
+            f"no common capture on or before {target_date} across {', '.join(ts_tables)}"
+        )
+    newest_age = (target_date - captures[0]).days
+    fresh = [capture for capture in captures if (target_date - capture).days <= max_age_days]
+    if not fresh:
+        raise LookupError(
+            f"common Sentinel capture {captures[0]} is {newest_age} days old; "
+            f"maximum allowed is {max_age_days}"
+        )
+    return [capture.isoformat() for capture in fresh]
+
+
+def _common_ts_date(
+    ts_tables: tuple[str, ...], target_date, *, max_age_days: int
+) -> str:
+    """Newest date present in every supplied time-series table."""
+    return _common_ts_dates(
+        ts_tables, target_date, max_age_days=max_age_days
+    )[0]
+
+
+
+def _composite_newest_valid(
+    primary_bytes: bytes,
+    older: list[bytes],
+    *,
+    return_used: bool = False,
+) -> bytes | tuple[bytes, list[int]]:
+    """Fill invalid pixels of the primary raster from older ones (newest first).
+
+    All inputs share the ts table's native grid (same fetch pipeline), so a
+    straight array overlay is exact. Falls back to the primary bytes on any
+    library/shape mismatch.
+    """
+    try:
+        import io as _io
+
+        import numpy as np
+        import rasterio
+
+        with rasterio.open(_io.BytesIO(primary_bytes)) as src:
+            base = src.read(1).astype("float64")
+            profile = src.profile
+        invalid = ~np.isfinite(base) | (base <= 0)
+        used_fillers: list[int] = []
+        for index, blob in enumerate(older):
+            if not invalid.any():
+                break
+            with rasterio.open(_io.BytesIO(blob)) as src:
+                cand = src.read(1).astype("float64")
+            if cand.shape != base.shape:
+                continue
+            usable = invalid & np.isfinite(cand) & (cand > 0)
+            if np.any(usable):
+                used_fillers.append(index)
+            base[usable] = cand[usable]
+            invalid &= ~usable
+        buf = _io.BytesIO()
+        profile.update(driver="GTiff")
+        with rasterio.open(buf, "w", **profile) as dst:
+            dst.write(base.astype(profile.get("dtype", "float32")), 1)
+        result = buf.getvalue()
+        return (result, used_fillers) if return_used else result
     except Exception:
-        return None
+        return (primary_bytes, []) if return_used else primary_bytes
 
 
 def export_ts_raster(
@@ -184,20 +272,27 @@ def export_ts_raster(
     clip_geom: BaseGeometry | None = None,
     clip_geom_crs: str = "EPSG:4326",
     target_srs: str | None = None,
+    resampling: str = "bilinear",
+    capture_date: str | None = None,
+    max_age_days: int | None = None,
 ) -> tuple[Path, str]:
     """Export the raster matching the assessment date from a *_ts time series.
 
-    Returns (path, capture_date_used). Falls back to the current single-mosaic
-    table when the time series is missing/empty.
+    Returns (path, capture_date_used). Future or excessively stale captures are
+    never substituted.
     """
     dest_tif = Path(dest_tif)
-    capture_date = _ts_date_for(ts_table, target_date)
+    capture_date = capture_date or _ts_date_for(
+        ts_table, target_date, max_age_days=max_age_days
+    )
     if capture_date is None:
-        export_raster_table(current_table, dest_tif, clip_geom=clip_geom,
-                            clip_geom_crs=clip_geom_crs, target_srs=target_srs)
-        return dest_tif, "current"
+        raise LookupError(
+            f"{ts_table} has no capture on or before {target_date}; "
+            "seed the requested historical period first"
+        )
 
     dest_tif.parent.mkdir(parents=True, exist_ok=True)
+    source_dates = [str(capture_date)]
     with _pg_connect() as conn, conn.cursor() as cur:
         cur.execute(
             f"SELECT ST_AsGDALRaster(ST_Union(rast), 'GTiff') FROM {ts_table} "
@@ -205,23 +300,142 @@ def export_ts_raster(
             (capture_date,),
         )
         raw = cur.fetchone()[0]
+        if max_age_days is not None and max_age_days > 0:
+            # Per-pixel composite within the freshness window: LST at 1 km has
+            # cloud gaps, and a small AOI can be fully invalid on the newest
+            # capture. Older captures inside the SAME window the gate already
+            # permits fill those pixels - most recent valid value wins, so no
+            # data older than the declared tolerance ever enters the layer.
+            if isinstance(target_date, str):
+                _t = date.fromisoformat(target_date)
+            else:
+                _t = target_date
+            cur.execute(
+                f"SELECT capture_date, ST_AsGDALRaster(ST_Union(rast), 'GTiff') "
+                f"FROM {ts_table} "
+                "WHERE capture_date >= %s AND capture_date < %s "
+                "GROUP BY capture_date ORDER BY capture_date DESC",
+                (_t - timedelta(days=max_age_days), capture_date),
+            )
+            fillers = cur.fetchall()
+            if fillers:
+                raw, used_indices = _composite_newest_valid(
+                    raw,
+                    [bytes(row[1]) for row in fillers],
+                    return_used=True,
+                )
+                source_dates.extend(str(fillers[index][0]) for index in used_indices)
     fd, tmp_name = tempfile.mkstemp(suffix=".tif", dir=dest_tif.parent)
     os.close(fd)
     tmp = Path(tmp_name)
     try:
         tmp.write_bytes(bytes(raw))
-        cmd = ["gdalwarp", "-of", "GTiff", "-overwrite"]
+        cmd = ["gdalwarp", "-of", "GTiff", "-r", resampling, "-overwrite"]
         if clip_geom is not None:
             cutline = _write_cutline(clip_geom, clip_geom_crs, dest_tif.parent)
             cmd += ["-cutline", str(cutline), "-crop_to_cutline"]
         if target_srs is not None:
             cmd += ["-t_srs", target_srs]
         _run(cmd + [str(tmp), str(dest_tif)])
+        try:
+            import rasterio
+
+            with rasterio.open(dest_tif, "r+") as dst:
+                dst.update_tags(
+                    STORCITO_PRIMARY_SOURCE_DATE=str(capture_date),
+                    STORCITO_SOURCE_DATES=",".join(source_dates),
+                )
+        except Exception:
+            pass
     finally:
         tmp.unlink(missing_ok=True)
         if clip_geom is not None:
             cutline.unlink(missing_ok=True)
     return dest_tif, capture_date
+
+
+def _raster_has_positive_data(path: str | Path) -> bool:
+    """Return whether a raster contains at least one finite, non-nodata value > 0."""
+    import numpy as np
+    import rasterio
+
+    with rasterio.open(path) as src:
+        for _index, window in src.block_windows(1):
+            values = src.read(1, window=window, masked=True).compressed()
+            if values.size and np.any(np.isfinite(values) & (values > 0)):
+                return True
+    return False
+
+
+def export_common_ts_rasters(
+    layers: list[tuple[str, str, Path]],
+    target_date,
+    *,
+    max_age_days: int,
+    clip_geom: BaseGeometry | None = None,
+    clip_geom_crs: str = "EPSG:4326",
+    target_srs: str | None = None,
+    resampling: str = "bilinear",
+) -> tuple[dict[str, Path], str]:
+    """Export synchronized bands from the newest usable common capture.
+
+    A region-wide Sentinel mosaic can be structurally complete while a cloudy
+    acquisition contains only nodata inside a small AOI. Trying common capture
+    dates as a group keeps B4/B8/B11 synchronized and avoids producing blank
+    NDVI/NDMI layers from such a window.
+    """
+    if not layers:
+        raise ValueError("at least one time-series raster is required")
+    candidates = _common_ts_dates(
+        tuple(ts_table for _name, ts_table, _dest in layers),
+        target_date,
+        max_age_days=max_age_days,
+    )
+    rejected: list[str] = []
+    outputs = {name: Path(dest) for name, _ts_table, dest in layers}
+
+    for capture in candidates:
+        for path in outputs.values():
+            path.unlink(missing_ok=True)
+        blank_layer = None
+        for name, ts_table, dest in layers:
+            export_ts_raster(
+                ts_table,
+                name,
+                target_date,
+                dest,
+                clip_geom=clip_geom,
+                clip_geom_crs=clip_geom_crs,
+                target_srs=target_srs,
+                resampling=resampling,
+                capture_date=capture,
+            )
+            if not _raster_has_positive_data(dest):
+                blank_layer = name
+                break
+        if blank_layer is None:
+            if rejected:
+                skipped = ", ".join(rejected)
+                print(
+                    f"[reconstruct] Sentinel capture {capture} selected; "
+                    f"newer capture(s) had no valid AOI pixels: {skipped}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[reconstruct] Sentinel capture {capture} selected for all bands",
+                    flush=True,
+                )
+            return outputs, capture
+        rejected.append(f"{capture} ({blank_layer})")
+
+    for path in outputs.values():
+        path.unlink(missing_ok=True)
+    raise LookupError(
+        "no common Sentinel capture contains valid pixels in the requested AOI "
+        f"within {max_age_days} day(s) of {target_date}; rejected: "
+        + ", ".join(rejected)
+    )
 
 
 def export_vector_table(
@@ -272,7 +486,12 @@ _FWI_CACHE_DIR = Path(
 )
 
 
-def reconstruct_fwi(target_date, dest_fwi_dir: str | Path) -> list[Path]:
+def reconstruct_fwi(
+    target_date,
+    dest_fwi_dir: str | Path,
+    *,
+    score_start=None,
+) -> list[Path]:
     """Provide the date-selected FWI NetCDF files (all dates <= target) into
     ``dest_fwi_dir`` from the `fwi_files` blob table.
 
@@ -286,33 +505,63 @@ def reconstruct_fwi(target_date, dest_fwi_dir: str | Path) -> list[Path]:
     _FWI_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     if isinstance(target_date, str):
         target_date = date.fromisoformat(target_date)
+    if isinstance(score_start, str):
+        score_start = date.fromisoformat(score_start)
+    score_start = score_start or target_date
 
     with _pg_connect() as conn, conn.cursor() as cur:
-        # Window: FWI_RUNUP_DAYS before the earliest plausible range start.
+        # Exact model window: run-up begins before the first scoring date.
         from FR.FWI import FWI_RUNUP_DAYS
 
-        window_start = target_date - timedelta(days=FWI_RUNUP_DAYS + 40)
+        window_start = score_start - timedelta(days=FWI_RUNUP_DAYS)
         cur.execute(
-            "SELECT filename FROM fwi_files "
-            "WHERE fdate IS NOT NULL AND fdate <= %s AND fdate >= %s ORDER BY fdate",
-            (target_date, window_start),
+            "SELECT DISTINCT ON (fdate) fdate, filename, nbytes FROM fwi_files "
+            "WHERE fdate BETWEEN %s AND %s ORDER BY fdate, id DESC",
+            (window_start, target_date),
         )
-        names = [r[0] for r in cur.fetchall()]
-        if not names:
+        rows = cur.fetchall()
+        if not rows:
             cur.execute("SELECT min(fdate), max(fdate) FROM fwi_files")
             lo, hi = cur.fetchone()
             raise RuntimeError(
                 f"No FWI files in the database for date <= {target_date} "
                 f"(available range: {lo} .. {hi}). Seed with scripts/seed_blobs.py."
             )
+        by_date = {row[0]: (row[1], row[2]) for row in rows}
+        expected_dates = {
+            window_start + timedelta(days=offset)
+            for offset in range((target_date - window_start).days + 1)
+        }
+        missing_dates = sorted(expected_dates - set(by_date))
+        if missing_dates:
+            preview = ", ".join(day.isoformat() for day in missing_dates[:10])
+            suffix = "..." if len(missing_dates) > 10 else ""
+            raise RuntimeError(
+                f"FWI run-up window is incomplete ({len(missing_dates)} missing day(s): "
+                f"{preview}{suffix})"
+            )
+        names = [by_date[day][0] for day in sorted(expected_dates)]
         # Fetch (heavy) blobs only for files not already in the cache.
-        missing = [n for n in names if not (_FWI_CACHE_DIR / n).exists()]
-        if missing:
-            cur.execute("SELECT filename, data FROM fwi_files WHERE filename = ANY(%s)", (missing,))
-            for filename, data in cur.fetchall():
-                tmp = _FWI_CACHE_DIR / f"{filename}.part"
-                tmp.write_bytes(bytes(data))
-                tmp.replace(_FWI_CACHE_DIR / filename)  # atomic publish
+        missing = []
+        for day in sorted(expected_dates):
+            filename, nbytes = by_date[day]
+            cached = _FWI_CACHE_DIR / filename
+            if not cached.is_file() or cached.stat().st_size != nbytes:
+                cached.unlink(missing_ok=True)
+                missing.append(filename)
+        for i, filename in enumerate(missing, start=1):
+            print(f"[reconstruct] FWI cache fill {i}/{len(missing)}: {filename}", flush=True)
+            cur.execute(
+                "SELECT data, nbytes FROM fwi_files WHERE filename = %s",
+                (filename,),
+            )
+            row = cur.fetchone()
+            if row is None or row[0] is None or len(row[0]) != row[1]:
+                raise RuntimeError(f"FWI database blob is incomplete: {filename}")
+            tmp = _FWI_CACHE_DIR / f"{filename}.part"
+            tmp.write_bytes(bytes(row[0]))
+            tmp.replace(_FWI_CACHE_DIR / filename)  # atomic publish
+            del row
 
     copied: list[Path] = []
     for n in names:
@@ -328,29 +577,127 @@ def reconstruct_fwi(target_date, dest_fwi_dir: str | Path) -> list[Path]:
 
 
 def available_fwi_dates_db() -> list[date]:
-    """All FWI dates available in the `fwi_files` blob table (sorted ascending).
+    """All FWI dates available in the blob table (sorted ascending).
 
     DB-backed replacement for FR.FWI.available_fwi_dates, which reads INPUT/FWI.
     """
     with _pg_connect() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT DISTINCT fdate FROM fwi_files WHERE fdate IS NOT NULL ORDER BY fdate"
+            "SELECT DISTINCT fdate FROM fwi_files "
+            "WHERE fdate IS NOT NULL ORDER BY fdate"
         )
         return [r[0] for r in cur.fetchall()]
 
 
-def highest_temperature_fwi_dates_db() -> list[date]:
-    """Warmest FWI day per calendar year, from `fwi_files.peak_temp` (sorted asc).
-
-    DB-backed replacement for FR.FWI.highest_temperature_fwi_dates. Relies on the
-    peak_temp recorded by scripts/seed_blobs.py at seed time.
-    """
+def available_dynamic_fwi_dates_db() -> list[date]:
+    """Dates satisfying FWI run-up plus fresh LST and common Sentinel inputs."""
+    sentinel_age = int(os.environ.get("STORCITO_MAX_SENTINEL_AGE_DAYS", "14"))
+    lst_age = int(os.environ.get("STORCITO_MAX_LST_AGE_DAYS", "3"))
+    if sentinel_age < 0 or lst_age < 0:
+        raise ValueError("dynamic source age limits must be non-negative")
     with _pg_connect() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT DISTINCT ON (EXTRACT(YEAR FROM fdate)) fdate "
-            "FROM fwi_files "
-            "WHERE fdate IS NOT NULL AND peak_temp IS NOT NULL "
-            "ORDER BY EXTRACT(YEAR FROM fdate), peak_temp DESC"
+            """WITH dates AS (
+                   SELECT DISTINCT fdate FROM fwi_files WHERE fdate IS NOT NULL
+               ), eligible AS (
+                   SELECT d.fdate FROM dates d
+                   WHERE (SELECT count(DISTINCT f.fdate) FROM fwi_files f
+                          WHERE f.fdate BETWEEN d.fdate - 60 AND d.fdate) = 61
+               )
+               SELECT e.fdate FROM eligible e
+               WHERE EXISTS (
+                   SELECT 1 FROM lst_ts l
+                   WHERE l.capture_date BETWEEN e.fdate - %s AND e.fdate
+               )
+                 AND EXISTS (
+                   SELECT 1 FROM sentinel_b4_ts b4
+                   WHERE b4.capture_date BETWEEN e.fdate - %s AND e.fdate
+                     AND EXISTS (SELECT 1 FROM sentinel_b8_ts b8
+                                 WHERE b8.capture_date = b4.capture_date)
+                     AND EXISTS (SELECT 1 FROM sentinel_b11_ts b11
+                                 WHERE b11.capture_date = b4.capture_date)
+               )
+               ORDER BY e.fdate""",
+            (lst_age, sentinel_age),
+        )
+        return [row[0] for row in cur.fetchall()]
+
+
+FIRE_SEASON_START_MONTH = 5
+FIRE_SEASON_END_MONTH = 10
+
+
+def select_hottest_fwi_date(
+    observations: Iterable[tuple[date, float]], year: int
+) -> date:
+    """Select the hottest May-October observation for ``year``.
+
+    The earliest date wins an exact temperature tie so selection is stable
+    regardless of database or filesystem ordering.
+    """
+    candidates = [
+        (day, float(peak_temp))
+        for day, peak_temp in observations
+        if day.year == year
+        and FIRE_SEASON_START_MONTH <= day.month <= FIRE_SEASON_END_MONTH
+    ]
+    if not candidates:
+        raise LookupError(
+            f"No eligible FWI day is available from May 1 through October 31, {year}."
+        )
+    return min(candidates, key=lambda item: (-item[1], item[0]))[0]
+
+
+def highest_temperature_fwi_date_for_year(year: int) -> date:
+    """Return the hottest eligible May-October FWI date for one year."""
+    try:
+        season_start = date(int(year), FIRE_SEASON_START_MONTH, 1)
+        season_end = date(int(year), FIRE_SEASON_END_MONTH, 31)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("static assessment year must be a valid calendar year") from exc
+
+    with _pg_connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """WITH eligible AS (
+                   SELECT d.fdate, max(d.peak_temp) AS peak_temp
+                   FROM fwi_files d
+                   WHERE d.fdate BETWEEN %s AND %s
+                     AND d.peak_temp IS NOT NULL
+                     AND (SELECT count(DISTINCT f.fdate) FROM fwi_files f
+                          WHERE f.fdate BETWEEN d.fdate - 60 AND d.fdate) = 61
+                   GROUP BY d.fdate
+               )
+               SELECT fdate
+               FROM eligible
+               ORDER BY peak_temp DESC, fdate ASC
+               LIMIT 1""",
+            (season_start, season_end),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise LookupError(
+            f"No eligible FWI day is available from May 1 through October 31, {year}."
+        )
+    return row[0]
+
+
+def highest_temperature_fwi_dates_db() -> list[date]:
+    """Hottest eligible May-October FWI day per calendar year (sorted)."""
+    with _pg_connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """WITH eligible AS (
+                   SELECT d.fdate, max(d.peak_temp) AS peak_temp
+                   FROM fwi_files d
+                   WHERE d.fdate IS NOT NULL AND d.peak_temp IS NOT NULL
+                     AND EXTRACT(MONTH FROM d.fdate) BETWEEN %s AND %s
+                     AND (SELECT count(DISTINCT f.fdate) FROM fwi_files f
+                          WHERE f.fdate BETWEEN d.fdate - 60 AND d.fdate) = 61
+                   GROUP BY d.fdate
+               )
+               SELECT DISTINCT ON (EXTRACT(YEAR FROM fdate)) fdate
+               FROM eligible
+               ORDER BY EXTRACT(YEAR FROM fdate), peak_temp DESC, fdate ASC""",
+            (FIRE_SEASON_START_MONTH, FIRE_SEASON_END_MONTH),
         )
         return sorted(r[0] for r in cur.fetchall())
 
@@ -389,29 +736,28 @@ def reconstruct_hist(
             cur.execute("SELECT DISTINCT year FROM hist WHERE year IS NOT NULL ORDER BY year")
         years = [r[0] for r in cur.fetchall()]
 
-        cur.execute("SELECT DISTINCT left(filename, 4) FROM hist_scenes")
-        scene_years = sorted({int(r[0]) for r in cur.fetchall() if r[0].isdigit()})
-        if max_year is not None:
-            scene_years = [y for y in scene_years if y <= max_year]
-        missing = [y for y in scene_years if y not in years]
-        if missing:
-            raise RuntimeError(
-                f"hist_scenes has scenes for {missing} but the hist table has no "
-                f"hotspots for those years (available: {years}). Seed them with "
-                + " and ".join(f"`make hist START={y}-05-01 END={y}-10-31`" for y in missing)
-            )
-
         cur.execute("SELECT phase, filename, data FROM hist_scenes ORDER BY phase, filename")
         rows = [
             (phase, filename, data)
             for phase, filename, data in cur.fetchall()
             if target_date is None or filename[:10] <= str(target_date)
         ]
-        years_with = {}
+        year_phase_bands: dict[str, dict[str, set[str]]] = {}
         for phase, filename, _ in rows:
-            years_with.setdefault(filename[:4], set()).add(phase)
-        complete = {y for y, phases in years_with.items()
-                    if {"PRE_FIRE", "POST_FIRE"} <= phases}
+            band = "B8A" if "_B8A_" in filename else "B12" if "_B12_" in filename else ""
+            year_phase_bands.setdefault(filename[:4], {}).setdefault(phase, set()).add(band)
+        complete = {
+            y for y, phases in year_phase_bands.items()
+            if {"B8A", "B12"} <= phases.get("PRE_FIRE", set())
+            and {"B8A", "B12"} <= phases.get("POST_FIRE", set())
+        }
+        missing = sorted(int(y) for y in complete if y.isdigit() and int(y) not in years)
+        if missing:
+            raise RuntimeError(
+                f"hist_scenes has complete scenes for {missing} but hist has no "
+                f"hotspots for those years (available: {years}). Seed them with "
+                + " and ".join(f"`make hist START={y}-05-01 END={y}-10-31`" for y in missing)
+            )
         for phase, filename, data in rows:
             if filename[:4] not in complete:
                 continue
@@ -432,7 +778,12 @@ def reconstruct_hist(
         )
         produced.append(str(dest))
 
-    return {"years": years, "perimeters": produced, "scenes": copied_scenes}
+    return {
+        "years": years,
+        "complete_scene_years": sorted(int(y) for y in complete if y.isdigit()),
+        "perimeters": produced,
+        "scenes": copied_scenes,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -450,6 +801,163 @@ ENGINE_RASTER_SRS = "EPSG:32629"
 
 ENGINE_VECTOR_SRS = "EPSG:32629"
 
+TEMPORAL_TS_TABLES = {
+    "lst": "lst_ts",
+    "sentinel_b4": "sentinel_b4_ts",
+    "sentinel_b8": "sentinel_b8_ts",
+    "sentinel_b11": "sentinel_b11_ts",
+}
+
+
+def _raster_resolution_m(path: str | Path) -> float | None:
+    """Approximate native grid spacing in metres for provenance metadata."""
+    try:
+        import rasterio
+        from rasterio.warp import calculate_default_transform
+
+        with rasterio.open(path) as src:
+            if src.crs is None:
+                return None
+            if src.crs.is_projected:
+                return float(max(abs(src.transform.a), abs(src.transform.e)))
+            transform, _width, _height = calculate_default_transform(
+                src.crs, ENGINE_RASTER_SRS, src.width, src.height, *src.bounds
+            )
+            return float(max(abs(transform.a), abs(transform.e)))
+    except Exception:
+        return None
+
+
+def _raster_has_values_in_range(path: str | Path, lower: float, upper: float) -> bool:
+    import numpy as np
+    import rasterio
+
+    with rasterio.open(path) as src:
+        for _index, window in src.block_windows(1):
+            values = src.read(1, window=window, masked=True).compressed()
+            if values.size and np.any(np.isfinite(values) & (values > lower) & (values < upper)):
+                return True
+    return False
+
+
+def _raster_source_dates(path: str | Path, fallback: str) -> list[str]:
+    try:
+        import rasterio
+
+        with rasterio.open(path) as src:
+            raw = src.tags().get("STORCITO_SOURCE_DATES", "")
+        dates = [value.strip() for value in raw.split(",") if value.strip()]
+        return dates or [str(fallback)]
+    except Exception:
+        return [str(fallback)]
+
+
+def reconstruct_temporal_inputs(
+    dest_input_dir: str | Path,
+    *,
+    target_date,
+    include_lst: bool,
+    include_satellite: bool,
+    clip_geom: BaseGeometry | None = None,
+    clip_geom_crs: str = "EPSG:4326",
+) -> dict[str, object]:
+    """Reconstruct only date-dependent layers as of one assessment day.
+
+    LST is an optional enhancer: if no physically valid capture exists inside
+    the freshness window, it is omitted and the combiner reports/renormalizes
+    the missing weight. Sentinel vegetation layers remain required for the
+    dynamic vegetation topic and therefore fail closed when unavailable.
+    """
+    dest_input_dir = Path(dest_input_dir)
+    produced: dict[str, str] = {}
+    layer_dates: dict[str, str] = {}
+    layer_date_details: dict[str, dict[str, object]] = {}
+    skipped: dict[str, str] = {}
+    resolutions: dict[str, float] = {}
+
+    if include_lst:
+        lst_age = int(os.environ.get("STORCITO_MAX_LST_AGE_DAYS", "3"))
+        if lst_age < 0:
+            raise ValueError("STORCITO_MAX_LST_AGE_DAYS must be non-negative")
+        lst_path = dest_input_dir / "LST" / "LST.tiff"
+        try:
+            print(f"[reconstruct] temporal {target_date}: exporting lst", flush=True)
+            _, capture = export_ts_raster(
+                TEMPORAL_TS_TABLES["lst"],
+                "lst",
+                target_date,
+                lst_path,
+                clip_geom=clip_geom,
+                clip_geom_crs=clip_geom_crs,
+                target_srs=ENGINE_RASTER_SRS,
+                resampling="bilinear",
+                max_age_days=lst_age,
+            )
+            if not _raster_has_values_in_range(lst_path, 220.0, 340.0):
+                raise LookupError("available LST captures contain no valid AOI pixels")
+            produced["LST/LST.tiff"] = str(lst_path)
+            layer_dates["lst"] = capture
+            layer_date_details["lst"] = {
+                "primary": capture,
+                "contributors": _raster_source_dates(lst_path, capture),
+                "selection": "newest valid pixel on or before assessment date",
+            }
+            resolution = _raster_resolution_m(lst_path)
+            if resolution is not None:
+                resolutions["lst"] = resolution
+        except LookupError as exc:
+            lst_path.unlink(missing_ok=True)
+            skipped["lst"] = str(exc)
+            print(
+                f"[reconstruct] temporal {target_date}: LST unavailable; "
+                "FWI-only meteorology will be used",
+                flush=True,
+            )
+
+    if include_satellite:
+        sentinel_age = int(os.environ.get("STORCITO_MAX_SENTINEL_AGE_DAYS", "14"))
+        if sentinel_age < 0:
+            raise ValueError("STORCITO_MAX_SENTINEL_AGE_DAYS must be non-negative")
+        layers = [
+            (name, TEMPORAL_TS_TABLES[name], dest_input_dir / relative)
+            for name, relative in (
+                ("sentinel_b4", "Sentinel/B4.tiff"),
+                ("sentinel_b8", "Sentinel/B8.tiff"),
+                ("sentinel_b11", "Sentinel/B11.tiff"),
+            )
+        ]
+        paths, capture = export_common_ts_rasters(
+            layers,
+            target_date,
+            max_age_days=sentinel_age,
+            clip_geom=clip_geom,
+            clip_geom_crs=clip_geom_crs,
+            target_srs=ENGINE_RASTER_SRS,
+            resampling="bilinear",
+        )
+        for name, _table, path in layers:
+            relative = str(path.relative_to(dest_input_dir))
+            produced[relative] = str(paths[name])
+            layer_dates[name] = capture
+            layer_date_details[name] = {
+                "primary": capture,
+                "contributors": [capture],
+                "selection": "synchronized common Sentinel capture",
+            }
+            resolution = _raster_resolution_m(paths[name])
+            if resolution is not None:
+                resolutions[name] = resolution
+
+    return {
+        "input_dir": str(dest_input_dir),
+        "produced": produced,
+        "layer_dates": layer_dates,
+        "layer_date_details": layer_date_details,
+        "skipped_layers": skipped,
+        "layer_resolutions_m": resolutions,
+        "sentinel_nominal_resolution_m": 20 if include_satellite else None,
+    }
+
 # PostgreSQL lowercases identifiers on import, but the engine modules expect the
 # original shapefile column casing. Re-alias on export (the SELECT must include
 # the geometry column so OGR carries it through).
@@ -460,7 +968,6 @@ _VECTOR_SELECT_SQL: dict[str, str] = {
 
 _COMMON_PLAN: list[tuple[str, str, str]] = [
     (_RASTER, "dtm", "DTM/DTM.tif"),
-    (_RASTER, "mdt", "MDT/DEM_NationalScenario_2013.tif"),
     (_RASTER, "twi", "TWI/TWI.tif"),
     (_RASTER, "lst", "LST/LST.tiff"),
     (_RASTER, "sentinel_b4", "Sentinel/B4.tiff"),
@@ -474,7 +981,11 @@ _COMMON_PLAN: list[tuple[str, str, str]] = [
 ]
 
 _ENGINE_PLANS: dict[str, list[tuple[str, str, str]]] = {
-    "static": _COMMON_PLAN,
+    "static": [
+        item
+        for item in _COMMON_PLAN
+        if item[1] not in {"lst", "sentinel_b4", "sentinel_b8", "sentinel_b11"}
+    ],
     "dynamic": _COMMON_PLAN,
 }
 
@@ -484,6 +995,12 @@ def reconstruct_inputs(
     *,
     engine: str,
     target_date,
+    start_date=None,
+    include_weather: bool = True,
+    include_history: bool = True,
+    include_terrain: bool = True,
+    include_satellite: bool = True,
+    include_lst: bool | None = None,
     clip_geom: BaseGeometry | None = None,
     clip_geom_crs: str = "EPSG:4326",
 ) -> dict[str, object]:
@@ -497,32 +1014,40 @@ def reconstruct_inputs(
 
     dest_input_dir = Path(dest_input_dir)
     produced: dict[str, str] = {}
+    include_lst = (include_weather and engine == "dynamic") if include_lst is None else include_lst
 
+    fwi_files: list[Path] = []
+    if include_weather:
+        print("[reconstruct] copying FWI weather files (run-up window) from DB blobs", flush=True)
+        fwi_files = reconstruct_fwi(
+            target_date, dest_input_dir / "FWI", score_start=start_date
+        )
+        print(f"[reconstruct] FWI: {len(fwi_files)} day file(s) materialised", flush=True)
 
-    print("[reconstruct] copying FWI weather files (run-up window) from DB blobs", flush=True)
-    fwi_files = reconstruct_fwi(target_date, dest_input_dir / "FWI")
-    print(f"[reconstruct] FWI: {len(fwi_files)} day file(s) materialised", flush=True)
+    temporal = reconstruct_temporal_inputs(
+        dest_input_dir,
+        target_date=target_date,
+        include_lst=bool(include_lst),
+        include_satellite=bool(include_satellite and engine == "dynamic"),
+        clip_geom=clip_geom,
+        clip_geom_crs=clip_geom_crs,
+    )
+    produced.update(temporal["produced"])
 
-    # Layers with a *_ts time series export the raster matching the run's
-    # assessment date, so historical runs never mix in newer imagery.
-    _TS_TABLES = {
-        "lst": "lst_ts",
-        "sentinel_b4": "sentinel_b4_ts",
-        "sentinel_b8": "sentinel_b8_ts",
-        "sentinel_b11": "sentinel_b11_ts",
-    }
-    ts_dates_used: dict[str, str] = {}
-    _plan = _ENGINE_PLANS[engine]
+    temporal_tables = set(TEMPORAL_TS_TABLES)
+    _plan = [
+        item
+        for item in _ENGINE_PLANS[engine]
+        if item[1] not in temporal_tables and (include_terrain or item[1] != "twi")
+    ]
     for _n, (kind, table, rel) in enumerate(_plan, start=1):
         print(f"[reconstruct] {_n:>2}/{len(_plan)} exporting {table} -> {rel}", flush=True)
         dest = dest_input_dir / rel
-        if table in _TS_TABLES:
-            _, ts_dates_used[table] = export_ts_raster(
-                _TS_TABLES[table], table, target_date, dest, clip_geom=clip_geom,
-                clip_geom_crs=clip_geom_crs, target_srs=ENGINE_RASTER_SRS)
-        elif kind == _RASTER:
+        if kind == _RASTER:
+            resampling = "near" if table in {"fuels"} else "bilinear"
             export_raster_table(table, dest, clip_geom=clip_geom,
-                                clip_geom_crs=clip_geom_crs, target_srs=ENGINE_RASTER_SRS)
+                                clip_geom_crs=clip_geom_crs, target_srs=ENGINE_RASTER_SRS,
+                                resampling=resampling)
         else:
             export_vector_table(table, dest, clip_geom=clip_geom, clip_geom_crs=clip_geom_crs,
                                 t_srs=ENGINE_VECTOR_SRS, select_sql=_VECTOR_SELECT_SQL.get(table))
@@ -530,16 +1055,21 @@ def reconstruct_inputs(
 
     # Historical fire (both engines): yearly perimeters from the `hist` table
     # plus the on-disk PRE_FIRE / POST_FIRE Sentinel scenes.
-    print("[reconstruct] exporting fire history (hotspot shapefiles + dNBR scenes)", flush=True)
-    hist_info = reconstruct_hist(dest_input_dir / "HIST",
-                                 clip_geom=clip_geom, clip_geom_crs=clip_geom_crs,
-                                 target_date=target_date)
+    hist_info: dict[str, object] = {"years": [], "complete_scene_years": []}
+    if include_history:
+        print("[reconstruct] exporting fire history (hotspot shapefiles + dNBR scenes)", flush=True)
+        hist_info = reconstruct_hist(dest_input_dir / "HIST",
+                                     clip_geom=clip_geom, clip_geom_crs=clip_geom_crs,
+                                     target_date=target_date)
 
     return {
         "input_dir": str(dest_input_dir),
         "produced": produced,
         "fwi_files": [str(p) for p in fwi_files],
         "hist": hist_info,
-        "layer_dates": ts_dates_used,
-        "skipped_layers": [],
+        "layer_dates": temporal["layer_dates"],
+        "layer_date_details": temporal["layer_date_details"],
+        "skipped_layers": temporal["skipped_layers"],
+        "layer_resolutions_m": temporal["layer_resolutions_m"],
+        "sentinel_nominal_resolution_m": temporal["sentinel_nominal_resolution_m"],
     }

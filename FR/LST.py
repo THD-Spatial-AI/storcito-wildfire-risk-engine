@@ -20,6 +20,18 @@ def _env_breaks(name):
     return None
 
 
+def _coerce_breaks(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        parts = [part.strip() for part in value.replace(";", ",").split(",")]
+    else:
+        parts = list(value)
+    if len(parts) != 4:
+        raise ValueError("LST breakpoints must contain exactly four values")
+    return tuple(float(part) for part in parts)
+
+
 def Lst(input_lst, output_lst=None, output_lst_risk=None, show_plots=True):
     print('Executing LST layer...')
 
@@ -135,7 +147,7 @@ def Lst(input_lst, output_lst=None, output_lst_risk=None, show_plots=True):
     print('LST Layer completed')
 
 
-def lst_risk(input_lst, output_risk):
+def lst_risk(input_lst, output_risk, *, breaks=None):
     """Non-interactive LST risk layer (Kelvin filter + percentile classes, as the original)."""
     with rasterio.open(input_lst) as src:
         lst = src.read(1).astype("float32")
@@ -148,7 +160,7 @@ def lst_risk(input_lst, output_risk):
     if not np.any(valid):
         raise ValueError("The LST layer does not contain valid values after filtering.")
     lst_clean = np.where(valid, lst, np.nan)
-    fixed = _env_breaks("FFRM_LST_BREAKS")
+    fixed = _coerce_breaks(breaks) or _env_breaks("FFRM_LST_BREAKS")
     p20, p40, p60, p80 = fixed if fixed else np.percentile(lst_clean[valid], [20, 40, 60, 80])
     r = np.zeros_like(lst, dtype="int32")
     r[(lst_clean <= p20) & valid] = 1

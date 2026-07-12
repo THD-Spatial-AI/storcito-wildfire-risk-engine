@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException
 
 from FR.db_reconstruct import available_fwi_dates_db, highest_temperature_fwi_dates_db
 
+from app.config import MODEL_VERSION
 from app.services.coverage import available_data_coverage_geojson
 
 router = APIRouter()
@@ -29,3 +30,23 @@ def available_data_coverage():
         return available_data_coverage_geojson()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+@router.get("/available-precomputed-dates")
+def available_precomputed_dates():
+    """Dates whose whole-region dynamic map has been precomputed (nightly job)."""
+    try:
+        from FR.db_reconstruct import _pg_connect
+
+        with _pg_connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('public.regional_runs')")
+            if cur.fetchone()[0] is None:
+                return {"dates": []}
+            cur.execute(
+                "SELECT target_date FROM regional_runs "
+                "WHERE engine = 'dynamic' AND status = 'done' AND model_version = %s "
+                "AND publication_id IS NOT NULL ORDER BY target_date",
+                (MODEL_VERSION,),
+            )
+            return {"dates": [r[0].isoformat() for r in cur.fetchall()]}
+    except Exception:
+        return {"dates": []}

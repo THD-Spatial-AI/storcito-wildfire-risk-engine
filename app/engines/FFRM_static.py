@@ -1,10 +1,6 @@
 import os
 import shutil
 from pathlib import Path
-
-# Force geopandas' fiona engine: pyogrio's GDAL_DATA probe fails when this script
-# runs as the API's engine subprocess (it works standalone), so reading the
-# reconstructed shapefiles via the default pyogrio engine errors. fiona is robust.
 import geopandas as _gpd
 _gpd.options.io_engine = "fiona"
 
@@ -15,13 +11,13 @@ matplotlib.use("Agg")
 # Importamos tus módulos personalizados
 import FR.FMT_eu as Fmt
 import FR.MDT as Mdt
+import FR.TWI as Twi
 import FR.IUF as Wui
 import FR.infra as Infra
-import FR.NDVI as Ndvi
 import FR.FHIST as Fhist
 import FR.FWI as Fwi
 import FR.cropped as Cropped
-from FR.combine import _combine_layers
+from app.engines.FFRM_estatic_aoi import ORIGINAL_SPECS, _combine_layers
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -48,9 +44,8 @@ base_dir = os.environ.get("FFRM_BASE_DIR", os.environ.get("STORCITO_DATA_DIR", s
 # Modelo digital del terreno
 input_mdt = os.path.join(base_dir, 'INPUT', 'DTM', 'DTM.tif')
 
-# Sentinel para NDVI
-input_b4_ndvi = os.path.join(base_dir, 'INPUT', 'Sentinel', 'B4.tiff')
-input_b8_ndvi = os.path.join(base_dir, 'INPUT', 'Sentinel', 'B8.tiff')
+# Topographic wetness
+input_twi = os.path.join(base_dir, 'INPUT', 'TWI', 'TWI.tif')
 
 # Histórico
 input_hist_folder = os.path.join(base_dir, 'INPUT', 'HIST')
@@ -85,7 +80,6 @@ output_mdt = os.path.join(output_folder_re, 'MDT.tif')
 output_slope = os.path.join(output_folder_re, 'SLOPE.tif')
 output_aspect = os.path.join(output_folder_re, 'ASPECT.tif')
 
-output_ndvi = os.path.join(output_folder_re, 'ndvi.tif')
 output_fhist = os.path.join(output_folder_re, 'HIST.tif')
 output_fmt = os.path.join(output_folder_re, 'FMT.tif')
 output_infra = os.path.join(output_folder_re, 'infra_layer.tif')
@@ -96,10 +90,9 @@ output_fwi = os.path.join(output_folder_re, 'FWI.tif')
 # 1.4. CONTROL DE EJECUCIÓN
 # ---------------------------
 # Pon True o False según quieras regenerar cada capa.
-# Defaults are overridable via FFRM_RUN_* env vars (api.py disables layers with
-# no DB data, e.g. FFRM_RUN_FHIST=0 since there is no historical-fire dataset).
+# Defaults overridable via FFRM_RUN_* env vars.
 run_mdt = _env_flag("FFRM_RUN_MDT", True)
-run_ndvi = _env_flag("FFRM_RUN_NDVI", True)
+run_twi = _env_flag("FFRM_RUN_TWI", True)
 run_fhist = _env_flag("FFRM_RUN_FHIST", True)
 run_fmt = _env_flag("FFRM_RUN_FMT", True)
 run_infra = _env_flag("FFRM_RUN_INFRA", True)
@@ -132,16 +125,9 @@ if run_mdt:
         show_plots=False
     )
 
-if run_ndvi:
-    _step("vegetation greenness (NDVI) risk layer")
-    # Requiere versión unificada del módulo NDVI:
-    # Ndvi(input_band4, input_band8, output_ndvi)
-    Ndvi.ndvi(
-        input_b4_ndvi,
-        input_b8_ndvi,
-        output_folder=output_folder_re,
-        export_image=True
-    )
+if run_twi:
+    _step("topographic wetness (TWI) risk layer")
+    Twi.Twi(input_twi, os.path.join(output_folder_re, 'twi.tif'), show_plots=False)
 
 if run_fhist:
     _step("historical fires (FIRMS + dNBR burned areas)")
@@ -188,7 +174,9 @@ if run_fwi:
         input_fwi_folder,
         output_folder=output_folder_re,
         export_image=True,
-        show_plots=False
+        show_plots=False,
+        target_date=os.environ.get("FFRM_FWI_TARGET_DATE") or None,
+        start_date=os.environ.get("FFRM_FWI_START_DATE") or None,
     )
 
 import matplotlib.pyplot as _plt
@@ -207,9 +195,7 @@ Cropped.cropped(output_folder_re, output_folder_cropped, shapefile_for_buffer, b
 # ==========================================
 # 3. COMBINACIÓN DE CAPAS (AHP) -> MAPA FINAL
 # ==========================================
-# The alignment / gap-filling / AHP weighting / classification logic lives in
-# FR.combine so it can run with only the layers that were actually generated
-# (layers without DB data are disabled via the run_* flags above).
+# Use the same audited static specification as the AOI workflow.
 _step("AHP weighting -> final risk map")
 
 from pathlib import Path
@@ -222,11 +208,9 @@ reference_path = _cropped('MDT_RISK_MAP_cropped.tif')
 raw_layer_paths: dict[str, Path] = {}
 active_top_levels = {"veg", "ai"}
 
-# Vegetation (always on for static): fuel model + NDVI.
+# Vegetation (canonical static model: fuel model).
 if run_fmt:
     raw_layer_paths["ftm"] = Path(_cropped('FMT_cropped.tif'))
-if run_ndvi:
-    raw_layer_paths["ndvi"] = Path(_cropped('estatic_(NDVI_Risk_Map)_cropped.tif'))
 
 # Anthropic influence: infrastructure + WUI.
 if run_infra:
@@ -240,12 +224,16 @@ if run_mdt:
     raw_layer_paths["mdt"] = Path(reference_path)
     raw_layer_paths["slope"] = Path(_cropped('SLOPE_RISK_MAP_cropped.tif'))
     raw_layer_paths["aspect"] = Path(_cropped('ASPECT_RISK_MAP_cropped.tif'))
+    if not run_twi:
+        raise RuntimeError("The canonical static topography topic requires TWI.")
+    raw_layer_paths["twi"] = Path(_cropped('twi_risk_map_cropped.tif'))
 
 # Meteorology (FWI).
 if run_fwi:
     active_top_levels.add("meteo")
     raw_layer_paths["meteo"] = Path(_cropped('FWI_Risk_Map_cropped.tif'))
 
+export_only = {}
 if run_fhist:
     fhist_candidates = sorted(
         Path(output_folder_cropped).glob('Fire_History_(Risk_Map)_*_cropped.tif')
@@ -254,8 +242,7 @@ if run_fhist:
         raise FileNotFoundError(
             f"No Fire_History_(Risk_Map)_*_cropped.tif in {output_folder_cropped}"
         )
-    active_top_levels.add("fhist")
-    raw_layer_paths["fhist"] = fhist_candidates[-1]
+    export_only["fhist"] = fhist_candidates[-1]
 
 layers_dir = Path(output_base) / "layers"
 fr_final = Path(output_base) / "forest_fire_risk_map.tif"
@@ -266,7 +253,9 @@ outputs = _combine_layers(
     layers_dir,
     fr_final,
     Path(output_base) / "forest_fire_risk_map.png",
-    active_top_levels=active_top_levels,
+    spec=ORIGINAL_SPECS["static"],
+    active_topics=active_top_levels,
+    export_only=export_only,
 )
 
 print(f"Mapa final guardado exitosamente en:\n '{outputs['final_map']}'")

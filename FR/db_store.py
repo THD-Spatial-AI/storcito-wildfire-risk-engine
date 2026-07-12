@@ -1,26 +1,3 @@
-"""Persist finished simulation result rasters back into PostGIS.
-
-The risk engines write their result maps (the classified ``final_map`` and the
-continuous ``continuous_map``) as GeoTIFFs on disk. This module loads those
-finished products into a single shared PostGIS raster table so downstream
-services can query results by job / session / engine / date instead of fetching
-files.
-
-Why this approach (and not ``raster2pgsql``): the ``storcito`` runtime image
-ships GDAL and ``psycopg2`` but **no** ``raster2pgsql`` / ``psql`` -- those live
-in the separate ``geotools`` image used for the one-off bulk load. GDAL's own
-PostGISRaster driver cannot import a GeoTIFF (``CreateCopy`` only works
-raster-to-raster). The DB, however, exposes ``ST_FromGDALRaster``: each result
-GeoTIFF is streamed to the server as a ``bytea`` and turned into a raster
-server-side, which also lets us store arbitrary metadata columns alongside it.
-
-PostGIS gates GDAL formats behind ``postgis.gdal_enabled_drivers`` (default
-``DISABLE_ALL``), so the driver is enabled per session before inserting.
-
-The whole row is stored as a single (untiled) raster. Result maps are clipped to
-the request AOI so this is fine in practice; very large whole-region maps could
-be tiled later if needed.
-"""
 from __future__ import annotations
 
 import os
@@ -43,7 +20,7 @@ if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", RESULTS_TABLE):
 _GDAL_DRIVERS = os.environ.get("STORCITO_GDAL_DRIVERS", "GTiff").strip()
 
 # Result keys produced by both the engine jobs and the AOI combine step.
-DEFAULT_MAP_KEYS = ("final_map", "continuous_map")
+DEFAULT_MAP_KEYS = ("final_map", "continuous_map", "data_coverage")
 
 _CREATE_SQL = f"""
 CREATE TABLE IF NOT EXISTS {RESULTS_TABLE} (
@@ -52,6 +29,8 @@ CREATE TABLE IF NOT EXISTS {RESULTS_TABLE} (
     session_id       text,
     user_id          text,
     model_id         text,
+    publication_id   text,
+    model_version    text,
     engine           text,
     calculation_mode text,
     request_type     text,
@@ -63,18 +42,23 @@ CREATE TABLE IF NOT EXISTS {RESULTS_TABLE} (
     created_at       timestamptz NOT NULL DEFAULT now(),
     rast             raster
 );
+ALTER TABLE {RESULTS_TABLE} ADD COLUMN IF NOT EXISTS publication_id text;
+ALTER TABLE {RESULTS_TABLE} ADD COLUMN IF NOT EXISTS model_version text;
 CREATE INDEX IF NOT EXISTS {RESULTS_TABLE}_job_id_idx     ON {RESULTS_TABLE} (job_id);
 CREATE INDEX IF NOT EXISTS {RESULTS_TABLE}_session_id_idx ON {RESULTS_TABLE} (session_id);
 CREATE INDEX IF NOT EXISTS {RESULTS_TABLE}_target_date_idx ON {RESULTS_TABLE} (target_date);
+CREATE INDEX IF NOT EXISTS {RESULTS_TABLE}_publication_idx ON {RESULTS_TABLE} (publication_id);
 CREATE INDEX IF NOT EXISTS {RESULTS_TABLE}_aoi_gix        ON {RESULTS_TABLE} USING gist (aoi);
 """
 
 _INSERT_SQL = f"""
 INSERT INTO {RESULTS_TABLE}
-    (job_id, session_id, user_id, model_id, engine, calculation_mode,
+    (job_id, session_id, user_id, model_id, publication_id, model_version,
+     engine, calculation_mode,
      request_type, map_kind, target_date, source_path, metadata, aoi, rast)
 VALUES
-    (%(job_id)s, %(session_id)s, %(user_id)s, %(model_id)s, %(engine)s,
+    (%(job_id)s, %(session_id)s, %(user_id)s, %(model_id)s,
+     %(publication_id)s, %(model_version)s, %(engine)s,
      %(calculation_mode)s, %(request_type)s, %(map_kind)s, %(target_date)s,
      %(source_path)s, %(metadata)s,
      CASE WHEN %(aoi)s IS NULL THEN NULL
@@ -89,7 +73,7 @@ def _dsn() -> str:
     url = os.environ.get("DATABASE_URL", "").strip()
     if url:
         return url
-    return " ".join(f"{k}={v}" for k, v in _pg_params().items())
+    return psycopg2.extensions.make_dsn(**_pg_params())
 
 
 def store_result_maps(
@@ -111,22 +95,28 @@ def store_result_maps(
     problem never fails an otherwise-successful simulation.
     """
     to_store: list[tuple[str, Path]] = []
+    missing: list[str] = []
     for key in map_keys:
         raw = outputs.get(key)
         if not isinstance(raw, str) or not raw:
+            missing.append(key)
             continue
         path = Path(raw)
         if path.is_file():
             to_store.append((key, path))
+        else:
+            missing.append(key)
 
-    if not to_store:
-        return {"table": RESULTS_TABLE, "stored": [], "note": "no result maps found on disk"}
+    if missing:
+        raise FileNotFoundError(f"required result maps missing: {', '.join(missing)}")
 
     common = {
         "job_id": metadata.get("job_id"),
         "session_id": metadata.get("session_id"),
         "user_id": metadata.get("user_id"),
         "model_id": metadata.get("model_id"),
+        "publication_id": metadata.get("publication_id"),
+        "model_version": metadata.get("model_version"),
         "engine": metadata.get("engine"),
         "calculation_mode": metadata.get("calculation_mode"),
         "request_type": metadata.get("request_type"),

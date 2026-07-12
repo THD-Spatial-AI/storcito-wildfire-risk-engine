@@ -97,21 +97,16 @@ sentinel:
 # Fetch CLC+ land cover
 clc: YEAR ?= 2023
 clc:
-	@$(ENV_RUN) python3 scripts/fetch_sources.py clc --dataset clcplus-$(YEAR)
-	@cd data/OUTPUT/source_data/clc/clcplus-$(YEAR)/raster && \
-	  zip=$$(ls -t *.zip | head -1) && rm -rf extracted tiles && \
-	  unzip -o -q $$zip -d extracted && mkdir -p tiles && \
-	  for z in extracted/Results/*.zip; do unzip -o -q "$$z" "*.tif" -d tiles; done
+	@$(ENV_RUN) python3 scripts/fetch_sources.py clc --dataset clcplus-$(YEAR) --gcs EPSG:3035
 	@$(COMPOSE) exec -T geotools python3 /data/scripts/load_localhost.py load-clcplus \
-	  --dir /data/data/OUTPUT/source_data/clc/clcplus-$(YEAR)/raster/tiles --table clcplus_$(YEAR)
+	  --source-dir /data/data/OUTPUT/source_data/clc/clcplus-$(YEAR)/raster \
+	  --dataset clcplus-$(YEAR) --table clcplus_$(YEAR)
 
 iuf:
 	@$(ENV_RUN) python3 scripts/fetch_sources.py clc --dataset clc2018 --format vector \
 	  --bbox=-10.293,41.348,-5.749,44.636
-	@cd data/OUTPUT/source_data/clc/clc2018/vector && \
-	  zip=$$(ls -t *.zip | head -1) && rm -rf extracted && unzip -o -q $$zip -d extracted
-	@$(COMPOSE) exec -T geotools bash -c 'gdb=$$(find /data/data/OUTPUT/source_data/clc/clc2018/vector/extracted -name "*.gdb" -type d | head -1) && \
-	  python3 /data/scripts/load_localhost.py load-iuf --path $$gdb'
+	@$(COMPOSE) exec -T geotools python3 /data/scripts/load_localhost.py load-iuf \
+	  --source-dir /data/data/OUTPUT/source_data/clc/clc2018/vector
 
 # Fetch MDT elevation
 dtm: RES ?= 25
@@ -129,7 +124,8 @@ lst:
 	  python3 scripts/fetch_sources.py lst $(if $(DATE),--date $(DATE)); \
 	fi
 	@$(COMPOSE) exec -T geotools python3 /data/scripts/load_localhost.py load-lst \
-	  --dir /data/data/OUTPUT/source_data/lst
+	  --dir /data/data/OUTPUT/source_data/lst \
+	  $(if $(DATE),--date $(DATE)) $(if $(START),--start $(START)) $(if $(END),--end $(END))
 
 # Fetch fuel polygons
 fuels:
@@ -137,8 +133,7 @@ fuels:
 	@$(COMPOSE) exec -T geotools python3 /data/scripts/load_localhost.py load-fuels \
 	  --geojson /data/data/OUTPUT/source_data/fuels/mfe_fuels.geojson
 
-# Build the mdt reference grid (30 m, EPSG:32629) from the IGN tiles staged
-# by `make dtm` - run that first.
+# Build mdt reference grid (30m). Run make dtm first.
 mdt:
 	@$(COMPOSE) exec -T geotools python3 /data/scripts/load_localhost.py load-mdt
 

@@ -5,6 +5,7 @@ x-storcito-env: &storcito-env
   TERM: xterm-256color
   PYTHONPATH: /app:/app/FR
   PYTHONUNBUFFERED: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
   GDAL_DATA: /opt/conda/envs/storcito/share/gdal
   GDAL_DRIVER_PATH: /opt/conda/envs/storcito/lib/gdalplugins
   CPL_ZIP_ENCODING: UTF-8
@@ -15,8 +16,10 @@ x-storcito-env: &storcito-env
   PGPORT: "5432"
   PGDATABASE: ${POSTGRES_DB:-gis}
   PGUSER: ${POSTGRES_USER:-gis}
-  PGPASSWORD: ${POSTGRES_PASSWORD:-gis}
-  DATABASE_URL: postgresql://${POSTGRES_USER:-gis}:${POSTGRES_PASSWORD:-gis}@postgis:5432/${POSTGRES_DB:-gis}
+  PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+  STORCITO_MODEL_VERSION: ${STORCITO_MODEL_VERSION:-2026-07-12.1}
+  STORCITO_MAX_SENTINEL_AGE_DAYS: ${STORCITO_MAX_SENTINEL_AGE_DAYS:-14}
+  STORCITO_MAX_LST_AGE_DAYS: ${STORCITO_MAX_LST_AGE_DAYS:-3}
   PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
   SH_CLIENT_ID: ${SH_CLIENT_ID:-}
   SH_CLIENT_SECRET: ${SH_CLIENT_SECRET:-}
@@ -31,7 +34,6 @@ x-storcito-env: &storcito-env
 x-storcito-api: &storcito-api
   build: .
   image: storcito:latest
-  user: root
   stdin_open: true
   tty: true
   volumes:
@@ -73,9 +75,9 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-gis}
       POSTGRES_USER: ${POSTGRES_USER:-gis}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gis}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
     ports:
-      - "${STORCITO_POSTGRES_PORT:-5435}:5432"
+      - "127.0.0.1:${STORCITO_POSTGRES_PORT:-5435}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       # Runs once on first init (empty data dir) to enable extensions.
@@ -100,7 +102,7 @@ services:
       PGPORT: "5432"
       PGDATABASE: ${POSTGRES_DB:-gis}
       PGUSER: ${POSTGRES_USER:-gis}
-      PGPASSWORD: ${POSTGRES_PASSWORD:-gis}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       SH_CLIENT_ID: ${SH_CLIENT_ID:-}
       SH_CLIENT_SECRET: ${SH_CLIENT_SECRET:-}
       ACCESS_TOKEN: ${ACCESS_TOKEN:-}
@@ -137,8 +139,8 @@ services:
     image: haproxy:2.9-alpine
     container_name: storcito-haproxy
     ports:
-      - "${STORCITO_PORT:-8085}:80"
-      - "${STORCITO_HAPROXY_STATS_PORT:-8406}:8404"
+      - "${STORCITO_HOST:-127.0.0.1}:${STORCITO_PORT:-8085}:80"
+      - "127.0.0.1:${STORCITO_HAPROXY_STATS_PORT:-8406}:8404"
     volumes:
       - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     depends_on:

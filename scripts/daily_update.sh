@@ -12,6 +12,7 @@ exec >>"$LOG" 2>&1 </dev/null
 echo "=== daily update started $(date -Is) ==="
 rc=0
 month=$(date +%-m)
+weekday=$(date +%u)
 
 # Weather: Apr-Oct (includes 60-day FWI run-up). 3-day catch-up window.
 if [ "$month" -ge 4 ] && [ "$month" -le 10 ]; then
@@ -21,7 +22,15 @@ if [ "$month" -ge 4 ] && [ "$month" -le 10 ]; then
     fi
 fi
 
-# Surface temperature: yesterday's daytime pass (3-day cloud gap-fill window).
+# Sentinel-2 vegetation/moisture composite: refresh each Monday in fire season.
+if [ "$month" -ge 5 ] && [ "$month" -le 10 ] && [ "$weekday" -eq 1 ]; then
+    if ! make sentinel YEAR="$(date +%Y)" MONTH="$(date +%m)"; then
+        echo "ERROR: weekly Sentinel update failed"
+        rc=4
+    fi
+fi
+
+# Surface temperature: yesterday's cloud-masked daytime daily-maximum composite.
 if ! make lst; then
     echo "ERROR: lst update failed"
     rc=2

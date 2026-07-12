@@ -14,6 +14,7 @@ from app.services.jobs import (
     run_engine_job,
     run_wildfire_payload,
     store_results_to_db,
+    validate_risk_outputs,
 )
 
 router = APIRouter()
@@ -57,8 +58,11 @@ def run_static_aoi_request(payload: StaticAOIRequest, request: Request):
             context_buffer_m=payload.context_buffer_m,
             risk_profile=payload.risk_profile,
         )
+        validate_risk_outputs(outputs)
         result: dict[str, Any] = {
             "status": "success",
+            "requested_date": outputs["requested_date"],
+            "target_date": outputs["target_date"],
             "outputs": augment_with_urls(outputs, request),
         }
         db_info, db_error = store_results_to_db(
@@ -71,7 +75,8 @@ def run_static_aoi_request(payload: StaticAOIRequest, request: Request):
                 "engine": "static_aoi",
                 "calculation_mode": "static",
                 "request_type": "point",
-                "target_date": payload.date.isoformat(),
+                "target_date": outputs["target_date"],
+                "requested_date": outputs["requested_date"],
                 "longitude": payload.longitude,
                 "latitude": payload.latitude,
                 "risk_profile": payload.risk_profile,

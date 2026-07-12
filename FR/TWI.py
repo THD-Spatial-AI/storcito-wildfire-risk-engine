@@ -20,6 +20,18 @@ def _env_breaks(name):
     return None
 
 
+def _coerce_breaks(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        parts = [part.strip() for part in value.replace(";", ",").split(",")]
+    else:
+        parts = list(value)
+    if len(parts) != 4:
+        raise ValueError("TWI breakpoints must contain exactly four values")
+    return tuple(float(part) for part in parts)
+
+
 def Twi(input_twi, output_twi=None, output_twi_risk=None, show_plots=True):
     print('Running TWI layer...')
 
@@ -60,13 +72,13 @@ def Twi(input_twi, output_twi=None, output_twi_risk=None, show_plots=True):
     fixed = _env_breaks("FFRM_TWI_BREAKS")
     p20, p40, p60, p80 = fixed if fixed else np.percentile(twi[valid], [20, 40, 60, 80])
 
-    # Reclasification: assign values 1-5 for risk levels
+    # Low TWI is dry terrain (higher fire susceptibility); high TWI is wetter.
     reclasificado = np.zeros(twi.shape, dtype=np.uint8)
-    reclasificado[(twi <= p20) & valid] = 1
-    reclasificado[(twi > p20) & (twi <= p40)] = 2
+    reclasificado[(twi <= p20) & valid] = 5
+    reclasificado[(twi > p20) & (twi <= p40)] = 4
     reclasificado[(twi > p40) & (twi <= p60)] = 3
-    reclasificado[(twi > p60) & (twi <= p80)] = 4
-    reclasificado[(twi > p80) & valid] = 5
+    reclasificado[(twi > p60) & (twi <= p80)] = 2
+    reclasificado[(twi > p80) & valid] = 1
 
     if save_outputs:
         print('Saving TIFF files...')
@@ -128,7 +140,7 @@ def Twi(input_twi, output_twi=None, output_twi_risk=None, show_plots=True):
     print('TWI Layer completed')
 
 
-def twi_risk(input_twi, output_risk):
+def twi_risk(input_twi, output_risk, *, breaks=None):
     """Non-interactive TWI risk layer (percentile classes 1-5, as the original)."""
     with rasterio.open(input_twi) as src:
         twi = src.read(1, masked=True).astype("float32").filled(np.nan)
@@ -136,14 +148,14 @@ def twi_risk(input_twi, output_risk):
     valid = np.isfinite(twi)
     if not np.any(valid):
         raise ValueError("The TWI layer does not contain valid values.")
-    fixed = _env_breaks("FFRM_TWI_BREAKS")
+    fixed = _coerce_breaks(breaks) or _env_breaks("FFRM_TWI_BREAKS")
     p20, p40, p60, p80 = fixed if fixed else np.percentile(twi[valid], [20, 40, 60, 80])
     r = np.zeros(twi.shape, dtype="int32")
-    r[(twi <= p20) & valid] = 1
-    r[(twi > p20) & (twi <= p40)] = 2
+    r[(twi <= p20) & valid] = 5
+    r[(twi > p20) & (twi <= p40)] = 4
     r[(twi > p40) & (twi <= p60)] = 3
-    r[(twi > p60) & (twi <= p80)] = 4
-    r[(twi > p80) & valid] = 5
+    r[(twi > p60) & (twi <= p80)] = 2
+    r[(twi > p80) & valid] = 1
     meta.update(driver="GTiff", dtype="int32", count=1, nodata=0)
     os.makedirs(os.path.dirname(str(output_risk)), exist_ok=True)
     with rasterio.open(output_risk, "w", **meta) as dst:

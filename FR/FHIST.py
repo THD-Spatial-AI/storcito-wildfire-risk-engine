@@ -13,7 +13,6 @@ from FR.rutinas.setup import (
     default_imshow,
     save_file,
 )
-from itertools import groupby
 from pathlib import Path
 from rasterio.warp import reproject, Resampling
 from rasterio.mask import mask
@@ -61,18 +60,35 @@ def fire_history(input_folder:str|Path=Path('data/INPUT'), output_folder:str|Pat
         key=band_date_sort
     )
     
-    # ✅ CACHE: Parse una sola vez
     prev_cache = {f: parse_filename(f) for f in prev_files}
     post_cache = {f: parse_filename(f) for f in post_files}
-    
-    # Agrupar usando cache (sin re-parsing)
-    prev_by_band = {
-        k: list(v) for k, v in groupby(prev_files, key=lambda x: prev_cache[x].banda)
-    }
-    post_by_band = {
-        k: list(v) for k, v in groupby(post_files, key=lambda x: post_cache[x].banda)
-    }
-    # print(prev_files_dict)
+
+    def _scenes_by_year(files: list[str], cache: dict) -> dict[int, dict[str, str]]:
+        scenes: dict[int, dict[str, str]] = {}
+        for filename in files:
+            parsed = cache[filename]
+            year = parsed.fecha_inicio.year
+            if parsed.banda not in {"B8A", "B12"}:
+                continue
+            if parsed.banda in scenes.setdefault(year, {}):
+                raise ValueError(f"Duplicate {parsed.banda} fire-history scene for {year}.")
+            scenes[year][parsed.banda] = filename
+        return scenes
+
+    prev_by_year = _scenes_by_year(prev_files, prev_cache)
+    post_by_year = _scenes_by_year(post_files, post_cache)
+    complete_years = sorted(set(prev_by_year) & set(post_by_year))
+    incomplete = [
+        year
+        for year in sorted(set(prev_by_year) | set(post_by_year))
+        if set(prev_by_year.get(year, {})) != {"B8A", "B12"}
+        or set(post_by_year.get(year, {})) != {"B8A", "B12"}
+    ]
+    if incomplete or not complete_years:
+        raise ValueError(
+            "Fire-history scenes require one PRE and POST B8A/B12 pair per year; "
+            f"incomplete years: {incomplete or 'all'}."
+        )
 
     def _calculate_nbr(nir: np.ndarray, swir: np.ndarray) -> np.ndarray:
         """Calculate Normalized Burn Ratio (NBR) from NIR and SWIR bands.
@@ -88,7 +104,7 @@ def fire_history(input_folder:str|Path=Path('data/INPUT'), output_folder:str|Pat
         return (nir - swir) / (nir + swir)
     
     def _apply_mask_to_raster(raster: np.ndarray, meta: dict, geometries: list) -> tuple[np.ndarray, rasterio.Affine]:
-        """Mask and crop raster to geometry bounds using in-memory processing.
+        """Mask a raster while preserving its complete georeferenced grid.
 
         Args:
             raster: 2D array to mask
@@ -103,7 +119,9 @@ def fire_history(input_folder:str|Path=Path('data/INPUT'), output_folder:str|Pat
                             dtype=raster.dtype, crs=meta['crs'], transform=meta['transform']) as mem_src:
                 mem_src.write(raster, 1)
             with memfile.open() as mem_src:
-                out_image, out_transform = mask(mem_src, geometries, crop=True)
+                out_image, out_transform = mask(
+                    mem_src, geometries, crop=False, filled=True, nodata=0
+                )
         return out_image, out_transform
     
     def _load_reference_geometries(year: int) -> list:
@@ -136,17 +154,26 @@ def fire_history(input_folder:str|Path=Path('data/INPUT'), output_folder:str|Pat
         
         # Reproyectar bandas
         nir_pre, meta_pre = reproject_raster(prev_folder / pre_b8)
-        swir_pre, _ = reproject_raster(prev_folder / pre_b12)
-        nir_post, _ = reproject_raster(post_folder / post_b8)
+        swir_pre, meta_swir_pre = reproject_raster(prev_folder / pre_b12)
+        nir_post, meta_nir_post = reproject_raster(post_folder / post_b8)
         swir_post, meta_post = reproject_raster(post_folder / post_b12)
         
         # Convertir a float32
         nir_pre, swir_pre = nir_pre.astype('float32'), swir_pre.astype('float32')
         nir_post, swir_post = nir_post.astype('float32'), swir_post.astype('float32')
         
-        if nir_pre.shape != nir_post.shape:
+        grids = [
+            (array.shape, meta["transform"], str(meta["crs"]))
+            for array, meta in (
+                (nir_pre, meta_pre),
+                (swir_pre, meta_swir_pre),
+                (nir_post, meta_nir_post),
+                (swir_post, meta_post),
+            )
+        ]
+        if any(grid != grids[0] for grid in grids[1:]):
             raise ValueError(
-                f"PRE/POST scene grids differ ({nir_pre.shape} vs {nir_post.shape}); "
+                "PRE/POST B8A/B12 scene grids differ; "
                 "refetch the pair with matching windows."
             )
 
@@ -162,14 +189,24 @@ def fire_history(input_folder:str|Path=Path('data/INPUT'), output_folder:str|Pat
         
         # Aplicar máscara de geometrías
         geometries = _load_reference_geometries(year)
-        masked_image, masked_transform = _apply_mask_to_raster(reclassified, meta_post, geometries)
+        if geometries:
+            masked_image, masked_transform = _apply_mask_to_raster(
+                reclassified, meta_post, geometries
+            )
+        else:
+            masked_image = np.zeros((1, *reclassified.shape), dtype="int32")
+            masked_transform = meta_post["transform"]
         
         return masked_image, masked_transform, meta_post
     
     suma_total = None
     target_meta = None
 
-    for pre_b8, pre_b12, post_b8, post_b12 in zip(prev_by_band['B8A'], prev_by_band['B12'],post_by_band['B8A'], post_by_band['B12']):
+    for year in complete_years:
+        pre_b8 = prev_by_year[year]["B8A"]
+        pre_b12 = prev_by_year[year]["B12"]
+        post_b8 = post_by_year[year]["B8A"]
+        post_b12 = post_by_year[year]["B12"]
         
         out_image, out_transform, meta = calcular_dnbr(pre_b8, pre_b12, post_b8, post_b12)
         
@@ -182,16 +219,23 @@ def fire_history(input_folder:str|Path=Path('data/INPUT'), output_folder:str|Pat
                 target_meta = meta.copy()
                 target_meta.update({'transform': out_transform})
         
-        # Remuestrear si es necesario y acumular
-        if out_image.shape[1:] == suma_total.shape:
+        # Remuestrear si es necesario y acumular. Equal dimensions alone do
+        # not establish spatial alignment; transforms and CRSs must also match.
+        same_grid = (
+            out_image.shape[1:] == suma_total.shape
+            and out_transform == target_meta["transform"]
+            and str(meta["crs"]) == str(target_meta["crs"])
+        )
+        if same_grid:
             suma_total += out_image[0].astype('float32')
 
-        elif target_meta :
+        elif target_meta:
             dest = np.zeros(suma_total.shape, dtype='float32')
 
             reproject(source=out_image[0].astype('float32'), destination=dest,
                       src_transform=out_transform, src_crs=meta['crs'],
                       dst_transform=target_meta['transform'], dst_crs=target_meta['crs'],
+                      src_nodata=0, dst_nodata=0,
                       resampling=Resampling.nearest)
             
             suma_total += dest
@@ -211,7 +255,7 @@ def fire_history(input_folder:str|Path=Path('data/INPUT'), output_folder:str|Pat
         reclas = np.digitize(suma_total, bins=bins).astype('int32')
 
 
-    time_range = f"{parse_filename(prev_files[0]).fecha_inicio.year}-{parse_filename(post_files[-1]).fecha_fin.year}"
+    time_range = f"{complete_years[0]}-{complete_years[-1]}"
 
     # Mostrar imágenes desde datos en memoria
     cumulative_figure, ax1 = default_imshow(suma_total,f'Historical Burned Sum ({time_range})')

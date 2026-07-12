@@ -13,7 +13,12 @@ OUTPUT_ROOT = DATA_DIR / "OUTPUT"
 ENGINE_DIR = BASE_DIR / "app" / "engines"
 AOI_OUTPUT_ROOT = (OUTPUT_ROOT / "aoi").resolve()
 JOBS_OUTPUT_ROOT = (OUTPUT_ROOT / "jobs").resolve()
-BERLIN_TZ = ZoneInfo("Europe/Berlin")
+MODEL_TZ = ZoneInfo("Europe/Madrid")
+# Backward-compatible name for callers imported before the Galicia timezone was
+# made explicit. Its value is intentionally Europe/Madrid.
+BERLIN_TZ = MODEL_TZ
+
+MODEL_VERSION = os.environ.get("STORCITO_MODEL_VERSION", "2026-07-12.1").strip()
 
 # Engine registry: script, result file and run-flag overrides per engine.
 ENGINE_SCRIPTS = {

@@ -1,11 +1,19 @@
 import os
+from datetime import date, timedelta
 import numpy as np
 import pandas as pd
 import rasterio
 import matplotlib.pyplot as plt
 
 import FR.rutinas.FWI_Equations as Fwi
-from FR.FWI import FWI_CLASS_BOUNDS, rh_to_percent
+from FR.FWI import (
+    FWI_CLASS_BOUNDS,
+    FWI_RUNUP_DAYS,
+    FWI_STANDARD_TIMEZONE,
+    fwi_init_codes,
+    fwi_standard_clock_hour,
+    rh_to_percent,
+)
 
 FINCA_FWI_CLASS_BOUNDS = (3.0, 13.0, 23.0, 28.0)
 
@@ -60,7 +68,7 @@ def _classify_fwi(fwi_value, class_bounds=FWI_CLASS_BOUNDS):
     if pd.isna(fwi_value):
         return np.nan
     for cls, bound in enumerate(class_bounds, start=1):
-        if fwi_value <= bound:
+        if fwi_value < bound:
             return cls
     return 5
 
@@ -70,7 +78,9 @@ def f_w_index_excel(
     reference_raster,
     output_fwi_raster,
     output_folder="data/OUTPUT",
-    target_hour=13,
+    target_hour=None,
+    start_date: date | str | None = None,
+    target_date: date | str | None = None,
     show_plots=True,
     save=True,
     class_bounds=None,
@@ -83,7 +93,10 @@ def f_w_index_excel(
         output_fwi_raster: Output path for the continuous FWI .tif.
         output_folder: Base output directory. CSV/PNG go to ``<output_folder>/FWI``
             and rasters to ``<output_folder>/re``. Defaults to 'OUTPUT'.
-        target_hour: Hour of day used to pick midday conditions. Defaults to 13.
+        target_hour: Optional explicit local clock hour. By default, uses noon
+            local standard time (12:00 CET / 13:00 CEST in Europe/Madrid).
+        start_date: Optional first scoring date.
+        target_date: Optional last scoring date.
         show_plots: Whether to display the FWI class map. Defaults to True.
         save: Whether to write CSV/TIF/PNG outputs. Defaults to True.
         class_bounds: Optional four upper bounds for classes 1-4. Finca mode
@@ -92,6 +105,14 @@ def f_w_index_excel(
 
     print("FWI - calculation from the weather-station Excel file...")
     class_bounds = tuple(class_bounds or FWI_CLASS_BOUNDS)
+    if isinstance(start_date, str):
+        start_date = date.fromisoformat(start_date)
+    if isinstance(target_date, str):
+        target_date = date.fromisoformat(target_date)
+    if start_date is not None and target_date is not None and start_date > target_date:
+        raise ValueError("Station FWI start date must be on or before target date.")
+    if target_hour is not None and not 0 <= target_hour <= 23:
+        raise ValueError("target_hour must be between 0 and 23.")
 
     # Output directories derived from the project output folder
     csv_dir = os.path.join(output_folder, "FWI")
@@ -151,27 +172,99 @@ def f_w_index_excel(
     # 4. Daily aggregation
     # -----------------------------
     data["date"] = data["datetime"].dt.date
-    data["hour_diff"] = (data["datetime"].dt.hour - target_hour).abs()
-
-    rain_daily = data.groupby("date", as_index=False)["rain_mm"].sum(min_count=1)
-
-    midday_rows = (
-        data.sort_values(["date", "hour_diff", "datetime"])
-        .groupby("date", as_index=False)
-        .first()[["date", "datetime", "temp_c", "rh", "wind_ms"]]
+    if data["datetime"].dt.tz is None:
+        data["comparison_time"] = data["datetime"].dt.tz_localize(
+            FWI_STANDARD_TIMEZONE,
+            ambiguous="infer",
+            nonexistent="shift_forward",
+        ).dt.tz_convert("UTC")
+    else:
+        data["comparison_time"] = data["datetime"].dt.tz_convert("UTC")
+    if target_hour is None:
+        data["assessment_hour"] = data["date"].map(fwi_standard_clock_hour)
+    else:
+        data["assessment_hour"] = int(target_hour)
+    assessment_times = (
+        pd.to_datetime(data["date"])
+        .add(pd.to_timedelta(data["assessment_hour"], unit="h"))
+        .dt.tz_localize(
+            FWI_STANDARD_TIMEZONE,
+            ambiguous="infer",
+            nonexistent="shift_forward",
+        )
+        .dt.tz_convert("UTC")
+    )
+    data["hour_diff"] = (
+        (data["comparison_time"] - assessment_times).abs().dt.total_seconds() / 3600
     )
 
-    daily = rain_daily.merge(midday_rows, on="date", how="inner")
+    midday_rows = (
+        data.dropna(subset=["temp_c", "rh", "wind_ms"])
+        .sort_values(["date", "hour_diff", "datetime"])
+        .drop_duplicates("date", keep="first")
+        [["date", "datetime", "comparison_time", "hour_diff", "temp_c", "rh", "wind_ms"]]
+        .reset_index(drop=True)
+    )
+    if midday_rows.empty:
+        raise ValueError("Station data has no complete weather observation rows.")
+    if (midday_rows["hour_diff"] > 1).any():
+        bad_dates = midday_rows.loc[midday_rows["hour_diff"] > 1, "date"].astype(str).tolist()
+        raise ValueError(
+            "Station data has no observation within one hour of the standard FWI "
+            "assessment time for: "
+            + ", ".join(bad_dates[:10])
+        )
+
+    # FWI rain is assessment-to-assessment, not calendar-day precipitation.
+    rain_values: list[float] = []
+    previous_assessment = None
+    for assessment in midday_rows["comparison_time"]:
+        window_start = previous_assessment or (assessment - timedelta(days=1))
+        mask = (data["comparison_time"] > window_start) & (
+            data["comparison_time"] <= assessment
+        )
+        rain_values.append(float(data.loc[mask, "rain_mm"].sum(min_count=1)))
+        previous_assessment = assessment
+    midday_rows["rain_mm"] = rain_values
+    daily = midday_rows
+    if target_date is not None:
+        daily = daily[daily["date"] <= target_date]
     daily = daily.dropna(subset=["temp_c", "rh", "wind_ms", "rain_mm"])
     daily = daily.sort_values("date").reset_index(drop=True)
 
     if daily.empty:
         raise ValueError("Not enough valid data to compute the daily FWI.")
+    daily["rh"] = rh_to_percent(daily["rh"].to_numpy(dtype=float))
+    physical = (
+        ("temperature", daily["temp_c"], -60.0, 60.0),
+        ("relative humidity", daily["rh"], 0.0, 100.0),
+        ("rain", daily["rain_mm"], 0.0, float("inf")),
+        ("wind speed", daily["wind_ms"], 0.0, 100.0),
+    )
+    for label, values, lower, upper in physical:
+        if (values < lower).any() or (values > upper).any():
+            raise ValueError(f"Station {label} values are outside the supported range.")
+
+    if target_date is not None:
+        score_start = start_date or target_date
+        runup_start = score_start - timedelta(days=FWI_RUNUP_DAYS)
+        daily = daily[(daily["date"] >= runup_start) & (daily["date"] <= target_date)].copy()
+        expected = {
+            runup_start + timedelta(days=offset)
+            for offset in range((target_date - runup_start).days + 1)
+        }
+        missing = sorted(expected - set(daily["date"]))
+        if missing:
+            raise ValueError(
+                "Station FWI run-up is incomplete; missing dates: "
+                + ", ".join(day.isoformat() for day in missing[:10])
+                + ("..." if len(missing) > 10 else "")
+            )
 
     # -----------------------------
     # 5. FWI calculation
     # -----------------------------
-    f0, p0, d0 = 85.0, 6.0, 15.0
+    f0, p0, d0 = fwi_init_codes()
     ffmc_list, dmc_list, dc_list = [], [], []
     isi_list, bui_list, fwi_list, class_list = [], [], [], []
 
@@ -236,16 +329,38 @@ def f_w_index_excel(
         print(f"Daily CSV saved at:\n{output_csv}")
 
     # -----------------------------
-    # 7. Last valid day
+    # 7. Peak valid day in the requested scoring window
     # -----------------------------
     daily_valid = daily.dropna(subset=["FWI", "FWI_class"])
     if daily_valid.empty:
         raise ValueError("No day with a valid FWI (all NaN).")
 
-    last_row = daily_valid.iloc[-1]
+    score_start = start_date or target_date
+    if score_start is not None:
+        scoring = daily_valid[daily_valid["date"] >= score_start]
+    else:
+        scoring = daily_valid
+    if target_date is not None:
+        scoring = scoring[scoring["date"] <= target_date]
+    if scoring.empty:
+        raise ValueError("Station data has no valid FWI row in the requested date range.")
+    last_row = scoring.loc[scoring["FWI"].idxmax()]
     last_fwi = float(last_row["FWI"])
     last_class = int(last_row["FWI_class"])
     last_date = str(last_row["date"])
+
+    result = {
+        "daily_df": daily,
+        "fwi_value": last_fwi,
+        "fwi_class": last_class,
+        "last_date": last_date,
+        "standard_observation": target_hour is None,
+        "assessment_timezone": FWI_STANDARD_TIMEZONE,
+    }
+    if reference_raster is None:
+        if save:
+            raise ValueError("reference_raster is required when station FWI outputs are saved.")
+        return result
 
     # -----------------------------
     # 8. FWI raster and PNG
@@ -299,9 +414,18 @@ def f_w_index_excel(
             plt.close()
 
     print("FWI (from Excel) completed.")
-    return {
-        "daily_df": daily,
-        "fwi_value": last_fwi,
-        "fwi_class": last_class,
-        "last_date": last_date,
-    }
+    return result
+
+
+def validate_station_fwi_csv(input_csv, *, start_date=None, target_date=None):
+    """Run the complete station weather/continuity/FWI validation without raster output."""
+    return f_w_index_excel(
+        input_csv,
+        None,
+        None,
+        output_folder=os.path.dirname(os.path.abspath(input_csv)),
+        start_date=start_date,
+        target_date=target_date,
+        show_plots=False,
+        save=False,
+    )

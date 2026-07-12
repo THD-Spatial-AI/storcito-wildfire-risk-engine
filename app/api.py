@@ -1,7 +1,9 @@
 """STORCITO API entrypoint (logic in app/services/*, endpoints in app/routers/*)."""
 from __future__ import annotations
 
+import logging
 import os
+import time
 from datetime import datetime
 
 # Pre-import pyogrio for clean GDAL_DATA init 
@@ -14,6 +16,31 @@ from fastapi.responses import JSONResponse
 
 from app.config import DEBUG_LOG, logger
 from app.routers import availability, db_catalog, fwi, results, simulations, system
+
+
+class _HealthLogThrottle(logging.Filter):
+    """Keep health/status probes running at full frequency but log each path
+    at most once per 5 minutes - the probes are pure heartbeat noise."""
+
+    INTERVAL_S = 300.0
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._last_logged: dict[str, float] = {}
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        for path in ("/health", "/status"):
+            if f"{path} " in message or message.rstrip().endswith(path):
+                now = time.monotonic()
+                if now - self._last_logged.get(path, float("-inf")) >= self.INTERVAL_S:
+                    self._last_logged[path] = now
+                    return True
+                return False
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_HealthLogThrottle())
 
 app = FastAPI(title="STORCITO API")
 
@@ -29,15 +56,13 @@ print("[STORCITO] app/api.py loaded with validation logger v2", flush=True)
 
 @app.exception_handler(RequestValidationError)
 async def _log_validation_errors(request: Request, exc: RequestValidationError):
-    try:
-        body_bytes = await request.body()
-        body_preview = body_bytes.decode("utf-8", errors="replace")[:4000]
-    except Exception as read_exc:
-        body_preview = f"<unreadable: {read_exc}>"
+    errors = [
+        {key: value for key, value in item.items() if key not in {"input", "url"}}
+        for item in exc.errors()
+    ]
     msg = (
         f"422 validation error on {request.method} {request.url.path}\n"
-        f"  errors={exc.errors()}\n"
-        f"  body={body_preview}"
+        f"  errors={errors}"
     )
     try:
         logger.warning(msg)
@@ -52,7 +77,7 @@ async def _log_validation_errors(request: Request, exc: RequestValidationError):
         pass
     return JSONResponse(
         status_code=422,
-        content={"detail": exc.errors(), "body_preview": body_preview},
+        content={"detail": errors},
     )
 
 

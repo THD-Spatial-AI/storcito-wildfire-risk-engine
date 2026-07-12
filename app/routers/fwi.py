@@ -7,7 +7,11 @@ from fastapi import APIRouter, HTTPException, Query
 from shapely.geometry import shape
 
 from app.schemas import FWIAreaSummaryRequest
-from app.services.fwi_sampling import sample_fwi_area_from_db, sample_fwi_point_from_db
+from app.services.fwi_sampling import (
+    sample_fwi_area_from_db,
+    sample_fwi_point_from_db,
+    sample_model_fire_weather_area_from_db,
+)
 from app.services.payload import unwrap_geojson_geometry
 
 router = APIRouter()
@@ -37,10 +41,19 @@ def fwi_area_summary(payload: FWIAreaSummaryRequest):
         aoi_wgs84 = shape(geometry)
         if aoi_wgs84.is_empty:
             raise ValueError("aoi geometry is empty.")
-        return sample_fwi_area_from_db(
+        if payload.hour_index is not None:
+            # Explicit indices are retained as a diagnostic API. They are
+            # marked non-standard and must not be interpreted with EFFIS classes.
+            return sample_fwi_area_from_db(
+                target_date=payload.date,
+                aoi_wgs84=aoi_wgs84,
+                hour_index=payload.hour_index,
+                score_start_date=payload.start_date,
+            )
+        return sample_model_fire_weather_area_from_db(
             target_date=payload.date,
             aoi_wgs84=aoi_wgs84,
-            hour_index=payload.hour_index,
+            score_start_date=payload.start_date,
         )
     except Exception as exc:  # noqa: BLE001
         raise_db_http_error(exc)
@@ -51,7 +64,7 @@ def fwi_point_sample(
     fdate: date = Query(..., alias="date"),
     lon: float = Query(..., ge=-180, le=180),
     lat: float = Query(..., ge=-90, le=90),
-    hour_index: int = Query(default=15, ge=0, le=95),
+    hour_index: int | None = Query(default=None, ge=0, le=95),
     include_runup: bool = Query(default=True),
 ):
     """Return DB-backed WRF/FWI weather and moisture-code values at one point."""

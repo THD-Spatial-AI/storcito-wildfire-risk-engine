@@ -7,7 +7,6 @@ from typing import Any
 from FR.aoi import build_geojson_aoi, reproject_geometry, DEFAULT_PROJECTED_CRS
 
 from app.config import BERLIN_TZ
-from app.config import logger
 from app.schemas import WildfireCalculationRequest
 
 
@@ -17,30 +16,40 @@ def to_berlin_time(value: datetime) -> datetime:
     return value.astimezone(BERLIN_TZ)
 
 
-def wildfire_target_date(payload: WildfireCalculationRequest) -> date:
+def _validated_local_interval(payload: WildfireCalculationRequest) -> tuple[datetime, datetime]:
     start_local = to_berlin_time(payload.start_date)
     end_local = to_berlin_time(payload.end_date)
+    if start_local > end_local:
+        raise ValueError("start_date must be before or equal to end_date.")
+    return start_local, end_local
 
-    if start_local.date() != end_local.date():
-        raise ValueError("start_date and end_date must be on the same Europe/Berlin local date.")
 
-    return start_local.date()
+def wildfire_target_date(payload: WildfireCalculationRequest) -> date:
+    _start_local, end_local = _validated_local_interval(payload)
+    return end_local.date()
 
 
 def wildfire_date_range(
     payload: WildfireCalculationRequest, calculation_mode: str
 ) -> tuple[date | None, date]:
-    start_local = to_berlin_time(payload.start_date)
-    end_local = to_berlin_time(payload.end_date)
+    start_local, end_local = _validated_local_interval(payload)
 
     start_day = start_local.date()
     end_day = end_local.date()
-    if calculation_mode == "static" and start_day != end_day:
-        raise ValueError("start_date and end_date must be on the same Europe/Berlin local date.")
     if start_day > end_day:
         raise ValueError("start_date must be before or equal to end_date.")
+    if calculation_mode == "static" and start_day.year != end_day.year:
+        raise ValueError(
+            "Static start_date and end_date must be within the same calendar year."
+        )
 
-    return (start_day if calculation_mode == "dynamic" else None, end_day)
+    if calculation_mode == "dynamic":
+        # Dynamic mode scores the complete user-selected date window.
+        return start_day, end_day
+
+    from FR.db_reconstruct import highest_temperature_fwi_date_for_year
+
+    return None, highest_temperature_fwi_date_for_year(end_day.year)
 
 
 def unwrap_geojson_geometry(node: Any) -> dict | None:
@@ -69,7 +78,7 @@ def unwrap_geojson_geometry(node: Any) -> dict | None:
 def _require_inside_coverage(geometry_wgs84) -> None:
     """Reject AOIs outside the data region: the engine would otherwise
     substitute nearest-cell weather and produce fabricated results.
-    Skipped (open) when the region polygon is unavailable.
+    The check fails closed when the authoritative boundary is unavailable.
     """
     import json
     import os
@@ -88,12 +97,10 @@ def _require_inside_coverage(geometry_wgs84) -> None:
             )
             row = cur.fetchone()
         if not row:
-            return
+            raise RuntimeError("wildfire coverage boundary is unavailable")
         region = shapely_shape(json.loads(row[0]))
     except Exception as exc:  # noqa: BLE001
-        # Fail open (the engine will fail anyway without the DB), but loudly.
-        logger.warning("Coverage check skipped (region lookup failed): %s", exc)
-        return
+        raise RuntimeError(f"wildfire coverage boundary is unavailable: {exc}") from exc
     inside = geometry_wgs84.intersection(region).area
     total = geometry_wgs84.area
     mostly_inside = total > 0 and inside / total >= 0.5
@@ -123,29 +130,35 @@ def wildfire_geometry(payload: WildfireCalculationRequest):
     if geometry is None:
         raise ValueError("coordinates or topology[0].geometry must contain a GeoJSON geometry.")
 
-    from shapely.geometry import shape as shapely_shape
-
-    _require_inside_coverage(shapely_shape(geometry))
-
     projected = build_geojson_aoi(geometry)
     if payload.buffer_distance > 0:
         projected = projected.buffer(payload.buffer_distance)
+    if projected.is_empty or projected.area <= 0:
+        raise ValueError("The wildfire AOI must have area or use a positive buffer_distance.")
+    _require_inside_coverage(
+        reproject_geometry(projected, DEFAULT_PROJECTED_CRS, "EPSG:4326")
+    )
     return projected
 
 
 def wildfire_context_buffer(payload: WildfireCalculationRequest) -> float:
     raw_value = payload.parameters.get("context_buffer_m", 3000)
+    if isinstance(raw_value, bool):
+        raise ValueError("parameters.context_buffer_m must be numeric when provided.")
     try:
         value = float(raw_value)
     except (TypeError, ValueError) as exc:
         raise ValueError("parameters.context_buffer_m must be numeric when provided.") from exc
-    if value < 0:
-        raise ValueError("parameters.context_buffer_m must be greater than or equal to zero.")
+    if value < 0 or value > 100_000:
+        raise ValueError("parameters.context_buffer_m must be between 0 and 100000 metres.")
     return value
 
 
 def wildfire_calculation_mode(payload: WildfireCalculationRequest) -> str:
-    mode = str(payload.parameters.get("calculation_mode", "static")).strip().lower()
+    raw = payload.parameters.get("calculation_mode", "static")
+    if not isinstance(raw, str):
+        raise ValueError("parameters.calculation_mode must be a string when provided.")
+    mode = raw.strip().lower()
     if mode not in {"static", "dynamic"}:
         raise ValueError("parameters.calculation_mode must be either 'static' or 'dynamic' when provided.")
     return mode
@@ -158,16 +171,25 @@ def wildfire_optional_layers(payload: WildfireCalculationRequest) -> dict[str, b
     if not isinstance(raw, dict):
         raise ValueError("parameters.optional_layers must be an object mapping layer keys to booleans.")
     result: dict[str, bool] = {}
+    allowed = {"weather_overlay", "terrain_analysis", "historical_fires"}
     for key, value in raw.items():
         if not isinstance(key, str):
             raise ValueError("parameters.optional_layers keys must be strings.")
-        result[key] = bool(value)
+        if key not in allowed:
+            raise ValueError(
+                f"Unsupported optional layer {key!r}; expected one of {sorted(allowed)}."
+            )
+        if not isinstance(value, bool):
+            raise ValueError(f"parameters.optional_layers.{key} must be a boolean.")
+        result[key] = value
     return result
 
 
 def wildfire_risk_profile(payload: WildfireCalculationRequest) -> str:
     raw = payload.parameters.get("risk_profile", payload.parameters.get("profile", "regional"))
-    profile = str(raw).strip().lower()
+    if not isinstance(raw, str):
+        raise ValueError("parameters.risk_profile must be a string when provided.")
+    profile = raw.strip().lower()
     if profile not in {"regional", "finca"}:
         raise ValueError("parameters.risk_profile must be either 'regional' or 'finca' when provided.")
     return profile
