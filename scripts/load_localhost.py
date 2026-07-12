@@ -1284,8 +1284,8 @@ def cmd_load_firms(args: argparse.Namespace) -> int:
                 )
                 or not west <= longitude <= east
                 or not south <= latitude <= north
-                or not 200 <= brightness <= 500
-                or not 200 <= bright_t31 <= 500
+                or not 200 <= brightness <= 600
+                or not 200 <= bright_t31 <= 600
                 or scan <= 0
                 or track <= 0
                 or frp < 0
