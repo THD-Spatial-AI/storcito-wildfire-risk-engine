@@ -1537,7 +1537,10 @@ def cmd_compute_twi(args: argparse.Namespace) -> int:
             f"r.out.gdal --q -c input=twi_f output={twi} format=GTiff "
             "type=Float32 createopt=COMPRESS=DEFLATE"
         )
-        run(["grass", "--tmp-project", str(dem), "--exec", "bash", "-c", grass_script])
+        # GRASS 8.4 renamed --tmp-location to --tmp-project; support both.
+        help_out = subprocess.run(["grass", "--help"], capture_output=True, text=True)
+        flag = "--tmp-project" if "--tmp-project" in (help_out.stdout + help_out.stderr) else "--tmp-location"
+        run(["grass", flag, str(dem), "--exec", "bash", "-c", grass_script])
         import shutil  # move survives crossing filesystems (/tmp vs bind mount)
 
         shutil.move(str(twi), str(out_tif))
