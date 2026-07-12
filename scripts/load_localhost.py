@@ -43,6 +43,7 @@ CLMS_REQUESTS = {
     },
 }
 GALICIA_SOURCE_BBOX = (-9.31, 41.80, -6.73, 43.80)
+FIRMS_SOURCE_BBOX = (-9.40, 41.75, -6.68, 43.85)
 CLMS_MAX_EXTRACT_BYTES = 50 * 1024**3
 CLMS_MAX_ARCHIVE_MEMBERS = 100_000
 BORDER_SOURCES = {
@@ -1248,7 +1249,7 @@ def cmd_load_firms(args: argparse.Namespace) -> int:
             if not reader.fieldnames or not required_fields.issubset(reader.fieldnames):
                 raise LoadError(f"FIRMS CSV is missing required MODIS columns: {path}")
             rows = list(reader)
-        west, south, east, north = GALICIA_SOURCE_BBOX
+        west, south, east, north = FIRMS_SOURCE_BBOX
         for row in rows:
             try:
                 acquisition = datetime.fromisoformat(row["acq_date"]).date()
