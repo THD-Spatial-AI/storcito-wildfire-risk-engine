@@ -735,15 +735,14 @@ def reconstruct_hist(
         else:
             cur.execute("SELECT DISTINCT year FROM hist WHERE year IS NOT NULL ORDER BY year")
         years = [r[0] for r in cur.fetchall()]
-
-        cur.execute("SELECT phase, filename, data FROM hist_scenes ORDER BY phase, filename")
+        cur.execute("SELECT phase, filename FROM hist_scenes ORDER BY phase, filename")
         rows = [
-            (phase, filename, data)
-            for phase, filename, data in cur.fetchall()
+            (phase, filename)
+            for phase, filename in cur.fetchall()
             if target_date is None or filename[:10] <= str(target_date)
         ]
         year_phase_bands: dict[str, dict[str, set[str]]] = {}
-        for phase, filename, _ in rows:
+        for phase, filename in rows:
             band = "B8A" if "_B8A_" in filename else "B12" if "_B12_" in filename else ""
             year_phase_bands.setdefault(filename[:4], {}).setdefault(phase, set()).add(band)
         complete = {
@@ -758,13 +757,17 @@ def reconstruct_hist(
                 f"hotspots for those years (available: {years}). Seed them with "
                 + " and ".join(f"`make hist START={y}-05-01 END={y}-10-31`" for y in missing)
             )
-        for phase, filename, data in rows:
+        for phase, filename in rows:
             if filename[:4] not in complete:
                 continue
             phase_dir = dest_hist_dir / phase
             phase_dir.mkdir(parents=True, exist_ok=True)
             out = phase_dir / filename
-            out.write_bytes(bytes(data))
+            cur.execute(
+                "SELECT data FROM hist_scenes WHERE phase = %s AND filename = %s",
+                (phase, filename),
+            )
+            out.write_bytes(bytes(cur.fetchone()[0]))
             copied_scenes.append(str(out))
 
     for year in years:

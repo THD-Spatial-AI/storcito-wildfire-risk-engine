@@ -1699,16 +1699,30 @@ def cmd_load_hist_scenes(args: argparse.Namespace) -> int:
             for band in ("B8A", "B12"):
                 path = scene_files[band]
                 scene_name = f"{day}-00_00_{day}-23_59_Sentinel-2_L2A_{band}_(Raw).tiff"
-                data = path.read_bytes()
+                nbytes = path.stat().st_size
+                cur.execute(
+                    "CREATE TEMP TABLE IF NOT EXISTS scene_chunks "
+                    "(i int, part bytea) ON COMMIT DELETE ROWS"
+                )
+                cur.execute("DELETE FROM scene_chunks")
+                with path.open("rb") as fh:
+                    i = 0
+                    while chunk := fh.read(64 << 20):
+                        cur.execute(
+                            "INSERT INTO scene_chunks (i, part) VALUES (%s, %s)",
+                            (i, chunk),
+                        )
+                        i += 1
                 cur.execute(
                     """INSERT INTO hist_scenes (phase, filename, data, nbytes)
-                       VALUES (%s, %s, %s, %s)
+                       SELECT %s, %s, string_agg(part, ''::bytea ORDER BY i), %s
+                       FROM scene_chunks
                        ON CONFLICT (phase, filename)
                        DO UPDATE SET data = EXCLUDED.data, nbytes = EXCLUDED.nbytes""",
-                    (args.phase, scene_name, data, len(data)),
+                    (args.phase, scene_name, nbytes),
                 )
                 loaded += 1
-                log(f"hist_scenes <- {args.phase}/{scene_name} ({len(data)} bytes)")
+                log(f"hist_scenes <- {args.phase}/{scene_name} ({nbytes} bytes)")
         conn.commit()
     finally:
         conn.close()
