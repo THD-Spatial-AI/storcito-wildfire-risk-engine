@@ -225,12 +225,11 @@ def available_data_coverage_geojson() -> dict[str, Any]:
 
     mask_metadata: dict[str, Any] = {}
     if exact_mask_rasters:
-        if len(exact_mask_rasters) > 1:
-            raise RuntimeError(
-                "Exact coverage boundary currently supports one masked core raster; "
-                f"found {len(exact_mask_rasters)}."
-            )
-        coverage_geometry, mask_metadata = _raster_exact_outer_boundary(exact_mask_rasters[0])
+        fuels_path = raster_paths.get("Fuel model")
+        boundary_source = (
+            fuels_path if fuels_path in exact_mask_rasters else exact_mask_rasters[0]
+        )
+        coverage_geometry, mask_metadata = _raster_exact_outer_boundary(boundary_source)
         coverage_method = "exact_outer_boundary_from_valid_raster_mask"
     else:
         coverage_geometry = mapping(coverage_box)
