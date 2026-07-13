@@ -740,6 +740,35 @@ def sentinel_grid(
     return tiles
 
 
+
+def seeded_sentinel_capture_dates() -> set:
+    """Capture dates already seeded in PostGIS (all bands present).
+
+    The database, not the staging folder, is the source of truth: staging is
+    routinely cleaned to reclaim disk, and re-downloading an already-seeded
+    window costs thousands of CDSE processing units. Queried via the compose
+    postgis service; unavailable DB -> empty set (fetch everything requested).
+    Set STORCITO_FETCH_SEEDED=1 to bypass the skip.
+    """
+    if os.environ.get("STORCITO_FETCH_SEEDED", "") == "1":
+        return set()
+    try:
+        out = subprocess.run(
+            ["docker", "compose", "exec", "-T", "postgis", "psql",
+             "-U", os.environ.get("POSTGRES_USER", "gis"),
+             "-d", os.environ.get("POSTGRES_DB", "gis"), "-qtA", "-c",
+             "SELECT capture_date FROM sentinel_b4_ts "
+             "INTERSECT SELECT capture_date FROM sentinel_b8_ts "
+             "INTERSECT SELECT capture_date FROM sentinel_b11_ts"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if out.returncode != 0:
+            return set()
+        return {date.fromisoformat(line) for line in out.stdout.split() if line}
+    except Exception:
+        return set()
+
+
 def sentinel_windows(args: argparse.Namespace) -> list[tuple[date, date]]:
     today = datetime.now(timezone.utc).date()
     if not args.years:
@@ -908,7 +937,11 @@ def cmd_sentinel(args: argparse.Namespace) -> int:
 
     files: list[Path] = []
     failures: list[str] = []
+    seeded = seeded_sentinel_capture_dates()
     for date_from, date_to in windows:
+        if date_to in seeded:
+            log(f"skip window {date_from}..{date_to}: capture {date_to} already seeded in PostGIS")
+            continue
         window_dir = args.out_dir / "sentinel" / f"{date_from:%Y%m%d}_{date_to:%Y%m%d}"
         complete_marker = window_dir / "_complete.json"
         complete_marker.unlink(missing_ok=True)
