@@ -52,6 +52,11 @@ case "$MODEL_VERSION" in
 esac
 echo "=== nightly processing started $(date -Is) ==="
 
+JOB_RETENTION_DAYS="${JOB_RETENTION_DAYS:-1}"
+AOI_RETENTION_DAYS="${AOI_RETENTION_DAYS:-7}"
+find data/OUTPUT/jobs -mindepth 1 -maxdepth 1 -type d -mtime +"$JOB_RETENTION_DAYS" -exec rm -rf {} + 2>/dev/null || true
+find data/OUTPUT/aoi -mindepth 1 -maxdepth 1 -type d -mtime +"$AOI_RETENTION_DAYS" -exec rm -rf {} + 2>/dev/null || true
+
 $PSQL -c "
 CREATE TABLE IF NOT EXISTS regional_runs (
     id           bigserial PRIMARY KEY,
