@@ -59,11 +59,13 @@ def _ogr_dsn() -> str:
     return "PG:" + " ".join(f"{k}={_conninfo_value(v)}" for k, v in p.items())
 
 
-def _gdal_raster_dsn(table: str, *, schema: str = "public") -> str:
+def _gdal_raster_dsn(table: str, *, schema: str = "public", where: str | None = None) -> str:
     """GDAL PostGISRaster connection string (mode=2 = one coverage per table)."""
     p = _pg_params()
     parts = [f"{k}={_conninfo_value(v)}" for k, v in p.items()]
     parts += [f"schema='{schema}'", f"table='{table}'", "mode='2'"]
+    if where:
+        parts.append(f"where='{where}'")
     return "PG:" + " ".join(parts)
 
 
@@ -263,6 +265,62 @@ def _composite_newest_valid(
         return (primary_bytes, []) if return_used else primary_bytes
 
 
+
+
+def _composite_files_newest_valid(primary: Path, fillers: list) -> list:
+    """Fill invalid pixels of the primary GeoTIFF from older captures.
+
+    Each filler is exported to a temp file and applied in order (newest
+    first). Returns the capture dates actually used.
+    """
+    used: list = []
+    try:
+        import numpy as np
+        import rasterio
+
+        with rasterio.open(primary) as src:
+            base = src.read(1).astype("float64")
+            profile = src.profile
+        invalid = ~np.isfinite(base) | (base <= 0)
+        for capture, ts_table in fillers:
+            if not invalid.any():
+                break
+            fd, name = tempfile.mkstemp(suffix=".tif", dir=primary.parent)
+            os.close(fd)
+            fpath = Path(name)
+            try:
+                _export_capture_to_file(ts_table, capture, fpath)
+                with rasterio.open(fpath) as src:
+                    cand = src.read(1).astype("float64")
+                if cand.shape != base.shape:
+                    continue
+                usable = invalid & np.isfinite(cand) & (cand > 0)
+                if usable.any():
+                    base[usable] = cand[usable]
+                    invalid &= ~usable
+                    used.append(capture)
+            finally:
+                fpath.unlink(missing_ok=True)
+        with rasterio.open(primary, "w", **profile) as dst:
+            dst.write(base.astype(profile.get("dtype", "float32")), 1)
+    except Exception:
+        return used
+    return used
+
+
+def _export_capture_to_file(ts_table: str, capture_date, dest: Path) -> Path:
+    """Stream one capture_date of a *_ts table to a GeoTIFF via gdalwarp.
+
+    The PostGISRaster driver reads tiles windowed, so raster size is not
+    limited by PostgreSQL's 1 GB single-value allocation cap (which
+    ST_AsGDALRaster on a unioned large raster breaches).
+    """
+    src = _gdal_raster_dsn(ts_table, where=f"capture_date = \\'{capture_date}\\'")
+    _run(["gdalwarp", "-of", "GTiff", "-co", "COMPRESS=DEFLATE", "-co", "TILED=YES",
+          "-overwrite", src, str(dest)])
+    return dest
+
+
 def export_ts_raster(
     ts_table: str,
     current_table: str,
@@ -293,43 +351,33 @@ def export_ts_raster(
 
     dest_tif.parent.mkdir(parents=True, exist_ok=True)
     source_dates = [str(capture_date)]
-    with _pg_connect() as conn, conn.cursor() as cur:
-        cur.execute(
-            f"SELECT ST_AsGDALRaster(ST_Union(rast), 'GTiff') FROM {ts_table} "
-            "WHERE capture_date = %s",
-            (capture_date,),
-        )
-        raw = cur.fetchone()[0]
-        if max_age_days is not None and max_age_days > 0:
-            # Per-pixel composite within the freshness window: LST at 1 km has
-            # cloud gaps, and a small AOI can be fully invalid on the newest
-            # capture. Older captures inside the SAME window the gate already
-            # permits fill those pixels - most recent valid value wins, so no
-            # data older than the declared tolerance ever enters the layer.
-            if isinstance(target_date, str):
-                _t = date.fromisoformat(target_date)
-            else:
-                _t = target_date
-            cur.execute(
-                f"SELECT capture_date, ST_AsGDALRaster(ST_Union(rast), 'GTiff') "
-                f"FROM {ts_table} "
-                "WHERE capture_date >= %s AND capture_date < %s "
-                "GROUP BY capture_date ORDER BY capture_date DESC",
-                (_t - timedelta(days=max_age_days), capture_date),
-            )
-            fillers = cur.fetchall()
-            if fillers:
-                raw, used_indices = _composite_newest_valid(
-                    raw,
-                    [bytes(row[1]) for row in fillers],
-                    return_used=True,
-                )
-                source_dates.extend(str(fillers[index][0]) for index in used_indices)
     fd, tmp_name = tempfile.mkstemp(suffix=".tif", dir=dest_tif.parent)
     os.close(fd)
     tmp = Path(tmp_name)
+    filler_dates: list = []
+    if max_age_days is not None and max_age_days > 0:
+        if isinstance(target_date, str):
+            _t = date.fromisoformat(target_date)
+        else:
+            _t = target_date
+        with _pg_connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"SELECT DISTINCT capture_date FROM {ts_table} "
+                "WHERE capture_date >= %s AND capture_date < %s "
+                "ORDER BY capture_date DESC",
+                (_t - timedelta(days=max_age_days), capture_date),
+            )
+            filler_dates = [row[0] for row in cur.fetchall()]
     try:
-        tmp.write_bytes(bytes(raw))
+        _export_capture_to_file(ts_table, capture_date, tmp)
+        if filler_dates:
+            # Per-pixel composite within the freshness window: fill invalid
+            # pixels from older captures the gate already permits, newest
+            # valid value wins. File-based, so raster size is unbounded.
+            used = _composite_files_newest_valid(
+                tmp, [(d, ts_table) for d in filler_dates]
+            )
+            source_dates.extend(str(d) for d in used)
         cmd = ["gdalwarp", "-of", "GTiff", "-r", resampling, "-overwrite"]
         if clip_geom is not None:
             cutline = _write_cutline(clip_geom, clip_geom_crs, dest_tif.parent)
