@@ -108,8 +108,7 @@ def _fwi_area_grid_indices(lon_grid, lat_grid, aoi_wgs84):
 
 
 def _hour_index_for_date(fdate, local_hour: int = 16, tz: str = "Europe/Madrid") -> int:
-    """Time-axis index of a local clock hour (axis starts 01:00 UTC,
-    so index = utc_hour - 1). DST-aware: 13 in summer, 14 in winter."""
+    """Time-axis index of a local clock hour (axis starts 01:00 UTC, so index = utc_hour - 1). DST-aware: 13 in summer, 14 in winter."""
     from datetime import datetime as _dt
     from zoneinfo import ZoneInfo
 
@@ -546,11 +545,7 @@ def sample_operational_weather_area_from_db(
     aoi_wgs84,
     local_hour: int = 16,
 ) -> dict[str, Any]:
-    """Sample instantaneous AOI weather for the 16:00-17:00 user window.
-
-    This is deliberately separate from the standard-noon FWI calculation and
-    therefore does not expose or classify a non-standard-hour FWI value.
-    """
+    """Sample instantaneous AOI weather for the 16:00-17:00 user window. This is deliberately separate from the standard-noon FWI calculation and therefore does not expose or classify a non-standard-hour FWI value."""
     import numpy as np
     import FR.FWI as FwiModule
     from FR.db_reconstruct import _pg_connect

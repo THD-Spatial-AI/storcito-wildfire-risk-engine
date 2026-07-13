@@ -39,8 +39,7 @@ def fwi_init_codes() -> tuple[float, float, float]:
 
 
 def rh_to_percent(rh):
-    """Normalize RH to percent: the WRF NetCDFs store a fraction, the FWI
-    equations expect percent; converts only clearly fractional data."""
+    """Normalize RH to percent: the WRF NetCDFs store a fraction, the FWI equations expect percent; converts only clearly fractional data."""
     import numpy as _np
 
     arr = _np.asarray(rh, dtype=float)
@@ -54,12 +53,7 @@ FWI_PRECIPITATION_NEGATIVE_TOLERANCE_MM = 0.1
 
 
 def normalize_fwi_precipitation(values, *, context: str = "") -> np.ndarray:
-    """Clamp harmless WRF rain undershoots while rejecting corrupt values.
-
-    WRF rain increments occasionally contain small negative floating-point
-    artifacts. Values down to -0.1 mm follow the tolerance already used by the
-    risk engine; anything lower is treated as invalid source data.
-    """
+    """Clamp harmless WRF rain undershoots while rejecting corrupt values. WRF rain increments occasionally contain small negative floating-point artifacts. Values down to -0.1 mm follow the tolerance already used by the risk engine; anything lower is treated as invalid source data."""
     result = np.array(values, copy=True)
     finite = result[np.isfinite(result)]
     suffix = f" {context}" if context else ""
@@ -70,18 +64,15 @@ def normalize_fwi_precipitation(values, *, context: str = "") -> np.ndarray:
     return result
 
 
-# Moisture-code run-up window (days before the scoring window). Bounds the
-# archive scan so disjoint seasons never bleed into each other (e.g. a summer
-# drought state carrying across winter into the next spring's dates).
+# Moisture-code run-up window (days before the scoring window). Bounds the archive scan so disjoint seasons never bleed into each other (e.g. a summer drought state carrying across winter into the next spring's dates).
 FWI_RUNUP_DAYS = 60
 
-# EFFIS pan-European danger-class upper bounds (classes 1-4; >38 = class 5,
-# EFFIS "extreme" merged in). Region-independent; validated vs EFFIS (Galicia).
+FWI_FORECAST_DAYS = 2
+
+# EFFIS pan-European danger-class upper bounds (classes 1-4; >38 = class 5, EFFIS "extreme" merged in). Region-independent; validated vs EFFIS (Galicia).
 FWI_CLASS_BOUNDS = (5.2, 11.2, 21.3, 38.0)
 
-# The Canadian FWI System is evaluated at noon local standard time. Galicia
-# uses Europe/Madrid: that is 12:00 CET in winter and 13:00 CEST on the clock
-# in summer. The separate operational weather view remains 16:00-17:00.
+# The Canadian FWI System is evaluated at noon local standard time. Galicia uses Europe/Madrid: that is 12:00 CET in winter and 13:00 CEST on the clock in summer. The separate operational weather view remains 16:00-17:00.
 FWI_STANDARD_TIMEZONE = "Europe/Madrid"
 FWI_STANDARD_LOCAL_HOUR = 12
 FWI_OPERATIONAL_START_HOUR = 16
@@ -138,9 +129,7 @@ def assessment_hour_index(
     local_hour: int = FWI_OPERATIONAL_START_HOUR,
     tz: str = FWI_STANDARD_TIMEZONE,
 ) -> int:
-    """Index of the time step whose *local* wall-clock hour is the assessment
-    hour. The WRF time axis is UTC, so a fixed index drifts with DST.
-    """
+    """Index of the time step whose *local* wall-clock hour is the assessment hour. The WRF time axis is UTC, so a fixed index drifts with DST."""
     try:
         from zoneinfo import ZoneInfo
         from datetime import timezone as _tz
@@ -156,12 +145,7 @@ def assessment_hour_index(
 
 
 def standard_fwi_hour_index(dataset, tz: str = FWI_STANDARD_TIMEZONE) -> int:
-    """Index of noon local standard time on a UTC NetCDF time axis.
-
-    Daylight-saving time deliberately does not move the scientific observation:
-    for Europe/Madrid this resolves to 11:00 UTC throughout the year (12:00 CET,
-    displayed as 13:00 CEST during summer).
-    """
+    """Index of noon local standard time on a UTC NetCDF time axis. Daylight-saving time deliberately does not move the scientific observation: for Europe/Madrid this resolves to 11:00 UTC throughout the year (12:00 CET, displayed as 13:00 CEST during summer)."""
     try:
         times = nc.num2date(dataset["time"][:24], dataset["time"].units)
         for idx, timestamp in enumerate(times):
@@ -176,11 +160,7 @@ def standard_fwi_hour_index(dataset, tz: str = FWI_STANDARD_TIMEZONE) -> int:
 
 
 def classify_fwi(values: np.ndarray) -> np.ndarray:
-    """Classify continuous FWI using the EFFIS bounds used by STORCITO.
-
-    Class 1 is very low and class 5 combines EFFIS very-high and extreme values
-    because the application exposes five risk classes.
-    """
+    """Classify continuous FWI using the EFFIS bounds used by STORCITO. Class 1 is very low and class 5 combines EFFIS very-high and extreme values because the application exposes five risk classes."""
     values = np.asarray(values)
     b1, b2, b3, b4 = FWI_CLASS_BOUNDS
     valid = np.isfinite(values) & (values >= 0)
@@ -274,13 +254,7 @@ def available_fwi_dates(input_folder: str | Path) -> list[date]:
 
 
 def highest_temperature_fwi_dates(input_folder: str | Path) -> list[date]:
-    """Return the warmest available FWI day for each year.
-
-    Groups the available FWI netCDF files by calendar year and, within each year,
-    selects the day whose air temperature (``temp`` at the model's reference
-    vertical level) reaches the highest value. Returns one date per year, sorted
-    ascending. Returns an empty list when no usable file is found.
-    """
+    """Return the warmest available FWI day for each year. Groups the available FWI netCDF files by calendar year and, within each year, selects the day whose air temperature (``temp`` at the model's reference vertical level) reaches the highest value. Returns one date per year, sorted ascending. Returns an empty list when no usable file is found."""
     input_folder = Path(input_folder)
     if not input_folder.exists():
         return []
@@ -317,10 +291,17 @@ def _select_fwi_files(input_folder: Path, start_date: date | None, target_date: 
         return files
 
     available_dates = [_fwi_file_date(file) for file in files]
-    if start_date is not None and start_date not in available_dates:
+    newest_available = max(available_dates) if available_dates else None
+    def _within_forecast(day):
+        return (
+            newest_available is not None
+            and day > newest_available
+            and (day - newest_available).days <= FWI_FORECAST_DAYS
+        )
+    if start_date is not None and start_date not in available_dates and not _within_forecast(start_date):
         available = ", ".join(day.isoformat() for day in available_dates)
         raise ValueError(f"FWI start date {start_date.isoformat()} is not available. Available dates: {available}")
-    if target_date is not None and target_date not in available_dates:
+    if target_date is not None and target_date not in available_dates and not _within_forecast(target_date):
         available = ", ".join(day.isoformat() for day in available_dates)
         raise ValueError(f"FWI date {target_date.isoformat()} is not available. Available dates: {available}")
     if start_date is not None and target_date is not None and start_date > target_date:
@@ -336,7 +317,8 @@ def _select_fwi_files(input_folder: Path, start_date: date | None, target_date: 
         selected_dates = {_fwi_file_date(file) for file in selected_files}
         missing_dates = []
         day = start_date
-        while day <= target_date:
+        range_end = min(target_date, newest_available) if newest_available else target_date
+        while day <= range_end:
             if day not in selected_dates:
                 missing_dates.append(day.isoformat())
             day += timedelta(days=1)
@@ -359,13 +341,7 @@ def f_w_index(
     export_daily: bool = False,
     return_details: bool = False,
 ) -> np.ndarray | FWIRunResult:
-    """Calculate standard daily Canadian FWI from a contiguous NetCDF series.
-
-    Moisture codes are advanced once through the complete run-up and requested
-    window. Each scored day is evaluated at noon local standard time. When an
-    AOI is supplied, peak-day selection uses the mean continuous FWI inside that
-    AOI instead of the mean over the complete Galicia weather grid.
-    """
+    """Calculate standard daily Canadian FWI from a contiguous NetCDF series. Moisture codes are advanced once through the complete run-up and requested window. Each scored day is evaluated at noon local standard time. When an AOI is supplied, peak-day selection uses the mean continuous FWI inside that AOI instead of the mean over the complete Galicia weather grid."""
     input_folder = Path(input_folder)
     output_folder = Path(output_folder)
     if isinstance(target_date, str):
@@ -414,15 +390,28 @@ def f_w_index(
     previous_rain_tail = None
     previous_day = None
 
-    for index, file in enumerate(files):
-        day = _fwi_file_date(file)
+    # Real archive days first; then, if the requested window extends past the newest file, forecast days from that file's later steps (+24 h per day).
+    newest_day = _fwi_file_date(files[-1])
+    schedule = [(_fwi_file_date(f), f, 0) for f in files]
+    forecast_day = newest_day
+    while forecast_day < score_end and (forecast_day - newest_day).days < FWI_FORECAST_DAYS:
+        forecast_day += timedelta(days=1)
+        offset = (forecast_day - newest_day).days
+        schedule.append((forecast_day, files[-1], offset))
+        print(f"[FWI] {forecast_day} scored as FORECAST from {files[-1].name} (+{offset * 24}h steps)")
+
+    for index, (day, file, step_offset) in enumerate(schedule):
         if previous_day is not None and (day - previous_day).days != 1:
             raise ValueError(f"FWI inputs are not daily-contiguous: {previous_day} -> {day}")
         previous_day = day
 
         with nc.Dataset(file) as dataset:
             n_hours = int(dataset["time"].shape[0])
-            observation_index = standard_fwi_hour_index(dataset)
+            observation_index = standard_fwi_hour_index(dataset) + 24 * step_offset
+            if observation_index >= n_hours:
+                raise ValueError(
+                    f"FWI file {file.name} lacks the +{step_offset * 24}h forecast step"
+                )
             x_coord = ma.filled(dataset["lon"][:], np.nan).astype("float64")
             y_coord = ma.filled(dataset["lat"][:], np.nan).astype("float64")
             wind = ma.filled(dataset["mod"][observation_index], np.nan).astype("float64")
@@ -440,15 +429,17 @@ def f_w_index(
                 if not finite.size or finite.min() < lower or finite.max() > upper:
                     raise ValueError(f"FWI {label} values are invalid in {file.name}")
 
-            day_hours = min(n_hours, 24)
+            # For forecast days the 24 h slice starts at that day's offset within the 96 h file, so rain accumulation stays day-aligned.
+            day_start = 24 * step_offset
+            day_hours = min(n_hours - day_start, 24)
             precipitation = normalize_fwi_precipitation(
-                ma.filled(dataset["prec"][:day_hours], np.nan).astype("float64"),
+                ma.filled(dataset["prec"][day_start:day_start + day_hours], np.nan).astype("float64"),
                 context=f"in {file.name}",
             )
-            rain = precipitation[: observation_index + 1].sum(axis=0)
+            rain = precipitation[: observation_index - day_start + 1].sum(axis=0)
             if previous_rain_tail is not None:
                 rain = rain + previous_rain_tail
-            previous_rain_tail = precipitation[observation_index + 1 : day_hours].sum(axis=0)
+            previous_rain_tail = precipitation[observation_index - day_start + 1 : day_hours].sum(axis=0)
             month = int(nc.num2date(dataset["time"][0], dataset["time"].units).month)
 
         x = np.linspace(float(x_coord.min()), float(x_coord.max()), grid_size)

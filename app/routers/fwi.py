@@ -42,8 +42,7 @@ def fwi_area_summary(payload: FWIAreaSummaryRequest):
         if aoi_wgs84.is_empty:
             raise ValueError("aoi geometry is empty.")
         if payload.hour_index is not None:
-            # Explicit indices are retained as a diagnostic API. They are
-            # marked non-standard and must not be interpreted with EFFIS classes.
+            # Explicit indices are retained as a diagnostic API. They are marked non-standard and must not be interpreted with EFFIS classes.
             return sample_fwi_area_from_db(
                 target_date=payload.date,
                 aoi_wgs84=aoi_wgs84,

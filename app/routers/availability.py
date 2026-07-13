@@ -1,6 +1,8 @@
 """Available dates and data-coverage endpoints."""
 from __future__ import annotations
 
+import os
+
 from fastapi import APIRouter, HTTPException
 
 from FR.db_reconstruct import available_dynamic_fwi_dates_db, available_fwi_dates_db, highest_temperature_fwi_dates_db
@@ -20,10 +22,40 @@ def available_static_dates():
 
 @router.get("/available-dynamic-dates")
 def available_dynamic_dates():
-    # Assessable dates only: fire season (May-Oct), complete 60-day run-up,
-    # and fresh LST/Sentinel. Run-up-only months (March/April) never appear.
     dates = available_dynamic_fwi_dates_db()
-    return {"dates": [day.isoformat() for day in dates]}
+    forecast: list[str] = []
+    if dates:
+        from datetime import timedelta
+
+        from FR.db_reconstruct import (
+            _pg_connect,
+            FIRE_SEASON_END_MONTH,
+            FIRE_SEASON_START_MONTH,
+            _ts_date_for,
+        )
+
+        newest = dates[-1]
+        # Only days beyond the FWI archive are forecasts; if eligibility is
+        # capped by Sentinel/LST instead, +1/+2 are past dates, not forecasts.
+        with _pg_connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT max(fdate) FROM fwi_files")
+            newest_fwi = cur.fetchone()[0]
+        if newest_fwi is None or newest < newest_fwi:
+            return {"dates": [day.isoformat() for day in dates], "forecast_dates": []}
+        lst_age = int(os.environ.get("STORCITO_MAX_LST_AGE_DAYS", "3"))
+        for offset in (1, 2):
+            day = newest + timedelta(days=offset)
+            if not FIRE_SEASON_START_MONTH <= day.month <= FIRE_SEASON_END_MONTH:
+                continue
+            try:
+                if _ts_date_for("lst_ts", day, max_age_days=lst_age):
+                    forecast.append(day.isoformat())
+            except LookupError:
+                break
+    return {
+        "dates": [day.isoformat() for day in dates] + forecast,
+        "forecast_dates": forecast,
+    }
 
 
 @router.get("/available-data-coverage")

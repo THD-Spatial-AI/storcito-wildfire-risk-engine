@@ -1,7 +1,4 @@
-"""
-Vectorized script to calculate FWI parameters.
-Optimized for NumPy arrays (no slow loops).
-"""
+"""Vectorized script to calculate FWI parameters. Optimized for NumPy arrays (no slow loops)."""
 import numpy as np
 
 
@@ -9,28 +6,8 @@ FFMC_COEFFICIENT = 250.0 * 59.5 / 101.0
 
 
 def ffmc(temp, hum, wind, rain, f0) -> np.ndarray:
-    """
-    Calculate the Fine Fuel Moisture Code (FFMC).
-    
-    The FFMC represents the moisture content of fine fuels (up to 16mm thick) that respond
-    rapidly to changes in relative humidity and temperature. Ranges from 0 to 101.
-    
-    Args:
-        temp: Air temperature in °C
-        hum: Relative humidity in percentage (0-100)
-        wind: Wind speed at 10m height in km/h
-        rain: Precipitation in mm
-        f0: Previous FFMC value
-    
-    Returns:
-        np.ndarray: Calculated FFMC value (scale 0-101)
-    
-    References:
-        Van Wagner, C.E. (1987). Development and Structure of the Canadian Forest Fire 
-        Weather Index System. Canadian Forest Service Publication 35.
-    """
-    # The reference implementation constrains saturated RH before applying
-    # the equilibrium-moisture equations.
+    """Calculate the Fine Fuel Moisture Code (FFMC). The FFMC represents the moisture content of fine fuels (up to 16mm thick) that respond rapidly to changes in relative humidity and temperature. Ranges from 0 to 101. Args: temp: Air temperature in °C, hum: Relative humidity in percentage (0-100), wind: Wind speed at 10m height in km/h, rain: Precipitation in mm, f0: Previous FFMC value. Returns: np.ndarray: Calculated FFMC value (scale 0-101). References: Van Wagner, C.E. (1987). Development and Structure of the Canadian Forest Fire Weather Index System. Canadian Forest Service Publication 35."""
+
     hum = np.clip(hum, 0.0, 99.9999)
 
     # Create copies to avoid modifying originals
@@ -98,26 +75,7 @@ def ffmc(temp, hum, wind, rain, f0) -> np.ndarray:
     return f
 
 def dmc(temp, hum, rain, p0, month) -> np.ndarray:
-    """
-    Calculate the Duff Moisture Code (DMC).
-    
-    The DMC represents the moisture content of the duff and litter layer (2-4 cm thick).
-    Responds more slowly to weather changes compared to FFMC.
-    
-    Args:
-        temp: Air temperature in °C
-        hum: Relative humidity in percentage (0-100)
-        rain: Precipitation in mm
-        p0: Previous DMC value
-        month: Month of the year (1-12)
-    
-    Returns:
-        np.ndarray: Calculated DMC value
-    
-    References:
-        Van Wagner, C.E. (1987). Development and Structure of the Canadian Forest Fire 
-        Weather Index System. Canadian Forest Service Publication 35.
-    """
+    """Calculate the Duff Moisture Code (DMC). The DMC represents the moisture content of the duff and litter layer (2-4 cm thick). Responds more slowly to weather changes compared to FFMC. Args: temp: Air temperature in °C, hum: Relative humidity in percentage (0-100), rain: Precipitation in mm, p0: Previous DMC value, month: Month of the year (1-12). Returns: np.ndarray: Calculated DMC value. References: Van Wagner, C.E. (1987). Development and Structure of the Canadian Forest Fire Weather Index System. Canadian Forest Service Publication 35."""
     Le_factors = [6.5, 7.5, 9.0, 12.8, 13.9, 13.9, 12.4, 10.9, 9.4, 8.0, 7.0, 6.0]
     le = Le_factors[int(month) - 1]  # Assume single month for entire map
     
@@ -164,25 +122,7 @@ def dmc(temp, hum, rain, p0, month) -> np.ndarray:
     return p
 
 def dc(temp, rain, month, d0) -> np.ndarray:
-    """
-    Calculate the Drought Code (DC).
-    
-    The DC represents the moisture content of deep organic layers and peat (up to 10cm).
-    Responds very slowly to precipitation changes and indicates prolonged drought conditions.
-    
-    Args:
-        temp: Air temperature in °C
-        rain: Precipitation in mm
-        month: Month of the year (1-12)
-        d0: Previous DC value
-    
-    Returns:
-        np.ndarray: Calculated DC value
-    
-    References:
-        Van Wagner, C.E. (1987). Development and Structure of the Canadian Forest Fire 
-        Weather Index System. Canadian Forest Service Publication 35.
-    """
+    """Calculate the Drought Code (DC). The DC represents the moisture content of deep organic layers and peat (up to 10cm). Responds very slowly to precipitation changes and indicates prolonged drought conditions. Args: temp: Air temperature in °C, rain: Precipitation in mm, month: Month of the year (1-12), d0: Previous DC value. Returns: np.ndarray: Calculated DC value. References: Van Wagner, C.E. (1987). Development and Structure of the Canadian Forest Fire Weather Index System. Canadian Forest Service Publication 35."""
     Lf_factors = [-1.6, -1.6, -1.6, 0.9, 3.8, 5.8, 6.4, 5.0, 2.4, 0.4, -1.6, -1.6]
     lf = Lf_factors[int(month) - 1]
     
@@ -212,23 +152,7 @@ def dc(temp, rain, month, d0) -> np.ndarray:
     return d
 
 def isi(wind, f) -> np.ndarray:
-    """
-    Calculate the Initial Spread Index (ISI).
-    
-    The ISI estimates the initial rate of fire spread based on fine fuel moisture (FFMC)
-    and wind speed. Typical range: 0-40.
-    
-    Args:
-        wind: Wind speed at 10m height in km/h
-        f: FFMC value
-    
-    Returns:
-        np.ndarray: Calculated ISI value
-    
-    References:
-        Van Wagner, C.E. (1987). Development and Structure of the Canadian Forest Fire 
-        Weather Index System. Canadian Forest Service Publication 35.
-    """
+    """Calculate the Initial Spread Index (ISI). The ISI estimates the initial rate of fire spread based on fine fuel moisture (FFMC) and wind speed. Typical range: 0-40. Args: wind: Wind speed at 10m height in km/h, f: FFMC value. Returns: np.ndarray: Calculated ISI value. References: Van Wagner, C.E. (1987). Development and Structure of the Canadian Forest Fire Weather Index System. Canadian Forest Service Publication 35."""
     f_u = np.exp(0.05039 * wind)
     m = FFMC_COEFFICIENT * (101.0 - f) / (59.5 + f)
     f_f = 91.9 * np.exp(-0.1386 * m) * (1.0 + (m**5.31) / 4.93e7)
@@ -236,23 +160,7 @@ def isi(wind, f) -> np.ndarray:
     return r
 
 def bui(p, d) -> np.ndarray:
-    """
-    Calculate the Build-up Index (BUI).
-    
-    The BUI combines DMC and DC into a single index that reflects the amount of fuel
-    available to sustain fire spread. Typical range: 0-100.
-    
-    Args:
-        p: DMC value
-        d: DC value
-    
-    Returns:
-        np.ndarray: Calculated BUI value
-    
-    References:
-        Van Wagner, C.E. (1987). Development and Structure of the Canadian Forest Fire 
-        Weather Index System. Canadian Forest Service Publication 35.
-    """
+    """Calculate the Build-up Index (BUI). The BUI combines DMC and DC into a single index that reflects the amount of fuel available to sustain fire spread. Typical range: 0-100. Args: p: DMC value, d: DC value. Returns: np.ndarray: Calculated BUI value. References: Van Wagner, C.E. (1987). Development and Structure of the Canadian Forest Fire Weather Index System. Canadian Forest Service Publication 35."""
     u = np.zeros_like(p)
     
     denominator = p + 0.4 * d
@@ -270,23 +178,7 @@ def bui(p, d) -> np.ndarray:
     return u
 
 def fwi(r, u) -> np.ndarray:
-    """
-    Calculate the Fire Weather Index (FWI).
-    
-    The FWI is the final index that integrates ISI (fire spread rate) and BUI (fuel availability).
-    Provides an estimate of forest fire danger. Typical scale: 0-100 (no upper limit).
-    
-    Args:
-        r: ISI value (Initial Spread Index)
-        u: BUI value (Build-up Index)
-    
-    Returns:
-        np.ndarray: Calculated FWI value
-    
-    References:
-        Van Wagner, C.E. (1987). Development and Structure of the Canadian Forest Fire 
-        Weather Index System. Canadian Forest Service Publication 35.
-    """
+    """Calculate the Fire Weather Index (FWI). The FWI is the final index that integrates ISI (fire spread rate) and BUI (fuel availability). Provides an estimate of forest fire danger. Typical scale: 0-100 (no upper limit). Args: r: ISI value (Initial Spread Index), u: BUI value (Build-up Index). Returns: np.ndarray: Calculated FWI value. References: Van Wagner, C.E. (1987). Development and Structure of the Canadian Forest Fire Weather Index System. Canadian Forest Service Publication 35."""
     f_d = np.zeros_like(u)
     
     mask1 = u <= 80.0

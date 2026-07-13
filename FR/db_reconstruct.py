@@ -576,9 +576,17 @@ def reconstruct_fwi(
                 f"(available range: {lo} .. {hi}). Seed with scripts/seed_blobs.py."
             )
         by_date = {row[0]: (row[1], row[2]) for row in rows}
+        newest = max(by_date) if by_date else None
+        forecast_days = (target_date - newest).days if newest else 0
+        if forecast_days > 2:
+            raise RuntimeError(
+                f"FWI archive ends {newest}; {target_date} is {forecast_days} days "
+                "ahead - forecasts are limited to +2 days"
+            )
+        run_up_end = min(target_date, newest) if newest else target_date
         expected_dates = {
             window_start + timedelta(days=offset)
-            for offset in range((target_date - window_start).days + 1)
+            for offset in range((run_up_end - window_start).days + 1)
         }
         missing_dates = sorted(expected_dates - set(by_date))
         if missing_dates:

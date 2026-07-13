@@ -19,16 +19,9 @@ FINCA_FWI_CLASS_BOUNDS = (3.0, 13.0, 23.0, 28.0)
 
 
 def convert_station_file_to_csv(input_path, output_csv):
-    """Normalize an uploaded weather-station file to the engine's CSV layout.
-
-    Excel (.xlsx/.xls) is converted to CSV; an existing CSV is re-written through
-    the same path. The raw cell layout is preserved verbatim (no header collapse,
-    no column reordering) so the two-row header and column positions stay exactly
-    as ``f_w_index_excel`` expects. Returns the output CSV path.
-    """
+    """Normalize an uploaded weather-station file to the engine's CSV layout. Excel (.xlsx/.xls) is converted to CSV; an existing CSV is re-written through the same path. The raw cell layout is preserved verbatim (no header collapse, no column reordering) so the two-row header and column positions stay exactly as ``f_w_index_excel`` expects. Returns the output CSV path."""
     ext = os.path.splitext(str(input_path))[1].lower()
-    # Uploaded files are stored without an extension, so fall back to sniffing
-    # the content: .xlsx/.xls are ZIP/OLE containers, everything else is CSV.
+    # Uploaded files are stored without an extension, so fall back to sniffing the content: .xlsx/.xls are ZIP/OLE containers, everything else is CSV.
     if ext not in (".xlsx", ".xls", ".csv", ".txt"):
         with open(input_path, "rb") as fh:
             head = fh.read(8)
@@ -85,23 +78,7 @@ def f_w_index_excel(
     save=True,
     class_bounds=None,
 ):
-    """FWI from a weather-station Excel/CSV file.
-
-    Args:
-        input_excel: Path to the station Excel/CSV file.
-        reference_raster: Raster used as spatial reference (extent/CRS/profile).
-        output_fwi_raster: Output path for the continuous FWI .tif.
-        output_folder: Base output directory. CSV/PNG go to ``<output_folder>/FWI``
-            and rasters to ``<output_folder>/re``. Defaults to 'OUTPUT'.
-        target_hour: Optional explicit local clock hour. By default, uses noon
-            local standard time (12:00 CET / 13:00 CEST in Europe/Madrid).
-        start_date: Optional first scoring date.
-        target_date: Optional last scoring date.
-        show_plots: Whether to display the FWI class map. Defaults to True.
-        save: Whether to write CSV/TIF/PNG outputs. Defaults to True.
-        class_bounds: Optional four upper bounds for classes 1-4. Finca mode
-            passes the original finca bounds (3, 13, 23, 28).
-    """
+    """FWI from a weather-station Excel/CSV file. Args: input_excel: Path to the station Excel/CSV file. reference_raster: Raster used as spatial reference (extent/CRS/profile). output_fwi_raster: Output path for the continuous FWI .tif. output_folder: Base output directory. CSV/PNG go to ``<output_folder>/FWI`` and rasters to ``<output_folder>/re``. Defaults to 'OUTPUT'. target_hour: Optional explicit local clock hour. By default, uses noon local standard time (12:00 CET / 13:00 CEST in Europe/Madrid). start_date: Optional first scoring date. target_date: Optional last scoring date. show_plots: Whether to display the FWI class map. Defaults to True. save: Whether to write CSV/TIF/PNG outputs. Defaults to True. class_bounds: Optional four upper bounds for classes 1-4. Finca mode passes the original finca bounds (3, 13, 23, 28)."""
 
     print("FWI - calculation from the weather-station Excel file...")
     class_bounds = tuple(class_bounds or FWI_CLASS_BOUNDS)
@@ -284,8 +261,7 @@ def f_w_index_excel(
         p0_arr = np.array([p0], dtype=float)
         d0_arr = np.array([d0], dtype=float)
 
-        # dmc/dc expect a scalar month (they do int(month)); the netCDF path
-        # passes a scalar too, so pass the int here rather than a 1-element array.
+        # dmc/dc expect a scalar month (they do int(month)); the netCDF path passes a scalar too, so pass the int here rather than a 1-element array.
         f_arr = Fwi.ffmc(temp_arr, rh_arr, wind_arr, rain_arr, f0_arr)
         p_arr = Fwi.dmc(temp_arr, rh_arr, rain_arr, p0_arr, month)
         d_arr = Fwi.dc(temp_arr, rain_arr, month, d0_arr)
