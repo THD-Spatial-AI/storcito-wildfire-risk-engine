@@ -73,9 +73,7 @@ def _write_array(path: Path, array: np.ndarray, reference_path: Path, dtype: str
     path.parent.mkdir(parents=True, exist_ok=True)
     with rasterio.open(reference_path) as ref:
         profile = ref.profile
-    # The engine marks invalid pixels as 0 (masked/no-data areas); declare that
-    # instead of inheriting the reference's nodata (e.g. -9999) which is never
-    # actually written.
+    # The engine marks invalid pixels as 0 (masked/no-data areas); declare that instead of inheriting the reference's nodata (e.g. -9999) which is never actually written.
     profile.update(dtype=dtype, count=1, nodata=0)
     with rasterio.open(path, "w", **profile) as dst:
         dst.write(array.astype(dtype, copy=False), 1)
@@ -167,13 +165,7 @@ def _combine_layers(
     active_topics: set[str],
     export_only: dict[str, Path] | None = None,
 ) -> dict[str, Path]:
-    """AHP combination with explicit handling for optional raster gaps.
-
-    LST and TWI are allowed to have missing pixels. Their subtopic weights are
-    renormalized over data that is actually present, and ``data_coverage.tif``
-    records the fraction of the configured model weight supported at each
-    pixel. Core inputs still fail closed and remain nodata in the final map.
-    """
+    """AHP combination with explicit handling for optional raster gaps. LST and TWI are allowed to have missing pixels. Their subtopic weights are renormalized over data that is actually present, and ``data_coverage.tif`` records the fraction of the configured model weight supported at each pixel. Core inputs still fail closed and remain nodata in the final map."""
     active_topics = set(active_topics) & set(spec["top_order"])
     optional_gap_keys = {"lst", "twi"}
 
@@ -249,8 +241,7 @@ def _combine_layers(
         exported_layers[key] = _write_array(layers_dir / f"{key}.tif", data, reference_path, "float32")
         del data, _layer_mask
 
-    # Top-level weights: matrix-based specs drop inactive rows/cols and
-    # re-derive; weight-based specs renormalize over the active topics.
+    # Top-level weights: matrix-based specs drop inactive rows/cols and re-derive; weight-based specs renormalize over the active topics.
     order = [t for t in spec["top_order"] if t in active_topics]
     if "top_matrix" in spec:
         idx = [spec["top_order"].index(t) for t in order]
@@ -370,10 +361,7 @@ def _fwi_from_station_file(
     start_date: date | None,
     target_date: date,
 ) -> dict:
-    """Compute the FWI risk layer from an uploaded station file (Excel/CSV) and
-    place the classified raster where the layer combination step expects it
-    (``base_output_dir/TIFs/FWI_Risk_Map.tif``).
-    """
+    """Compute the FWI risk layer from an uploaded station file (Excel/CSV) and place the classified raster where the layer combination step expects it (``base_output_dir/TIFs/FWI_Risk_Map.tif``)."""
     from FR.FWI_excel import FINCA_FWI_CLASS_BOUNDS, convert_station_file_to_csv, f_w_index_excel
 
     csv_path = convert_station_file_to_csv(station_data_path, inputs_dir / "station_data.csv")
@@ -510,12 +498,7 @@ def run_static_aoi_for_geometry(
     classification_breaks_by_date: dict[str, dict[str, str]] | None = None,
     output_resolution_m: float | None = None,
 ) -> dict[str, str]:
-    """Run the static workflow for one projected AOI geometry and one selected FWI date.
-
-    Optional user-supplied inputs override bundled regional data: ``dtm_path``
-    replaces terrain, ``ndvi_path`` supplies a precomputed finca NDVI raster, and
-    ``station_data_path`` (Excel/CSV) drives FWI from local station measurements.
-    """
+    """Run the static workflow for one projected AOI geometry and one selected FWI date. Optional user-supplied inputs override bundled regional data: ``dtm_path`` replaces terrain, ``ndvi_path`` supplies a precomputed finca NDVI raster, and ``station_data_path`` (Excel/CSV) drives FWI from local station measurements."""
     active_top_levels = _resolve_active_top_levels(optional_layers)
     historical_requested = _historical_fire_requested(optional_layers)
     profile = (risk_profile or "regional").strip().lower()

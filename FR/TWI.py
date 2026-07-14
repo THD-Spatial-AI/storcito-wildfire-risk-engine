@@ -5,9 +5,7 @@ import matplotlib.pyplot as plt
 
 
 def _env_breaks(name):
-    """Fixed classification breakpoints from the environment (region-wide
-    values computed once per run), overriding extent-local percentiles so
-    tiled runs classify identically everywhere."""
+    """Fixed classification breakpoints from the environment (region-wide values computed once per run), overriding extent-local percentiles so tiled runs classify identically everywhere."""
     import os
 
     raw = os.environ.get(name, "")

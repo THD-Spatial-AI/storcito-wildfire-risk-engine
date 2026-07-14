@@ -101,9 +101,7 @@ def f_w_index_excel(
         os.makedirs(rasters_dir, exist_ok=True)
         os.makedirs(png_dir, exist_ok=True)
 
-    # -----------------------------
-    # 1. Read the Excel
-    # -----------------------------
+    # ----------------------------- 1. Read the Excel -----------------------------
     ext = os.path.splitext(input_excel)[1].lower()
     if ext in [".xlsx", ".xls"]:
         df_raw = pd.read_excel(input_excel, engine="openpyxl")
@@ -112,9 +110,7 @@ def f_w_index_excel(
     else:
         raise ValueError(f"Unsupported format: {ext}")
 
-    # -----------------------------
-    # 2. Column selection by index
-    # -----------------------------
+    # ----------------------------- 2. Column selection by index -----------------------------
     df = df_raw.iloc[1:].reset_index(drop=True)
 
     data = df.iloc[
@@ -130,9 +126,7 @@ def f_w_index_excel(
 
     data.columns = ["datetime", "temp_c", "rh", "rain_mm", "wind_ms"]
 
-    # -----------------------------
-    # 3. Type conversion
-    # -----------------------------
+    # ----------------------------- 3. Type conversion -----------------------------
     data["datetime"] = pd.to_datetime(data["datetime"], errors="coerce")
     data["temp_c"] = _to_numeric_series(data["temp_c"])
     data["rh"] = _to_numeric_series(data["rh"])
@@ -145,9 +139,7 @@ def f_w_index_excel(
     if data.empty:
         raise ValueError("No valid date/time records in the input file.")
 
-    # -----------------------------
-    # 4. Daily aggregation
-    # -----------------------------
+    # ----------------------------- 4. Daily aggregation -----------------------------
     data["date"] = data["datetime"].dt.date
     if data["datetime"].dt.tz is None:
         data["comparison_time"] = data["datetime"].dt.tz_localize(
@@ -238,9 +230,7 @@ def f_w_index_excel(
                 + ("..." if len(missing) > 10 else "")
             )
 
-    # -----------------------------
-    # 5. FWI calculation
-    # -----------------------------
+    # ----------------------------- 5. FWI calculation -----------------------------
     f0, p0, d0 = fwi_init_codes()
     ffmc_list, dmc_list, dc_list = [], [], []
     isi_list, bui_list, fwi_list, class_list = [], [], [], []
@@ -295,18 +285,14 @@ def f_w_index_excel(
     daily["FWI"] = fwi_list
     daily["FWI_class"] = class_list
 
-    # -----------------------------
-    # 6. Daily CSV
-    # -----------------------------
+    # ----------------------------- 6. Daily CSV -----------------------------
     if save:
         base_name = os.path.splitext(os.path.basename(input_excel))[0]
         output_csv = os.path.join(csv_dir, base_name + "_FWI_daily.csv")
         daily.to_csv(output_csv, index=False, encoding="utf-8-sig")
         print(f"Daily CSV saved at:\n{output_csv}")
 
-    # -----------------------------
-    # 7. Peak valid day in the requested scoring window
-    # -----------------------------
+    # ----------------------------- 7. Peak valid day in the requested scoring window -----------------------------
     daily_valid = daily.dropna(subset=["FWI", "FWI_class"])
     if daily_valid.empty:
         raise ValueError("No day with a valid FWI (all NaN).")
@@ -338,9 +324,7 @@ def f_w_index_excel(
             raise ValueError("reference_raster is required when station FWI outputs are saved.")
         return result
 
-    # -----------------------------
-    # 8. FWI raster and PNG
-    # -----------------------------
+    # ----------------------------- 8. FWI raster and PNG -----------------------------
     with rasterio.open(reference_raster) as ref:
         profile = ref.profile
         profile.update(dtype="float32", count=1)

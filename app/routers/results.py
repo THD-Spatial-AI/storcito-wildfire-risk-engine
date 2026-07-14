@@ -13,9 +13,7 @@ router = APIRouter()
 
 @router.get("/results/{request_id}/{file_path:path}")
 def download_result(request_id: str, file_path: str):
-    """
-    Serve a file from a static-AOI job output directory.
-    """
+    """Serve a file from a static-AOI job output directory."""
     try:
         target = (AOI_OUTPUT_ROOT / request_id / file_path).resolve()
     except OSError as exc:

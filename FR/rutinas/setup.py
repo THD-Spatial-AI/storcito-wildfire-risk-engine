@@ -50,50 +50,9 @@ class ParsedFilename:
         return f"{self.fecha_inicio.strftime('%Y%m%d%H%M')}_{self.fecha_fin.strftime('%Y%m%d%H%M')}_{self.satelite}_{self.nivel}"
 
 def parse_filename(filename: str, date_format: str = "%Y-%m-%d-%H_%M") -> ParsedFilename:
-    """Parsea nombres de archivo con el patrón Sentinel-2.
-    
-    Extrae información temporal, satélite, nivel de procesamiento y banda 
-    de nombres de archivo siguiendo el formato estándar de Sentinel-2.
-    
-    Args:
-        filename: Nombre del archivo a parsear
-        date_format: Formato de las fechas en el nombre (default: "%Y-%m-%d-%H_%M")
-        
-    Returns:
-        ParsedFilename: TypedDict con las siguientes claves:
-            - fecha_inicio: Datetime de inicio de captura
-            - fecha_fin: Datetime de fin de captura
-            - satelite: Nombre del satélite (ej: "Sentinel-2")
-            - nivel: Nivel de procesamiento (ej: "L2A", "L1C")
-            - banda: Banda espectral (ej: "B04", "B08")
-            - filename: Nombre original del archivo
-            
-    Raises:
-        ValueError: Si el nombre no coincide con el patrón esperado
-        
-    Examples:
-        Parsear un archivo Sentinel-2 típico::
-        
-            >>> filename = "2023-01-01-10_30_2023-01-15-10_30_Sentinel-2_L2A_B04_(Raw).tiff"
-            >>> result = parse_filename(filename)
-            >>> result['satelite']
-            'Sentinel-2'
-            >>> result['banda']
-            'B04'
-            >>> result['fecha_inicio']
-            datetime.datetime(2023, 1, 1, 10, 30)
-            
-        Usar formato de fecha personalizado::
-        
-            >>> filename = "20230101_20230115_S2_L2A_B08.tiff"
-            >>> parse_filename(filename, date_format="%Y%m%d")
-            
-    Note:
-        Actualmente solo soporta archivos con patrón Sentinel-2.
-        TODO: Incorporar soporte para otros satélites.
-    """
+    """Parsea nombres de archivo con el patrón Sentinel-2. Extrae información temporal, satélite, nivel de procesamiento y banda de nombres de archivo siguiendo el formato estándar de Sentinel-2. Args: filename: Nombre del archivo a parsear date_format: Formato de las fechas en el nombre (default: "%Y-%m-%d-%H_%M") Returns: ParsedFilename: TypedDict con las siguientes claves: - fecha_inicio: Datetime de inicio de captura - fecha_fin: Datetime de fin de captura - satelite: Nombre del satélite (ej: "Sentinel-2") - nivel: Nivel de procesamiento (ej: "L2A", "L1C") - banda: Banda espectral (ej: "B04", "B08") - filename: Nombre original del archivo Raises: ValueError: Si el nombre no coincide con el patrón esperado Examples: Parsear un archivo Sentinel-2 típico:: >>> filename = "2023-01-01-10_30_2023-01-15-10_30_Sentinel-2_L2A_B04_(Raw).tiff" >>> result = parse_filename(filename) >>> result['satelite'] 'Sentinel-2' >>> result['banda'] 'B04' >>> result['fecha_inicio'] datetime.datetime(2023, 1, 1, 10, 30) Usar formato de fecha personalizado:: >>> filename = "20230101_20230115_S2_L2A_B08.tiff" >>> parse_filename(filename, date_format="%Y%m%d") Note: Actualmente solo soporta archivos con patrón Sentinel-2. TODO: Incorporar soporte para otros satélites."""
 
-    #TODO: Incorporar estructurad de expresion regular para otros satelites
+    # TODO: Incorporar estructurad de expresion regular para otros satelites
 
     full_pattern = re.compile(
         r"(?P<fecha_inicio>\d{4}-\d{2}-\d{2}-\d{2}_\d{2})_"
@@ -118,17 +77,7 @@ def parse_filename(filename: str, date_format: str = "%Y-%m-%d-%H_%M") -> Parsed
         raise ValueError(f"Filename '{filename}' does not match the expected pattern.")
 
 def get_output_folder(input_folder:str):
-    """_summary_
-
-    Args:
-        input_folder (str): _description_
-
-    Raises:
-        ValueError: _description_
-
-    Returns:
-        _type_: _description_
-    """
+    """_summary_ Args: input_folder (str): _description_ Raises: ValueError: _description_ Returns: _type_: _description_"""
     if not os.path.isdir(input_folder):
         raise ValueError(f"The provided path '{input_folder}' is not a valid directory.")
     
@@ -145,17 +94,7 @@ def get_output_folder(input_folder:str):
     return output_folder
 
 def band_date_sort(file:str):
-    """_summary_
-
-    Args:
-        file (str): _description_
-
-    Raises:
-        ValueError: _description_
-
-    Returns:
-        _type_: _description_
-    """
+    """_summary_ Args: file (str): _description_ Raises: ValueError: _description_ Returns: _type_: _description_"""
     if info:=parse_filename(file):
         # print(info.group('banda'),info.group('fecha_inicio'))
         return (info.satelite,info.banda,info.fecha_inicio)
@@ -163,15 +102,7 @@ def band_date_sort(file:str):
         raise ValueError(f"Filename '{file}' does not match expected pattern.")
 
 def sort_time_comparative(band_folder:Path|None=None,date_format:str="%Y-%m-%d-%H_%M")->None:
-    """_summary_
-
-    Args:
-        band_folder (Path | None, optional): _description_. Defaults to None.
-        date_format (str, optional): _description_. Defaults to "%Y-%m-%d-%H_%M".
-
-    Raises:
-        ValueError: _description_
-    """
+    """_summary_ Args: band_folder (Path | None, optional): _description_. Defaults to None. date_format (str, optional): _description_. Defaults to "%Y-%m-%d-%H_%M". Raises: ValueError: _description_"""
 
     if not band_folder:
         band_folder=Path("data/INPUT")
@@ -212,12 +143,7 @@ def check_valid_entries(
     input_folder: Path | str = Path("data/INPUT"),
     satellite: Literal["Sentinel-2"] = "Sentinel-2",
 ) -> tuple[list[SceneEntry], list[SceneEntry]]:
-    """
-    Validate and group Sentinel-2 TIFF files by temporal scene.
-
-    Each scene is defined by (fecha_inicio, fecha_fin, satelite, nivel).
-    A scene is considered complete if all required bands are present.
-    """
+    """Validate and group Sentinel-2 TIFF files by temporal scene. Each scene is defined by (fecha_inicio, fecha_fin, satelite, nivel). A scene is considered complete if all required bands are present."""
 
     if satellite != "Sentinel-2":
         raise NotImplementedError(f"Satellite '{satellite}' not implemented.")
@@ -279,11 +205,7 @@ def check_valid_entries(
 
 
 def read_and_group(entries: list[SceneEntry]) -> dict:
-    """_summary_
-
-    Returns:
-        _type_: _description_
-    """
+    """_summary_ Returns: _type_: _description_"""
     grouped = defaultdict(list)
     meta_ref = {}
 
@@ -302,19 +224,7 @@ def read_and_group(entries: list[SceneEntry]) -> dict:
     return grouped
 
 def default_imshow(array: npt.NDArray, title: str, colorbar_params: dict | None = None) -> tuple[Figure, Axes]:
-    """Muestra un array como imagen con colorbar y configuración por defecto.
-    
-    Args:
-        array: Array 2D a visualizar
-        title: Título del gráfico
-        colorbar_params: Parámetros adicionales para la colorbar (ej: {'label': 'Risk'})
-    
-    Returns:
-        Tupla (figura, ejes) de matplotlib
-        
-    Raises:
-        ValueError: Si array no es 2D
-    """
+    """Muestra un array como imagen con colorbar y configuración por defecto. Args: array: Array 2D a visualizar title: Título del gráfico colorbar_params: Parámetros adicionales para la colorbar (ej: {'label': 'Risk'}) Returns: Tupla (figura, ejes) de matplotlib Raises: ValueError: Si array no es 2D"""
     if colorbar_params is None:
         colorbar_params = {}
     
@@ -328,20 +238,7 @@ def default_imshow(array: npt.NDArray, title: str, colorbar_params: dict | None 
 
 def save_file(array: npt.NDArray, id_name: str, output_folder: Path|str, meta: dict, type_name: str|None = None,
               extensions: list[str]|str =['tif', 'tiff'],meta_intact:bool=False,fig:Figure|None=None) -> tuple[Path, ...]:
-    """_summary_
-
-    Args:
-        array (npt.NDArray): _description_
-        meta (dict): _description_
-        id_name (str): _description_
-        type_name (str): _description_
-        output_folder (Path): _description_
-        extensions (list[str] | str, optional): _description_. Defaults to ['tif', 'tiff'].
-        meta_intact (bool, optional): _description_. Defaults to False.
-
-    Returns:
-        tuple[Path, ...]: _description_
-    """
+    """_summary_ Args: array (npt.NDArray): _description_ meta (dict): _description_ id_name (str): _description_ type_name (str): _description_ output_folder (Path): _description_ extensions (list[str] | str, optional): _description_. Defaults to ['tif', 'tiff']. meta_intact (bool, optional): _description_. Defaults to False. Returns: tuple[Path, ...]: _description_"""
 
     output_folder = Path(output_folder)
     if not meta:
@@ -379,16 +276,7 @@ def save_file(array: npt.NDArray, id_name: str, output_folder: Path|str, meta: d
     return files_2_save
 
 def reproject_raster(src_path:str|Path, dst_crs:str = "EPSG:32629")->tuple[np.ndarray, dict]:
-    """_summary_
-
-    Args:
-        src_path (str | Path): _description_
-        dst_crs (_type_, optional): _description_. Defaults to "EPSG:32629".
-
-    Returns:
-        tuple[np.ndarray, dict]: _description_
-
-    """
+    """_summary_ Args: src_path (str | Path): _description_ dst_crs (_type_, optional): _description_. Defaults to "EPSG:32629". Returns: tuple[np.ndarray, dict]: _description_"""
     with rasterio.open(src_path) as src:
 
         transform, width, height = calculate_default_transform(src.crs, dst_crs, src.width, src.height, *src.bounds)

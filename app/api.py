@@ -6,7 +6,7 @@ import os
 import time
 from datetime import datetime
 
-# Pre-import pyogrio for clean GDAL_DATA init 
+# Pre-import pyogrio for clean GDAL_DATA init
 import pyogrio  # noqa: F401
 
 import uvicorn
@@ -19,8 +19,7 @@ from app.routers import availability, db_catalog, fwi, results, simulations, sys
 
 
 class _HealthLogThrottle(logging.Filter):
-    """Keep health/status probes running at full frequency but log each path
-    at most once per 5 minutes - the probes are pure heartbeat noise."""
+    """Keep health/status probes running at full frequency but log each path at most once per 5 minutes - the probes are pure heartbeat noise."""
 
     INTERVAL_S = 300.0
 

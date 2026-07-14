@@ -5,9 +5,7 @@ import matplotlib.pyplot as plt
 
 
 def _env_breaks(name):
-    """Fixed classification breakpoints from the environment (region-wide
-    values computed once per run), overriding extent-local percentiles so
-    tiled runs classify identically everywhere."""
+    """Fixed classification breakpoints from the environment (region-wide values computed once per run), overriding extent-local percentiles so tiled runs classify identically everywhere."""
     import os
 
     raw = os.environ.get(name, "")
@@ -66,7 +64,7 @@ def Lst(input_lst, output_lst=None, output_lst_risk=None, show_plots=True):
 
     print('Executing LST risk layer...')
 
-    #Reclasification by percentiles: assign values 1-5 for risk levels
+    # Reclasification by percentiles: assign values 1-5 for risk levels
     fixed = _env_breaks("FFRM_LST_BREAKS")
     p20, p40, p60, p80 = fixed if fixed else np.percentile(lst_clean[valid], [20, 40, 60, 80])
 

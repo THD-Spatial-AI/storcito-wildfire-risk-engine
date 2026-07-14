@@ -1,8 +1,4 @@
-"""
-Sistema de procesamiento de archivos con menú interactivo
-Instalación:
-    pip install rich questionary
-"""
+"""Sistema de procesamiento de archivos con menú interactivo Instalación: pip install rich questionary"""
 
 import questionary
 

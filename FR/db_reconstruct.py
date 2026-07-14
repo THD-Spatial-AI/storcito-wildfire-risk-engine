@@ -1,15 +1,4 @@
-"""Reconstruct engine input files from the PostGIS database.
-
-The risk engines in ``app/engines/`` read a fixed ``INPUT/`` tree of GeoTIFFs
-and shapefiles. This module materialises that tree, per request, from the
-PostGIS tables that were loaded with raster2pgsql / ogr2ogr, optionally clipping
-every dataset to a request boundary.
-
-Postgres is reached through GDAL/OGR's built-in PG drivers (which use libpq
-directly) because the conda environment ships no Python Postgres driver. The
-``gdalwarp`` / ``gdal_translate`` / ``ogr2ogr`` CLIs are used for robustness and
-parity with how the data was loaded.
-"""
+"""Reconstruct engine input files from the PostGIS database. The risk engines in ``app/engines/`` read a fixed ``INPUT/`` tree of GeoTIFFs and shapefiles. This module materialises that tree, per request, from the PostGIS tables that were loaded with raster2pgsql / ogr2ogr, optionally clipping every dataset to a request boundary. Postgres is reached through GDAL/OGR's built-in PG drivers (which use libpq directly) because the conda environment ships no Python Postgres driver. The ``gdalwarp`` / ``gdal_translate`` / ``ogr2ogr`` CLIs are used for robustness and parity with how the data was loaded."""
 from __future__ import annotations
 
 import json
@@ -25,8 +14,7 @@ from shapely.geometry.base import BaseGeometry
 
 
 def _pg_connect():
-    """psycopg2 connection to the gis DB, built from the same PG* params used for
-    the GDAL/OGR exports. Used to fetch the blob-stored FWI / HIST scene files."""
+    """psycopg2 connection to the gis DB, built from the same PG* params used for the GDAL/OGR exports. Used to fetch the blob-stored FWI / HIST scene files."""
     import psycopg2
 
     p = _pg_params()
@@ -36,9 +24,7 @@ def _pg_connect():
     )
 
 
-# ---------------------------------------------------------------------------
-# Connection strings (built from the PG* environment variables)
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- Connection strings (built from the PG* environment variables) ---------------------------------------------------------------------------
 def _pg_params() -> dict[str, str]:
     return {
         "host": os.environ.get("PGHOST", "postgis"),
@@ -69,16 +55,9 @@ def _gdal_raster_dsn(table: str, *, schema: str = "public", where: str | None = 
     return "PG:" + " ".join(parts)
 
 
-# ---------------------------------------------------------------------------
-# Cutline helper
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- Cutline helper ---------------------------------------------------------------------------
 def _write_cutline(geometry: BaseGeometry, crs: str, dest_dir: Path) -> Path:
-    """Write a clip geometry to a GeoJSON file usable as a gdal/ogr cutline.
-
-    No explicit ``crs`` member is written: GeoJSON implies WGS84 (lon/lat), which
-    OGR reads as the layer SRS, so gdalwarp/ogr2ogr reproject the cutline to each
-    dataset's CRS automatically. ``clip_geom`` is therefore expected in WGS84.
-    """
+    """Write a clip geometry to a GeoJSON file usable as a gdal/ogr cutline. No explicit ``crs`` member is written: GeoJSON implies WGS84 (lon/lat), which OGR reads as the layer SRS, so gdalwarp/ogr2ogr reproject the cutline to each dataset's CRS automatically. ``clip_geom`` is therefore expected in WGS84."""
     if crs not in ("EPSG:4326", "EPSG:CRS84", "OGC:CRS84"):
         raise ValueError(
             f"Cutline geometry must be WGS84 (got {crs}); reproject before clipping."
@@ -106,9 +85,7 @@ def _run(cmd: list[str]) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# Exporters
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------- Exporters ---------------------------------------------------------------------------
 def export_raster_table(
     table: str,
     dest_tif: str | Path,
@@ -118,13 +95,7 @@ def export_raster_table(
     target_srs: str | None = None,
     resampling: str = "near",
 ) -> Path:
-    """Export a PostGIS raster table to a GeoTIFF, optionally clipped/reprojected.
-
-    When ``clip_geom`` is given it is used as a gdalwarp cutline (GDAL reprojects
-    it to the raster CRS), so the geometry may be supplied in any CRS (default
-    WGS84). When ``target_srs`` is given the output is reprojected to that CRS;
-    otherwise it keeps the source raster's CRS.
-    """
+    """Export a PostGIS raster table to a GeoTIFF, optionally clipped/reprojected. When ``clip_geom`` is given it is used as a gdalwarp cutline (GDAL reprojects it to the raster CRS), so the geometry may be supplied in any CRS (default WGS84). When ``target_srs`` is given the output is reprojected to that CRS; otherwise it keeps the source raster's CRS."""
     dest_tif = Path(dest_tif)
     dest_tif.parent.mkdir(parents=True, exist_ok=True)
     src = _gdal_raster_dsn(table)
@@ -226,12 +197,7 @@ def _composite_newest_valid(
     *,
     return_used: bool = False,
 ) -> bytes | tuple[bytes, list[int]]:
-    """Fill invalid pixels of the primary raster from older ones (newest first).
-
-    All inputs share the ts table's native grid (same fetch pipeline), so a
-    straight array overlay is exact. Falls back to the primary bytes on any
-    library/shape mismatch.
-    """
+    """Fill invalid pixels of the primary raster from older ones (newest first). All inputs share the ts table's native grid (same fetch pipeline), so a straight array overlay is exact. Falls back to the primary bytes on any library/shape mismatch."""
     try:
         import io as _io
 
@@ -268,11 +234,7 @@ def _composite_newest_valid(
 
 
 def _composite_files_newest_valid(primary: Path, fillers: list) -> list:
-    """Fill invalid pixels of the primary GeoTIFF from older captures.
-
-    Each filler is exported to a temp file and applied in order (newest
-    first). Returns the capture dates actually used.
-    """
+    """Fill invalid pixels of the primary GeoTIFF from older captures. Each filler is exported to a temp file and applied in order (newest first). Returns the capture dates actually used."""
     used: list = []
     try:
         import numpy as np
@@ -309,12 +271,7 @@ def _composite_files_newest_valid(primary: Path, fillers: list) -> list:
 
 
 def _export_capture_to_file(ts_table: str, capture_date, dest: Path) -> Path:
-    """Stream one capture_date of a *_ts table to a GeoTIFF via gdalwarp.
-
-    The PostGISRaster driver reads tiles windowed, so raster size is not
-    limited by PostgreSQL's 1 GB single-value allocation cap (which
-    ST_AsGDALRaster on a unioned large raster breaches).
-    """
+    """Stream one capture_date of a *_ts table to a GeoTIFF via gdalwarp. The PostGISRaster driver reads tiles windowed, so raster size is not limited by PostgreSQL's 1 GB single-value allocation cap (which ST_AsGDALRaster on a unioned large raster breaches)."""
     src = _gdal_raster_dsn(ts_table, where=f"capture_date = \\'{capture_date}\\'")
     _run(["gdalwarp", "-of", "GTiff", "-co", "COMPRESS=DEFLATE", "-co", "TILED=YES",
           "-overwrite", src, str(dest)])
@@ -334,11 +291,7 @@ def export_ts_raster(
     capture_date: str | None = None,
     max_age_days: int | None = None,
 ) -> tuple[Path, str]:
-    """Export the raster matching the assessment date from a *_ts time series.
-
-    Returns (path, capture_date_used). Future or excessively stale captures are
-    never substituted.
-    """
+    """Export the raster matching the assessment date from a *_ts time series. Returns (path, capture_date_used). Future or excessively stale captures are never substituted."""
     dest_tif = Path(dest_tif)
     capture_date = capture_date or _ts_date_for(
         ts_table, target_date, max_age_days=max_age_days
@@ -371,9 +324,7 @@ def export_ts_raster(
     try:
         _export_capture_to_file(ts_table, capture_date, tmp)
         if filler_dates:
-            # Per-pixel composite within the freshness window: fill invalid
-            # pixels from older captures the gate already permits, newest
-            # valid value wins. File-based, so raster size is unbounded.
+            # Per-pixel composite within the freshness window: fill invalid pixels from older captures the gate already permits, newest valid value wins. File-based, so raster size is unbounded.
             used = _composite_files_newest_valid(
                 tmp, [(d, ts_table) for d in filler_dates]
             )
@@ -425,13 +376,7 @@ def export_common_ts_rasters(
     target_srs: str | None = None,
     resampling: str = "bilinear",
 ) -> tuple[dict[str, Path], str]:
-    """Export synchronized bands from the newest usable common capture.
-
-    A region-wide Sentinel mosaic can be structurally complete while a cloudy
-    acquisition contains only nodata inside a small AOI. Trying common capture
-    dates as a group keeps B4/B8/B11 synchronized and avoids producing blank
-    NDVI/NDMI layers from such a window.
-    """
+    """Export synchronized bands from the newest usable common capture. A region-wide Sentinel mosaic can be structurally complete while a cloudy acquisition contains only nodata inside a small AOI. Trying common capture dates as a group keeps B4/B8/B11 synchronized and avoids producing blank NDVI/NDMI layers from such a window."""
     if not layers:
         raise ValueError("at least one time-series raster is required")
     candidates = _common_ts_dates(
@@ -495,12 +440,7 @@ def export_vector_table(
     t_srs: str | None = None,
     select_sql: str | None = None,
 ) -> Path:
-    """Export a PostGIS vector table to an ESRI Shapefile, optionally clipped.
-
-    ``select_sql`` is an optional OGR SQL statement (must include the ``geom``
-    column) used instead of the whole table -- e.g. to re-alias columns to the
-    casing the engine expects, since PostgreSQL lowercases identifiers on import.
-    """
+    """Export a PostGIS vector table to an ESRI Shapefile, optionally clipped. ``select_sql`` is an optional OGR SQL statement (must include the ``geom`` column) used instead of the whole table -- e.g. to re-alias columns to the casing the engine expects, since PostgreSQL lowercases identifiers on import."""
     dest_shp = Path(dest_shp)
     dest_shp.parent.mkdir(parents=True, exist_ok=True)
     src = _ogr_dsn()
@@ -540,14 +480,7 @@ def reconstruct_fwi(
     *,
     score_start=None,
 ) -> list[Path]:
-    """Provide the date-selected FWI NetCDF files (all dates <= target) into
-    ``dest_fwi_dir`` from the `fwi_files` blob table.
-
-    FWI is not round-tripped as PostGIS rasters: the engine reads multi-variable
-    WRF NetCDF via netCDF4 and accumulates indices sequentially, so the original
-    bytes are stored verbatim. Files are cached on disk (written once) and then
-    hardlinked into each job dir -- instant and with no extra disk per request.
-    """
+    """Provide the date-selected FWI NetCDF files (all dates <= target) into ``dest_fwi_dir`` from the `fwi_files` blob table. FWI is not round-tripped as PostGIS rasters: the engine reads multi-variable WRF NetCDF via netCDF4 and accumulates indices sequentially, so the original bytes are stored verbatim. Files are cached on disk (written once) and then hardlinked into each job dir -- instant and with no extra disk per request."""
     dest_fwi_dir = Path(dest_fwi_dir)
     dest_fwi_dir.mkdir(parents=True, exist_ok=True)
     _FWI_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -636,10 +569,7 @@ def reconstruct_fwi(
 
 
 def available_fwi_dates_db() -> list[date]:
-    """All FWI dates available in the blob table (sorted ascending).
-
-    DB-backed replacement for FR.FWI.available_fwi_dates, which reads INPUT/FWI.
-    """
+    """All FWI dates available in the blob table (sorted ascending). DB-backed replacement for FR.FWI.available_fwi_dates, which reads INPUT/FWI."""
     with _pg_connect() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT DISTINCT fdate FROM fwi_files "
@@ -656,28 +586,7 @@ def available_dynamic_fwi_dates_db() -> list[date]:
         raise ValueError("dynamic source age limits must be non-negative")
     with _pg_connect() as conn, conn.cursor() as cur:
         cur.execute(
-            """WITH dates AS (
-                   SELECT DISTINCT fdate FROM fwi_files WHERE fdate IS NOT NULL
-               ), eligible AS (
-                   SELECT d.fdate FROM dates d
-                   WHERE EXTRACT(MONTH FROM d.fdate) BETWEEN 5 AND 10
-                     AND (SELECT count(DISTINCT f.fdate) FROM fwi_files f
-                          WHERE f.fdate BETWEEN d.fdate - 60 AND d.fdate) = 61
-               )
-               SELECT e.fdate FROM eligible e
-               WHERE EXISTS (
-                   SELECT 1 FROM lst_ts l
-                   WHERE l.capture_date BETWEEN e.fdate - %s AND e.fdate
-               )
-                 AND EXISTS (
-                   SELECT 1 FROM sentinel_b4_ts b4
-                   WHERE b4.capture_date BETWEEN e.fdate - %s AND e.fdate
-                     AND EXISTS (SELECT 1 FROM sentinel_b8_ts b8
-                                 WHERE b8.capture_date = b4.capture_date)
-                     AND EXISTS (SELECT 1 FROM sentinel_b11_ts b11
-                                 WHERE b11.capture_date = b4.capture_date)
-               )
-               ORDER BY e.fdate""",
+            """WITH dates AS ( SELECT DISTINCT fdate FROM fwi_files WHERE fdate IS NOT NULL ), eligible AS ( SELECT d.fdate FROM dates d WHERE EXTRACT(MONTH FROM d.fdate) BETWEEN 5 AND 10 AND (SELECT count(DISTINCT f.fdate) FROM fwi_files f WHERE f.fdate BETWEEN d.fdate - 60 AND d.fdate) = 61 ) SELECT e.fdate FROM eligible e WHERE EXISTS ( SELECT 1 FROM lst_ts l WHERE l.capture_date BETWEEN e.fdate - %s AND e.fdate ) AND EXISTS ( SELECT 1 FROM sentinel_b4_ts b4 WHERE b4.capture_date BETWEEN e.fdate - %s AND e.fdate AND EXISTS (SELECT 1 FROM sentinel_b8_ts b8 WHERE b8.capture_date = b4.capture_date) AND EXISTS (SELECT 1 FROM sentinel_b11_ts b11 WHERE b11.capture_date = b4.capture_date) ) ORDER BY e.fdate""",
             (lst_age, sentinel_age),
         )
         return [row[0] for row in cur.fetchall()]
@@ -690,11 +599,7 @@ FIRE_SEASON_END_MONTH = 10
 def select_hottest_fwi_date(
     observations: Iterable[tuple[date, float]], year: int
 ) -> date:
-    """Select the hottest May-October observation for ``year``.
-
-    The earliest date wins an exact temperature tie so selection is stable
-    regardless of database or filesystem ordering.
-    """
+    """Select the hottest May-October observation for ``year``. The earliest date wins an exact temperature tie so selection is stable regardless of database or filesystem ordering."""
     candidates = [
         (day, float(peak_temp))
         for day, peak_temp in observations
@@ -718,19 +623,7 @@ def highest_temperature_fwi_date_for_year(year: int) -> date:
 
     with _pg_connect() as conn, conn.cursor() as cur:
         cur.execute(
-            """WITH eligible AS (
-                   SELECT d.fdate, max(d.peak_temp) AS peak_temp
-                   FROM fwi_files d
-                   WHERE d.fdate BETWEEN %s AND %s
-                     AND d.peak_temp IS NOT NULL
-                     AND (SELECT count(DISTINCT f.fdate) FROM fwi_files f
-                          WHERE f.fdate BETWEEN d.fdate - 60 AND d.fdate) = 61
-                   GROUP BY d.fdate
-               )
-               SELECT fdate
-               FROM eligible
-               ORDER BY peak_temp DESC, fdate ASC
-               LIMIT 1""",
+            """WITH eligible AS ( SELECT d.fdate, max(d.peak_temp) AS peak_temp FROM fwi_files d WHERE d.fdate BETWEEN %s AND %s AND d.peak_temp IS NOT NULL AND (SELECT count(DISTINCT f.fdate) FROM fwi_files f WHERE f.fdate BETWEEN d.fdate - 60 AND d.fdate) = 61 GROUP BY d.fdate ) SELECT fdate FROM eligible ORDER BY peak_temp DESC, fdate ASC LIMIT 1""",
             (season_start, season_end),
         )
         row = cur.fetchone()
@@ -745,18 +638,7 @@ def highest_temperature_fwi_dates_db() -> list[date]:
     """Hottest eligible May-October FWI day per calendar year (sorted)."""
     with _pg_connect() as conn, conn.cursor() as cur:
         cur.execute(
-            """WITH eligible AS (
-                   SELECT d.fdate, max(d.peak_temp) AS peak_temp
-                   FROM fwi_files d
-                   WHERE d.fdate IS NOT NULL AND d.peak_temp IS NOT NULL
-                     AND EXTRACT(MONTH FROM d.fdate) BETWEEN %s AND %s
-                     AND (SELECT count(DISTINCT f.fdate) FROM fwi_files f
-                          WHERE f.fdate BETWEEN d.fdate - 60 AND d.fdate) = 61
-                   GROUP BY d.fdate
-               )
-               SELECT DISTINCT ON (EXTRACT(YEAR FROM fdate)) fdate
-               FROM eligible
-               ORDER BY EXTRACT(YEAR FROM fdate), peak_temp DESC, fdate ASC""",
+            """WITH eligible AS ( SELECT d.fdate, max(d.peak_temp) AS peak_temp FROM fwi_files d WHERE d.fdate IS NOT NULL AND d.peak_temp IS NOT NULL AND EXTRACT(MONTH FROM d.fdate) BETWEEN %s AND %s AND (SELECT count(DISTINCT f.fdate) FROM fwi_files f WHERE f.fdate BETWEEN d.fdate - 60 AND d.fdate) = 61 GROUP BY d.fdate ) SELECT DISTINCT ON (EXTRACT(YEAR FROM fdate)) fdate FROM eligible ORDER BY EXTRACT(YEAR FROM fdate), peak_temp DESC, fdate ASC""",
             (FIRE_SEASON_START_MONTH, FIRE_SEASON_END_MONTH),
         )
         return sorted(r[0] for r in cur.fetchall())
@@ -769,15 +651,7 @@ def reconstruct_hist(
     clip_geom_crs: str = "EPSG:4326",
     target_date=None,
 ) -> dict[str, object]:
-    """Rebuild the HIST/ folder that FR.FHIST.fire_history reads, entirely from DB.
-
-    Two parts:
-      * Historico_incendios/hist_<year>.shp -- exported from the `hist` PostGIS
-        table, split back into one shapefile per year.
-      * PRE_FIRE/ and POST_FIRE/ Sentinel-2 scenes -- written back byte-exact from
-        the `hist_scenes` blob table (their filenames encode date+band, which
-        FR.FHIST parses, so they are stored as blobs rather than as rasters).
-    """
+    """Rebuild the HIST/ folder that FR.FHIST.fire_history reads, entirely from DB. Two parts: * Historico_incendios/hist_<year>.shp -- exported from the `hist` PostGIS table, split back into one shapefile per year. * PRE_FIRE/ and POST_FIRE/ Sentinel-2 scenes -- written back byte-exact from the `hist_scenes` blob table (their filenames encode date+band, which FR.FHIST parses, so they are stored as blobs rather than as rasters)."""
     dest_hist_dir = Path(dest_hist_dir)
     years_dir = dest_hist_dir / "Historico_incendios"
     years_dir.mkdir(parents=True, exist_ok=True)
@@ -849,17 +723,11 @@ def reconstruct_hist(
     }
 
 
-# ---------------------------------------------------------------------------
-# Per-engine reconstruction plan
-# ---------------------------------------------------------------------------
-# Each entry: (kind, table, relative destination path under INPUT/)
+# --------------------------------------------------------------------------- Per-engine reconstruction plan --------------------------------------------------------------------------- Each entry: (kind, table, relative destination path under INPUT/)
 _RASTER = "raster"
 _VECTOR = "vector"
 
-# The whole-region engines work in a projected (metric) CRS -- FR.infra computes
-# pixel counts as extent/25 m and FR.cropped reprojects to EPSG:32629. The stored
-# rasters are geographic (dtm/s2_* = 4326) or a different projection (fuels =
-# 25830), so reconstructed rasters are reprojected to this CRS for the engine.
+# The whole-region engines work in a projected (metric) CRS -- FR.infra computes pixel counts as extent/25 m and FR.cropped reprojects to EPSG:32629. The stored rasters are geographic (dtm/s2_* = 4326) or a different projection (fuels = 25830), so reconstructed rasters are reprojected to this CRS for the engine.
 ENGINE_RASTER_SRS = "EPSG:32629"
 
 ENGINE_VECTOR_SRS = "EPSG:32629"
@@ -924,13 +792,7 @@ def reconstruct_temporal_inputs(
     clip_geom: BaseGeometry | None = None,
     clip_geom_crs: str = "EPSG:4326",
 ) -> dict[str, object]:
-    """Reconstruct only date-dependent layers as of one assessment day.
-
-    LST is an optional enhancer: if no physically valid capture exists inside
-    the freshness window, it is omitted and the combiner reports/renormalizes
-    the missing weight. Sentinel vegetation layers remain required for the
-    dynamic vegetation topic and therefore fail closed when unavailable.
-    """
+    """Reconstruct only date-dependent layers as of one assessment day. LST is an optional enhancer: if no physically valid capture exists inside the freshness window, it is omitted and the combiner reports/renormalizes the missing weight. Sentinel vegetation layers remain required for the dynamic vegetation topic and therefore fail closed when unavailable."""
     dest_input_dir = Path(dest_input_dir)
     produced: dict[str, str] = {}
     layer_dates: dict[str, str] = {}
@@ -1021,9 +883,7 @@ def reconstruct_temporal_inputs(
         "sentinel_nominal_resolution_m": 20 if include_satellite else None,
     }
 
-# PostgreSQL lowercases identifiers on import, but the engine modules expect the
-# original shapefile column casing. Re-alias on export (the SELECT must include
-# the geometry column so OGR carries it through).
+# PostgreSQL lowercases identifiers on import, but the engine modules expect the original shapefile column casing. Re-alias on export (the SELECT must include the geometry column so OGR carries it through).
 _VECTOR_SELECT_SQL: dict[str, str] = {
     "iuf": 'SELECT geom, code_18 AS "Code_18" FROM iuf',
 }
@@ -1067,11 +927,7 @@ def reconstruct_inputs(
     clip_geom: BaseGeometry | None = None,
     clip_geom_crs: str = "EPSG:4326",
 ) -> dict[str, object]:
-    """Materialise the engine-expected INPUT/ tree from PostGIS (+ FWI copy).
-
-    Returns a dict with the produced file paths keyed by their INPUT-relative path,
-    plus the list of FWI files copied.
-    """
+    """Materialise the engine-expected INPUT/ tree from PostGIS (+ FWI copy). Returns a dict with the produced file paths keyed by their INPUT-relative path, plus the list of FWI files copied."""
     if engine not in _ENGINE_PLANS:
         raise ValueError(f"Unknown engine '{engine}'. Expected one of {sorted(_ENGINE_PLANS)}.")
 
@@ -1116,8 +972,7 @@ def reconstruct_inputs(
                                 t_srs=ENGINE_VECTOR_SRS, select_sql=_VECTOR_SELECT_SQL.get(table))
         produced[rel] = str(dest)
 
-    # Historical fire (both engines): yearly perimeters from the `hist` table
-    # plus the on-disk PRE_FIRE / POST_FIRE Sentinel scenes.
+    # Historical fire (both engines): yearly perimeters from the `hist` table plus the on-disk PRE_FIRE / POST_FIRE Sentinel scenes.
     hist_info: dict[str, object] = {"years": [], "complete_scene_years": []}
     if include_history:
         print("[reconstruct] exporting fire history (hotspot shapefiles + dNBR scenes)", flush=True)

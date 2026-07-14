@@ -149,14 +149,7 @@ def _fwi_slice(cur, fdate, hour_index: int | None) -> dict[str, Any] | None:
         hour_index = _standard_fwi_hour_index_for_date(fdate)
     cache_version = os.environ.get("STORCITO_MODEL_VERSION", "dev") + ":fwi-slice-v4"
     cur.execute(
-        """CREATE TABLE IF NOT EXISTS fwi_slices (
-               fdate date NOT NULL,
-               hour_index int NOT NULL,
-               data bytea NOT NULL,
-               cache_version text,
-               PRIMARY KEY (fdate, hour_index)
-           );
-           ALTER TABLE fwi_slices ADD COLUMN IF NOT EXISTS cache_version text"""
+        """CREATE TABLE IF NOT EXISTS fwi_slices ( fdate date NOT NULL, hour_index int NOT NULL, data bytea NOT NULL, cache_version text, PRIMARY KEY (fdate, hour_index) ); ALTER TABLE fwi_slices ADD COLUMN IF NOT EXISTS cache_version text"""
     )
     cur.execute(
         "SELECT data FROM fwi_slices WHERE fdate = %s AND hour_index = %s "

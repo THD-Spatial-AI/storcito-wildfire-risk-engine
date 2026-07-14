@@ -11,13 +11,7 @@ from pathlib import Path
 
 def cropped(input_folder, output_folder, infra_layer, distance):
     def create_buffered_mask(input_shapefile, buffer_distance, output_buffered_shapefile):
-        """
-        Create a buffered mask around the geometries in a shapefile.
-
-        :param input_shapefile: Path to the input shapefile.
-        :param buffer_distance: Distance of the buffer (in the units of the shapefile's CRS).
-        :param output_buffered_shapefile: Path where the buffered shapefile will be saved.
-        """
+        """Create a buffered mask around the geometries in a shapefile. :param input_shapefile: Path to the input shapefile. :param buffer_distance: Distance of the buffer (in the units of the shapefile's CRS). :param output_buffered_shapefile: Path where the buffered shapefile will be saved."""
         # Read the shapefile using geopandas
         gdf = gpd.read_file(input_shapefile)
         infra = gdf.to_crs(epsg=32629)
@@ -30,14 +24,7 @@ def cropped(input_folder, output_folder, infra_layer, distance):
         print(f"Buffered mask created: {output_buffered_shapefile}")
 
     def crop_tiff_with_mask(input_tiff, output_tiff, mask_shapefile):
-        """
-        Crop a TIFF file based on a mask (shapefile).
-        If the CRS do not match, reproject the shapefile automatically.
-
-        :param input_tiff: Path to the input TIFF file.
-        :param output_tiff: Path where the cropped TIFF will be saved.
-        :param mask_shapefile: Path to the shapefile used for cropping.
-        """
+        """Crop a TIFF file based on a mask (shapefile). If the CRS do not match, reproject the shapefile automatically. :param input_tiff: Path to the input TIFF file. :param output_tiff: Path where the cropped TIFF will be saved. :param mask_shapefile: Path to the shapefile used for cropping."""
         with rasterio.open(input_tiff) as src:
             raster_crs = src.crs
             
@@ -77,15 +64,7 @@ def cropped(input_folder, output_folder, infra_layer, distance):
             print(f"Cropped file saved in: {output_tiff}")
 
     def batch_crop_tiffs_with_buffer(input_folder, shapefile_for_buffer, buffer_distance, output_folder):
-        """
-        Process all TIFF files in a folder, generating a buffered mask from a shapefile
-        and then cropping the images with that mask.
-
-        :param input_folder: Folder containing the input TIFF files.
-        :param shapefile_for_buffer: Input shapefile to create the mask.
-        :param buffer_distance: Buffer distance (in the units of the shapefile's CRS).
-        :param output_folder: Folder where the cropped TIFF files will be saved.
-        """
+        """Process all TIFF files in a folder, generating a buffered mask from a shapefile and then cropping the images with that mask. :param input_folder: Folder containing the input TIFF files. :param shapefile_for_buffer: Input shapefile to create the mask. :param buffer_distance: Buffer distance (in the units of the shapefile's CRS). :param output_folder: Folder where the cropped TIFF files will be saved."""
         # Create output folder if it doesn't exist
         if not os.path.exists(output_folder):
             os.makedirs(output_folder)

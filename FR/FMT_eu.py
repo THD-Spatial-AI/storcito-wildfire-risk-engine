@@ -111,24 +111,7 @@ def _integer_codes(values: np.ndarray, nodata: float | None) -> set[int]:
 def fmt(input_file:str|Path,output_folder=Path('data/OUTPUT') ,file_name:str='FMT',
         export_image:bool=False,show_plots:bool=True) -> np.ndarray:
     
-    """Calculates Fuel Model Type (FMT) remapping with two classification levels.
-        
-    Remaps European FMT codes to Rothermel fuel model types and then to final
-    risk categories using lookup tables.
-        
-    Args:
-        input_file: Path to European FMT raster file
-        output_folder: Output folder path for saving results. Defaults to 'OUTPUT'
-        id_name: Identifier for output files. Defaults to 'FMT'
-        export_image: Whether to save figure and GeoTIFF/PNG files. Defaults to False
-        show_plots (bool, optional): _description_. Defaults to False.
-        
-    Returns:
-        Remapped array classified into final FMT risk categories (int32)
-        
-    Raises:
-        FileNotFoundError: If input_file does not exist
-    """
+    """Calculates Fuel Model Type (FMT) remapping with two classification levels. Remaps European FMT codes to Rothermel fuel model types and then to final risk categories using lookup tables. Args: input_file: Path to European FMT raster file output_folder: Output folder path for saving results. Defaults to 'OUTPUT' id_name: Identifier for output files. Defaults to 'FMT' export_image: Whether to save figure and GeoTIFF/PNG files. Defaults to False show_plots (bool, optional): _description_. Defaults to False. Returns: Remapped array classified into final FMT risk categories (int32) Raises: FileNotFoundError: If input_file does not exist"""
     input_file = Path(input_file)
 
     if not input_file.exists():

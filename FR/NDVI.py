@@ -13,17 +13,7 @@ from FR.rutinas.setup import (
 from pathlib import Path
 
 def ndvi(b4:str|Path,b8:str|Path,output_folder:str='data/OUTPUT',export_image:bool=False)->tuple[np.ndarray,np.ndarray]:
-    """Calculate NDVI (Normalized Difference Vegetation Index) from Sentinel-2 bands.
-
-    Args:
-        b4: Path to Band 4 (Red) raster file
-        b8: Path to Band 8 (NIR) raster file
-        output_folder: Output directory for exported files. Defaults to 'OUTPUT'
-        export_image: Whether to save results as GeoTIFF/PNG. Defaults to False
-
-    Returns:
-        Tuple of (ndvi_array, reclassified_risk_array) where risk is scaled 1-5
-    """
+    """Calculate NDVI (Normalized Difference Vegetation Index) from Sentinel-2 bands. Args: b4: Path to Band 4 (Red) raster file b8: Path to Band 8 (NIR) raster file output_folder: Output directory for exported files. Defaults to 'OUTPUT' export_image: Whether to save results as GeoTIFF/PNG. Defaults to False Returns: Tuple of (ndvi_array, reclassified_risk_array) where risk is scaled 1-5"""
 
     b4=Path(b4)
     b8=Path(b8)
@@ -44,8 +34,7 @@ def ndvi(b4:str|Path,b8:str|Path,output_folder:str='data/OUTPUT',export_image:bo
 
     ndvi = np.array( (band8 - band4) / (band8 + band4) )
     
-    # Data-driven bins (FIRMS fire history): shrub 0.2-0.4 burns most,
-    # bare (<=0.2) and lush (>0.8) least.
+    # Data-driven bins (FIRMS fire history): shrub 0.2-0.4 burns most, bare (<=0.2) and lush (>0.8) least.
     condiciones = [
         ndvi <= 0.2,
         (ndvi > 0.2) & (ndvi <= 0.4),
@@ -135,14 +124,7 @@ def ndvi_precomputed_finca(
 
 
 def ndvi_folder(input_folder:str='data/INPUT',output_folder:str='data/OUTPUT',indices:list[int]|None=None,export_image:bool=False)->None:
-    """Process multiple Sentinel-2 scenes to calculate NDVI for each.
-
-    Args:
-        input_folder: Directory containing Sentinel-2 TIFF files. Defaults to 'INPUT'
-        output_folder: Output directory for results. Defaults to 'OUTPUT'
-        indices: List of scene indices to process. None processes all scenes
-        export_image: Whether to save results as GeoTIFF/PNG. Defaults to False
-    """
+    """Process multiple Sentinel-2 scenes to calculate NDVI for each. Args: input_folder: Directory containing Sentinel-2 TIFF files. Defaults to 'INPUT' output_folder: Output directory for results. Defaults to 'OUTPUT' indices: List of scene indices to process. None processes all scenes export_image: Whether to save results as GeoTIFF/PNG. Defaults to False"""
     bandas_requeridas=["B04","B08"]
 
     valids,_=check_valid_entries(bandas_requeridas,input_folder=input_folder)
@@ -163,8 +145,7 @@ def ndvi_folder(input_folder:str='data/INPUT',output_folder:str='data/OUTPUT',in
     ndvi =np.array([(info['B08'][i] - info['B04'][i]) / (info['B08'][i] + info['B04'][i]) 
            for i in indices])
 
-    # Data-driven bins (FIRMS fire history): shrub 0.2-0.4 burns most,
-    # bare (<=0.2) and lush (>0.8) least.
+    # Data-driven bins (FIRMS fire history): shrub 0.2-0.4 burns most, bare (<=0.2) and lush (>0.8) least.
     condiciones = [
         ndvi <= 0.2,
         (ndvi > 0.2) & (ndvi <= 0.4),

@@ -64,12 +64,7 @@ def write_aoi_geojson(
     *,
     crs: str = DEFAULT_PROJECTED_CRS,
 ) -> Path:
-    """Persist an AOI geometry for inspection/debugging.
-
-    Uses the standard library instead of geopandas.to_file to avoid pulling in
-    pyogrio's GDAL_DATA initialisation, which can fail in some conda/container
-    layouts even when GDAL itself is healthy.
-    """
+    """Persist an AOI geometry for inspection/debugging. Uses the standard library instead of geopandas.to_file to avoid pulling in pyogrio's GDAL_DATA initialisation, which can fail in some conda/container layouts even when GDAL itself is healthy."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     feature_collection = {

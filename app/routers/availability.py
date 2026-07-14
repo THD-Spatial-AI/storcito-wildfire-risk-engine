@@ -35,8 +35,7 @@ def available_dynamic_dates():
         )
 
         newest = dates[-1]
-        # Only days beyond the FWI archive are forecasts; if eligibility is
-        # capped by Sentinel/LST instead, +1/+2 are past dates, not forecasts.
+        # Only days beyond the FWI archive are forecasts; if eligibility is capped by Sentinel/LST instead, +1/+2 are past dates, not forecasts.
         with _pg_connect() as conn, conn.cursor() as cur:
             cur.execute("SELECT max(fdate) FROM fwi_files")
             newest_fwi = cur.fetchone()[0]

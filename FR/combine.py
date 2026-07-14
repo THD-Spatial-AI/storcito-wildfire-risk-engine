@@ -1,9 +1,4 @@
-"""Compatibility entry points for the canonical AOI risk-layer combiner.
-
-The authoritative AHP matrices and nodata handling live in
-``app.engines.FFRM_estatic_aoi``.  Keeping a second implementation here had
-allowed the whole-region and AOI outputs to use different models.
-"""
+"""Compatibility entry points for the canonical AOI risk-layer combiner. The authoritative AHP matrices and nodata handling live in ``app.engines.FFRM_estatic_aoi``. Keeping a second implementation here had allowed the whole-region and AOI outputs to use different models."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -36,12 +31,7 @@ def _combine_layers(
     final_png_path: Path,
     active_top_levels: set[str] | None = None,
 ) -> dict[str, Path]:
-    """Call the canonical original-model combiner with the legacy signature.
-
-    Dynamic inputs are identifiable by their NDMI or LST layers.  Historical
-    fire is exported for display, but the original STORCITO matrices do not
-    use it as a predictor.
-    """
+    """Call the canonical original-model combiner with the legacy signature. Dynamic inputs are identifiable by their NDMI or LST layers. Historical fire is exported for display, but the original STORCITO matrices do not use it as a predictor."""
     active = set(active_top_levels or TOP_LEVEL_KEYS)
     unknown = active - set(TOP_LEVEL_KEYS)
     if unknown:

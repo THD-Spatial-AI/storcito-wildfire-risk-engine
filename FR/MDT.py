@@ -11,20 +11,7 @@ from pathlib import Path
 def mdt(ruta_mdt,output_folder:str|Path=Path('data/OUTPUT'),
         export_image=False,
         show_plots=True) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Calculate terrain risk layers from Digital Elevation Model (DEM).
-
-    Derives three risk layers from DEM: elevation (MDT), slope, and aspect.
-    Each layer is reclassified into fire risk categories (1-5).
-
-    Args:
-        ruta_mdt: Path to the DEM/DTM raster file
-        output_folder: Output directory for results. Defaults to 'OUTPUT'
-        export_image: Whether to save results as GeoTIFF/PNG. Defaults to False
-        show_plots: Whether to display matplotlib plots. Defaults to True
-
-    Returns:
-        Tuple of (mdt_risk, slope_risk, aspect_risk) arrays with values 1-5
-    """
+    """Calculate terrain risk layers from Digital Elevation Model (DEM). Derives three risk layers from DEM: elevation (MDT), slope, and aspect. Each layer is reclassified into fire risk categories (1-5). Args: ruta_mdt: Path to the DEM/DTM raster file output_folder: Output directory for results. Defaults to 'OUTPUT' export_image: Whether to save results as GeoTIFF/PNG. Defaults to False show_plots: Whether to display matplotlib plots. Defaults to True Returns: Tuple of (mdt_risk, slope_risk, aspect_risk) arrays with values 1-5"""
     
     print('MDT, SLOPE and ASPECT Layers processing...')
     output_folder = Path(output_folder)
@@ -48,8 +35,7 @@ def mdt(ruta_mdt,output_folder:str|Path=Path('data/OUTPUT'),
     
     # reclasificaciones
     print("Reclasificando MDT...")
-    # Data-driven (FIRMS): fires concentrate at mid/upper elevations;
-    # lowlands <=200 m rarely burn.
+    # Data-driven (FIRMS): fires concentrate at mid/upper elevations; lowlands <=200 m rarely burn.
     mdt_bins = [0, 200, 400, 600, 800]
     mdt_classes = np.array([0, 1, 4, 5, 4, 5], dtype='int32')
     mdt_re = mdt_classes[np.digitize(mdt, mdt_bins, right=True)]
@@ -76,7 +62,7 @@ def mdt(ruta_mdt,output_folder:str|Path=Path('data/OUTPUT'),
                  (aspect >= 270) & (aspect < 315),
                  (aspect >= 315) & (aspect < 360),
     ]
-    #XXX: La secuencia de choices es correcta?
+    # XXX: La secuencia de choices es correcta?
     choices= [1, 2, 3, 4, 5, 5, 3, 2]
     aspect_re = np.select(conditions,choices,default=0,).astype('int32')
     fig_aspect, ax_aspect = default_imshow(aspect_re, 'Aspect Risk Map', {'label':'Risk'})

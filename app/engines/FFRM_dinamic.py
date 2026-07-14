@@ -31,16 +31,9 @@ def _env_flag(name: str, default: bool) -> bool:
     return raw.strip() not in {"0", "", "false", "False"}
 
 
-# ==========================================
-# 1. LAYER GENERATION
-# ==========================================
+# ========================================== 1. LAYER GENERATION ==========================================
 
-# ---------------------------
-# 1.1. INPUT PATHS
-# ---------------------------
-# Input root may be overridden per request (api.py sets FFRM_BASE_DIR to a job
-# folder whose INPUT/ tree was reconstructed from PostGIS). Direct runs use the
-# repository data directory.
+# --------------------------- 1.1. INPUT PATHS --------------------------- Input root may be overridden per request (api.py sets FFRM_BASE_DIR to a job folder whose INPUT/ tree was reconstructed from PostGIS). Direct runs use the repository data directory.
 repo_root = Path(__file__).resolve().parents[2]
 base_dir = os.environ.get("FFRM_BASE_DIR", os.environ.get("STORCITO_DATA_DIR", str(repo_root / "data")))
 
@@ -67,10 +60,7 @@ input_clc = os.path.join(base_dir, 'INPUT', 'IUF', 'CLC_galicia.shp')
 input_fwi_folder = os.path.join(base_dir, 'INPUT', 'FWI')
 input_lst = os.path.join(base_dir, 'INPUT', 'LST', 'LST.tiff')
 
-# ---------------------------
-# 1.2. OUTPUT FOLDERS
-# ---------------------------
-# Output root may be overridden per request (api.py sets FFRM_OUTPUT_DIR).
+# --------------------------- 1.2. OUTPUT FOLDERS --------------------------- Output root may be overridden per request (api.py sets FFRM_OUTPUT_DIR).
 output_base = os.environ.get("FFRM_OUTPUT_DIR", os.path.join(base_dir, 'OUTPUT'))
 output_folder_re = os.path.join(output_base, 're')
 output_folder_cropped = os.path.join(output_base, 'Cropped')
@@ -78,10 +68,7 @@ output_folder_cropped = os.path.join(output_base, 'Cropped')
 os.makedirs(output_folder_re, exist_ok=True)
 os.makedirs(output_folder_cropped, exist_ok=True)
 
-# ---------------------------
-# 1.3. EXECUTION CONTROL
-# ---------------------------
-# Defaults overridable via FFRM_RUN_* env vars.
+# --------------------------- 1.3. EXECUTION CONTROL --------------------------- Defaults overridable via FFRM_RUN_* env vars.
 run_mdt = _env_flag("FFRM_RUN_MDT", True)
 run_twi = _env_flag("FFRM_RUN_TWI", False)
 run_ndvi = _env_flag("FFRM_RUN_NDVI", True)
@@ -111,9 +98,7 @@ def _step(msg: str) -> None:
     _engine_last[0] = now
 
 
-# ---------------------------
-# 1.4. LAYER GENERATION
-# ---------------------------
+# --------------------------- 1.4. LAYER GENERATION ---------------------------
 mdt_reference = os.path.join(output_folder_re, 'TIFs', 'MDT_RISK_MAP.tif')
 
 if generate_mdt:
@@ -179,8 +164,7 @@ if generate_wui:
 
 if run_fwi:
     _step("fire weather index (FWI) - warm-up + scoring")
-    # NetCDF FWI; the job's INPUT/FWI folder already contains only the files up
-    # to the requested date, so no target_date filtering is needed here.
+    # NetCDF FWI; the job's INPUT/FWI folder already contains only the files up to the requested date, so no target_date filtering is needed here.
     Fwi.f_w_index(
         input_fwi_folder,
         output_folder=output_folder_re,
@@ -206,9 +190,7 @@ _plt.close('all')
 
 print("Todas las capas base del caso dinámico generadas/disponibles en 're'.")
 
-# ==========================================
-# 2. CROP WITH BUFFER (Cropped Folder)
-# ==========================================
+# ========================================== 2. CROP WITH BUFFER (Cropped Folder) ==========================================
 _step("cropping all layers to the study area (+buffer)")
 shapefile_for_buffer = input_clc
 buffer_distance = 3000
@@ -219,9 +201,7 @@ def _cropped(name):
     return os.path.join(output_folder_cropped, name)
 
 
-# ==========================================
-# 3. CANONICAL AHP COMBINATION
-# ==========================================
+# ========================================== 3. CANONICAL AHP COMBINATION ==========================================
 _step("canonical AHP alignment, optional-gap renormalization, and final map")
 
 candidate_paths: dict[str, tuple[str, bool]] = {
@@ -263,9 +243,7 @@ dynamic_continuous = Path(output_base) / "mapa_final_dinamico.tif"
 shutil.copyfile(outputs["continuous_map"], dynamic_continuous)
 print(f"Final map saved successfully in:\n '{fr_final}'")
 
-# ==========================================
-# 6. CLEANUP OF INTERMEDIATE FOLDER
-# ==========================================
+# ========================================== 6. CLEANUP OF INTERMEDIATE FOLDER ==========================================
 print("\nPerforming cleanup of temporary files...")
 for folder in [output_folder_cropped]:
     if os.path.exists(folder):

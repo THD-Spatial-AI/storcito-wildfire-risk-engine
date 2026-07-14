@@ -1,10 +1,4 @@
-"""DB-backed storage for user-supplied engine inputs.
-
-Uploaded DTMs and weather-station files are small in number but need to survive
-container restarts and be reusable across runs. Store the original DTM GeoTIFF
-bytes plus spatial metadata, and store station data after normalising it to the
-CSV layout expected by the FWI station engine.
-"""
+"""DB-backed storage for user-supplied engine inputs. Uploaded DTMs and weather-station files are small in number but need to survive container restarts and be reusable across runs. Store the original DTM GeoTIFF bytes plus spatial metadata, and store station data after normalising it to the CSV layout expected by the FWI station engine."""
 from __future__ import annotations
 
 import json
@@ -54,52 +48,7 @@ def _connect():
     )
 
 
-DDL = """
-CREATE TABLE IF NOT EXISTS public.user_input_files (
-    id              bigserial PRIMARY KEY,
-    user_id         text NOT NULL,
-    model_id        text NOT NULL,
-    kind            text NOT NULL CHECK (kind IN ('dtm', 'ndvi', 'station_data')),
-    filename        text NOT NULL,
-    source_filename text,
-    content_type    text,
-    data            bytea NOT NULL,
-    nbytes          bigint NOT NULL,
-    raster_srid     integer,
-    footprint       geometry(Polygon, 4326),
-    metadata        jsonb NOT NULL DEFAULT '{}'::jsonb,
-    created_at      timestamptz NOT NULL DEFAULT now(),
-    updated_at      timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (user_id, model_id, kind)
-);
-
-CREATE INDEX IF NOT EXISTS user_input_files_user_model_idx
-    ON public.user_input_files (user_id, model_id);
-
-ALTER TABLE public.user_input_files
-    ADD COLUMN IF NOT EXISTS footprint geometry(Polygon, 4326);
-
-ALTER TABLE public.user_input_files
-    DROP CONSTRAINT IF EXISTS user_input_files_kind_check;
-
-ALTER TABLE public.user_input_files
-    ADD CONSTRAINT user_input_files_kind_check
-    CHECK (kind IN ('dtm', 'ndvi', 'station_data'));
-
-CREATE INDEX IF NOT EXISTS user_input_files_footprint_gix
-    ON public.user_input_files USING gist (footprint);
-
-CREATE TABLE IF NOT EXISTS public.user_input_file_chunks (
-    user_input_id bigint NOT NULL REFERENCES public.user_input_files(id) ON DELETE CASCADE,
-    chunk_index   integer NOT NULL,
-    data          bytea NOT NULL,
-    nbytes        integer NOT NULL,
-    PRIMARY KEY (user_input_id, chunk_index)
-);
-
-CREATE INDEX IF NOT EXISTS user_input_file_chunks_input_idx
-    ON public.user_input_file_chunks (user_input_id, chunk_index);
-"""
+DDL = """CREATE TABLE IF NOT EXISTS public.user_input_files ( id bigserial PRIMARY KEY, user_id text NOT NULL, model_id text NOT NULL, kind text NOT NULL CHECK (kind IN ('dtm', 'ndvi', 'station_data')), filename text NOT NULL, source_filename text, content_type text, data bytea NOT NULL, nbytes bigint NOT NULL, raster_srid integer, footprint geometry(Polygon, 4326), metadata jsonb NOT NULL DEFAULT '{}'::jsonb, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE (user_id, model_id, kind) ); CREATE INDEX IF NOT EXISTS user_input_files_user_model_idx ON public.user_input_files (user_id, model_id); ALTER TABLE public.user_input_files ADD COLUMN IF NOT EXISTS footprint geometry(Polygon, 4326); ALTER TABLE public.user_input_files DROP CONSTRAINT IF EXISTS user_input_files_kind_check; ALTER TABLE public.user_input_files ADD CONSTRAINT user_input_files_kind_check CHECK (kind IN ('dtm', 'ndvi', 'station_data')); CREATE INDEX IF NOT EXISTS user_input_files_footprint_gix ON public.user_input_files USING gist (footprint); CREATE TABLE IF NOT EXISTS public.user_input_file_chunks ( user_input_id bigint NOT NULL REFERENCES public.user_input_files(id) ON DELETE CASCADE, chunk_index integer NOT NULL, data bytea NOT NULL, nbytes integer NOT NULL, PRIMARY KEY (user_input_id, chunk_index) ); CREATE INDEX IF NOT EXISTS user_input_file_chunks_input_idx ON public.user_input_file_chunks (user_input_id, chunk_index);"""
 
 
 def _ensure_schema(cur) -> None:
@@ -229,28 +178,7 @@ def _upsert_user_input(
             f"bytes={len(data)} raster_srid={raster_srid or 'none'}"
         )
         cur.execute(
-            """
-            INSERT INTO public.user_input_files
-                (user_id, model_id, kind, filename, source_filename, content_type,
-                 data, nbytes, raster_srid, footprint, metadata)
-            VALUES
-                (%s, %s, %s, %s, %s, %s, %s, %s, %s,
-                 CASE WHEN %s IS NULL THEN NULL ELSE ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326) END,
-                 %s)
-            ON CONFLICT (user_id, model_id, kind)
-            DO UPDATE SET
-                filename = EXCLUDED.filename,
-                source_filename = EXCLUDED.source_filename,
-                content_type = EXCLUDED.content_type,
-                data = EXCLUDED.data,
-                nbytes = EXCLUDED.nbytes,
-                raster_srid = EXCLUDED.raster_srid,
-                footprint = EXCLUDED.footprint,
-                metadata = EXCLUDED.metadata,
-                updated_at = now()
-            RETURNING kind, filename, source_filename, nbytes, raster_srid,
-                      ST_AsGeoJSON(footprint), metadata, updated_at
-            """,
+            """INSERT INTO public.user_input_files (user_id, model_id, kind, filename, source_filename, content_type, data, nbytes, raster_srid, footprint, metadata) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CASE WHEN %s IS NULL THEN NULL ELSE ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326) END, %s) ON CONFLICT (user_id, model_id, kind) DO UPDATE SET filename = EXCLUDED.filename, source_filename = EXCLUDED.source_filename, content_type = EXCLUDED.content_type, data = EXCLUDED.data, nbytes = EXCLUDED.nbytes, raster_srid = EXCLUDED.raster_srid, footprint = EXCLUDED.footprint, metadata = EXCLUDED.metadata, updated_at = now() RETURNING kind, filename, source_filename, nbytes, raster_srid, ST_AsGeoJSON(footprint), metadata, updated_at""",
             (
                 user_id,
                 model_id,
@@ -311,28 +239,7 @@ def _upsert_dtm_chunks(
             f"chunk_size={chunk_size} raster_srid={raster_srid or 'none'}"
         )
         cur.execute(
-            """
-            INSERT INTO public.user_input_files
-                (user_id, model_id, kind, filename, source_filename, content_type,
-                 data, nbytes, raster_srid, footprint, metadata)
-            VALUES
-                (%s, %s, %s, %s, %s, %s, %s, %s, %s,
-                 ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326),
-                 %s)
-            ON CONFLICT (user_id, model_id, kind)
-            DO UPDATE SET
-                filename = EXCLUDED.filename,
-                source_filename = EXCLUDED.source_filename,
-                content_type = EXCLUDED.content_type,
-                data = EXCLUDED.data,
-                nbytes = EXCLUDED.nbytes,
-                raster_srid = EXCLUDED.raster_srid,
-                footprint = EXCLUDED.footprint,
-                metadata = EXCLUDED.metadata,
-                updated_at = now()
-            RETURNING id, kind, filename, source_filename, nbytes, raster_srid,
-                      ST_AsGeoJSON(footprint), metadata, updated_at
-            """,
+            """INSERT INTO public.user_input_files (user_id, model_id, kind, filename, source_filename, content_type, data, nbytes, raster_srid, footprint, metadata) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326), %s) ON CONFLICT (user_id, model_id, kind) DO UPDATE SET filename = EXCLUDED.filename, source_filename = EXCLUDED.source_filename, content_type = EXCLUDED.content_type, data = EXCLUDED.data, nbytes = EXCLUDED.nbytes, raster_srid = EXCLUDED.raster_srid, footprint = EXCLUDED.footprint, metadata = EXCLUDED.metadata, updated_at = now() RETURNING id, kind, filename, source_filename, nbytes, raster_srid, ST_AsGeoJSON(footprint), metadata, updated_at""",
             (
                 user_id,
                 model_id,
@@ -362,11 +269,7 @@ def _upsert_dtm_chunks(
                 if not chunk:
                     break
                 cur.execute(
-                    """
-                    INSERT INTO public.user_input_file_chunks
-                        (user_input_id, chunk_index, data, nbytes)
-                    VALUES (%s, %s, %s, %s)
-                    """,
+                    """INSERT INTO public.user_input_file_chunks (user_input_id, chunk_index, data, nbytes) VALUES (%s, %s, %s, %s)""",
                     (user_input_id, chunk_count, psycopg2.Binary(chunk), len(chunk)),
                 )
                 uploaded += len(chunk)
@@ -508,11 +411,7 @@ def materialize_user_input(
             f"user_id={user_id} model_id={model_id}"
         )
         cur.execute(
-            """
-            SELECT id, data, metadata
-            FROM public.user_input_files
-            WHERE user_id = %s AND model_id = %s AND kind = %s
-            """,
+            """SELECT id, data, metadata FROM public.user_input_files WHERE user_id = %s AND model_id = %s AND kind = %s""",
             (user_id, model_id, kind),
         )
         row = cur.fetchone()
@@ -527,12 +426,7 @@ def materialize_user_input(
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         if isinstance(metadata, dict) and metadata.get("storage_mode") == "chunks":
             cur.execute(
-                """
-                SELECT chunk_index, data
-                FROM public.user_input_file_chunks
-                WHERE user_input_id = %s
-                ORDER BY chunk_index
-                """,
+                """SELECT chunk_index, data FROM public.user_input_file_chunks WHERE user_input_id = %s ORDER BY chunk_index""",
                 (user_input_id,),
             )
             chunk_count = 0
@@ -564,13 +458,7 @@ def list_user_inputs(user_id: str, model_id: str) -> list[dict[str, Any]]:
     with _connect() as conn, conn.cursor() as cur:
         _ensure_schema(cur)
         cur.execute(
-            """
-            SELECT kind, filename, source_filename, nbytes, raster_srid,
-                   ST_AsGeoJSON(footprint), metadata, updated_at
-            FROM public.user_input_files
-            WHERE user_id = %s AND model_id = %s
-            ORDER BY kind
-            """,
+            """SELECT kind, filename, source_filename, nbytes, raster_srid, ST_AsGeoJSON(footprint), metadata, updated_at FROM public.user_input_files WHERE user_id = %s AND model_id = %s ORDER BY kind""",
             (user_id, model_id),
         )
         return [_row_to_metadata(row) for row in cur.fetchall()]

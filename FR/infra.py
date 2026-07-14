@@ -19,16 +19,7 @@ from FR.aoi import reproject_geometry
 # sys.path.append(r'..\geo_auxy')
 
 def _create_risk_rings(geometry: BaseGeometry, radii: list[int], risks: list[int]) -> gpd.GeoDataFrame:
-    """Crea anillos concéntricos de riesgo alrededor de geometría.
-    
-    Args:
-        geometry: Geometría unificada (buffer inicial)
-        radii: Lista de radios para los buffers en metros
-        risks: Lista de valores de riesgo correspondientes
-        
-    Returns:
-        GeoDataFrame con geometría de anillos y valores de riesgo
-    """
+    """Crea anillos concéntricos de riesgo alrededor de geometría. Args: geometry: Geometría unificada (buffer inicial) radii: Lista de radios para los buffers en metros risks: Lista de valores de riesgo correspondientes Returns: GeoDataFrame con geometría de anillos y valores de riesgo"""
     buffers = [geometry.buffer(r) for r in radii]
     anillos_data = []
     
@@ -54,34 +45,7 @@ def infrastructure(input_infra: str|Path,
                    risk_profile: str = "regional",
                    radii_m: list[int] | None = None,
                    use_reference_grid: bool | None = None) -> npt.NDArray:
-    """Calculate infrastructure proximity risk from roads and railways.
-
-    Creates concentric buffer rings around infrastructure features and assigns
-    decreasing risk values (5 to 1) based on distance (250m to 1250m).
-
-    Args:
-        input_infra: Path to infrastructure shapefile (roads/railways)
-        output_folder: Output directory for results. Defaults to 'OUTPUT'
-        ref_raster: Reference raster for extent and resolution. Defaults to DEM
-        epsg: Target CRS EPSG code. Defaults to 32629 (UTM 29N)
-        export_image: Whether to save results as GeoTIFF/PNG. Defaults to False
-        show_plots: Whether to display matplotlib plots. Defaults to False
-        simplify: Whether to simplify geometries for performance. Defaults to False
-        tolerance: Simplification tolerance in meters. Defaults to 10
-        aoi_geometry: Optional AOI geometry used to spatially limit vector processing.
-        aoi_crs: CRS of ``aoi_geometry``. Defaults to EPSG:32629.
-        risk_profile: ``regional`` keeps 250-1250 m buffers; ``finca`` uses the
-            old parcel-scale 25-125 m buffers.
-        radii_m: Optional explicit buffer radii in meters.
-        use_reference_grid: Rasterize on the reference raster's native grid.
-            Defaults to true for finca mode and false for regional mode.
-
-    Returns:
-        Rasterized risk array with values 0-5 (0=no infrastructure nearby)
-
-    Raises:
-        FileNotFoundError: If input shapefile or reference raster not found
-    """
+    """Calculate infrastructure proximity risk from roads and railways. Creates concentric buffer rings around infrastructure features and assigns decreasing risk values (5 to 1) based on distance (250m to 1250m). Args: input_infra: Path to infrastructure shapefile (roads/railways) output_folder: Output directory for results. Defaults to 'OUTPUT' ref_raster: Reference raster for extent and resolution. Defaults to DEM epsg: Target CRS EPSG code. Defaults to 32629 (UTM 29N) export_image: Whether to save results as GeoTIFF/PNG. Defaults to False show_plots: Whether to display matplotlib plots. Defaults to False simplify: Whether to simplify geometries for performance. Defaults to False tolerance: Simplification tolerance in meters. Defaults to 10 aoi_geometry: Optional AOI geometry used to spatially limit vector processing. aoi_crs: CRS of ``aoi_geometry``. Defaults to EPSG:32629. risk_profile: ``regional`` keeps 250-1250 m buffers; ``finca`` uses the old parcel-scale 25-125 m buffers. radii_m: Optional explicit buffer radii in meters. use_reference_grid: Rasterize on the reference raster's native grid. Defaults to true for finca mode and false for regional mode. Returns: Rasterized risk array with values 0-5 (0=no infrastructure nearby) Raises: FileNotFoundError: If input shapefile or reference raster not found"""
     
     # Validar y convertir paths
 

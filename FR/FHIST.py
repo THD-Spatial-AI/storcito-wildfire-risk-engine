@@ -22,23 +22,7 @@ BUFFER_SIZE=660
 BURNED_THRESHOLD=0.27
 
 def fire_history(input_folder:str|Path=Path('data/INPUT'), output_folder:str|Path = Path('data/OUTPUT'),export_image: bool=False,show_plots:bool=False) -> tuple[np.ndarray, np.ndarray]:
-    """Analyze historical fire events using dNBR (differenced Normalized Burn Ratio).
-
-    Compares pre-fire and post-fire Sentinel-2 imagery to detect burned areas,
-    accumulates changes across multiple fire events, and reclassifies into risk levels.
-
-    Args:
-        input_folder: Directory containing pre/post fire Sentinel-2 TIFF files
-        output_folder: Output directory for results. Defaults to 'OUTPUT'
-        export_image: Whether to save results as GeoTIFF/PNG. Defaults to False
-        show_plots: Whether to display matplotlib plots. Defaults to False
-
-    Returns:
-        Tuple of (cumulative_burn_sum, reclassified_risk_array) with risk scaled 1-5
-
-    Raises:
-        ValueError: If historical data cannot be calculated or metadata is missing
-    """
+    """Analyze historical fire events using dNBR (differenced Normalized Burn Ratio). Compares pre-fire and post-fire Sentinel-2 imagery to detect burned areas, accumulates changes across multiple fire events, and reclassifies into risk levels. Args: input_folder: Directory containing pre/post fire Sentinel-2 TIFF files output_folder: Output directory for results. Defaults to 'OUTPUT' export_image: Whether to save results as GeoTIFF/PNG. Defaults to False show_plots: Whether to display matplotlib plots. Defaults to False Returns: Tuple of (cumulative_burn_sum, reclassified_risk_array) with risk scaled 1-5 Raises: ValueError: If historical data cannot be calculated or metadata is missing"""
     input_folder = Path(input_folder)
     output_folder = Path(output_folder)
 
@@ -91,29 +75,12 @@ def fire_history(input_folder:str|Path=Path('data/INPUT'), output_folder:str|Pat
         )
 
     def _calculate_nbr(nir: np.ndarray, swir: np.ndarray) -> np.ndarray:
-        """Calculate Normalized Burn Ratio (NBR) from NIR and SWIR bands.
-
-        Args:
-            nir: Near-infrared band array (B8A)
-            swir: Short-wave infrared band array (B12)
-
-        Returns:
-            NBR array with values in range [-1, 1]
-        """
+        """Calculate Normalized Burn Ratio (NBR) from NIR and SWIR bands. Args: nir: Near-infrared band array (B8A) swir: Short-wave infrared band array (B12) Returns: NBR array with values in range [-1, 1]"""
         np.seterr(divide='ignore', invalid='ignore')
         return (nir - swir) / (nir + swir)
     
     def _apply_mask_to_raster(raster: np.ndarray, meta: dict, geometries: list) -> tuple[np.ndarray, rasterio.Affine]:
-        """Mask a raster while preserving its complete georeferenced grid.
-
-        Args:
-            raster: 2D array to mask
-            meta: Rasterio metadata with CRS and transform
-            geometries: List of shapely geometries for masking
-
-        Returns:
-            Tuple of (masked_array, output_transform)
-        """
+        """Mask a raster while preserving its complete georeferenced grid. Args: raster: 2D array to mask meta: Rasterio metadata with CRS and transform geometries: List of shapely geometries for masking Returns: Tuple of (masked_array, output_transform)"""
         with MemoryFile() as memfile:
             with memfile.open(driver='GTiff', height=raster.shape[0], width=raster.shape[1], count=1,
                             dtype=raster.dtype, crs=meta['crs'], transform=meta['transform']) as mem_src:
@@ -125,31 +92,14 @@ def fire_history(input_folder:str|Path=Path('data/INPUT'), output_folder:str|Pat
         return out_image, out_transform
     
     def _load_reference_geometries(year: int) -> list:
-        """Load and buffer historical fire perimeters for a given year.
-
-        Args:
-            year: Year of historical fire data to load
-
-        Returns:
-            List of dissolved buffered geometries for masking
-        """
+        """Load and buffer historical fire perimeters for a given year. Args: year: Year of historical fire data to load Returns: List of dissolved buffered geometries for masking"""
         historico = gpd.read_file(reference_folder/f'hist_{year}.shp')
         buff = historico.geometry.buffer(BUFFER_SIZE)
         buff_gdf = gpd.GeoDataFrame({'geometry': buff}, crs=historico.crs)
         return list(buff_gdf.dissolve().geometry)
 
     def calcular_dnbr(pre_b8, pre_b12, post_b8, post_b12) -> tuple[np.ndarray, rasterio.Affine, dict]:
-        """Calcula dNBR (Differenced NBR) para detección de incendios.
-        
-        Args:
-            pre_b8: Ruta a banda B8A previa al incendio
-            pre_b12: Ruta a banda B12 previa al incendio
-            post_b8: Ruta a banda B8A posterior al incendio
-            post_b12: Ruta a banda B12 posterior al incendio
-        
-        Returns:
-            Tupla (imagen enmascarada, transformada, metadatos)
-        """
+        """Calcula dNBR (Differenced NBR) para detección de incendios. Args: pre_b8: Ruta a banda B8A previa al incendio pre_b12: Ruta a banda B12 previa al incendio post_b8: Ruta a banda B8A posterior al incendio post_b12: Ruta a banda B12 posterior al incendio Returns: Tupla (imagen enmascarada, transformada, metadatos)"""
         year = parse_filename(pre_b8).fecha_inicio.year
         
         # Reproyectar bandas
@@ -219,8 +169,7 @@ def fire_history(input_folder:str|Path=Path('data/INPUT'), output_folder:str|Pat
                 target_meta = meta.copy()
                 target_meta.update({'transform': out_transform})
         
-        # Remuestrear si es necesario y acumular. Equal dimensions alone do
-        # not establish spatial alignment; transforms and CRSs must also match.
+        # Remuestrear si es necesario y acumular. Equal dimensions alone do not establish spatial alignment; transforms and CRSs must also match.
         same_grid = (
             out_image.shape[1:] == suma_total.shape
             and out_transform == target_meta["transform"]

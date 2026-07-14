@@ -295,9 +295,7 @@ def _run_wildfire_payload(
     )
     validate_user_raster_coverage(user_inputs, processing_aoi)
 
-    # Serve from the nightly precomputed regional map when the request is a
-    # plain regional dynamic run (no custom inputs/layers, no force_compute):
-    # ST_Clip in seconds instead of a ~30 min engine run.
+    # Serve from the nightly precomputed regional map when the request is a plain regional dynamic run (no custom inputs/layers, no force_compute): ST_Clip in seconds instead of a ~30 min engine run.
     if (
         calculation_mode == "dynamic"
         and risk_profile == "regional"
@@ -394,9 +392,7 @@ def _run_wildfire_payload(
 def _finish_wildfire_response(outputs, payload, request, calculation_mode,
                               risk_profile, requested_date, target_date, start_date,
                               output_aoi, optional_layers, user_inputs):
-    """Shared tail of a wildfire request: weather summary, URLs, DB store,
-    callback zip, response dict. Used by both the computed and the
-    precomputed (regional clip) paths."""
+    """Shared tail of a wildfire request: weather summary, URLs, DB store, callback zip, response dict. Used by both the computed and the precomputed (regional clip) paths."""
     precomputed = outputs.get("source") == "precomputed"
     if not precomputed:
         validate_risk_outputs(outputs)
@@ -421,8 +417,7 @@ def _finish_wildfire_response(outputs, payload, request, calculation_mode,
 
     db_info = db_error = None
     if not precomputed:
-        # Precomputed responses are clips of an already-stored regional map;
-        # storing them again would duplicate rasters per request.
+        # Precomputed responses are clips of an already-stored regional map; storing them again would duplicate rasters per request.
         db_info, db_error = store_results_to_db(
             outputs,
             metadata={
@@ -493,11 +488,7 @@ def _region_breaks(
     include_lst: bool = True,
     include_twi: bool = True,
 ) -> dict[str, str]:
-    """Region-wide 20/40/60/80 percentile breakpoints for the percentile-
-    classified layers, so tiled/partial runs classify identically everywhere.
-    LST is per assessment date (from lst_ts); TWI is static and cached.
-    Empty dict on any failure -> engine falls back to extent-local percentiles.
-    """
+    """Region-wide 20/40/60/80 percentile breakpoints for the percentile- classified layers, so tiled/partial runs classify identically everywhere. LST is per assessment date (from lst_ts); TWI is static and cached. Empty dict on any failure -> engine falls back to extent-local percentiles."""
     breaks: dict[str, str] = {}
     try:
         from FR.db_reconstruct import _pg_connect, _ts_date_for
@@ -506,9 +497,7 @@ def _region_breaks(
             cur.execute("SET LOCAL statement_timeout = '5min'")
             cur.execute("SET postgis.gdal_enabled_drivers = 'GTiff'")
             cur.execute(
-                """CREATE TABLE IF NOT EXISTS layer_breaks
-                   (layer text PRIMARY KEY, breaks float8[], computed_at timestamptz,
-                    source_signature text)"""
+                """CREATE TABLE IF NOT EXISTS layer_breaks (layer text PRIMARY KEY, breaks float8[], computed_at timestamptz, source_signature text)"""
             )
             cur.execute(
                 "ALTER TABLE layer_breaks ADD COLUMN IF NOT EXISTS source_signature text"
@@ -593,10 +582,7 @@ def _region_breaks(
                     vals = cached("twi", twi_sig)
                 if vals is None:
                     cur.execute(
-                        """SELECT (q).value FROM (
-                             SELECT ST_Quantile(ST_Union(rast), ARRAY[0.2,0.4,0.6,0.8]) q
-                             FROM twi
-                             WHERE mod(abs(hashint8(rid)::bigint), 50) = 0) s"""
+                        """SELECT (q).value FROM ( SELECT ST_Quantile(ST_Union(rast), ARRAY[0.2,0.4,0.6,0.8]) q FROM twi WHERE mod(abs(hashint8(rid)::bigint), 50) = 0) s"""
                     )
                     vals = [r[0] for r in cur.fetchall()]
                     if len(vals) != 4:
@@ -627,8 +613,7 @@ _STATIC_REQUIRED = (
 
 
 def _static_signature(twi_breaks: str | None) -> dict | None:
-    """Fingerprint of the date-independent source tables; a reseed of any of
-    them (or a cache-version bump) invalidates the cached static layers."""
+    """Fingerprint of the date-independent source tables; a reseed of any of them (or a cache-version bump) invalidates the cached static layers."""
     try:
         from FR.db_reconstruct import _pg_connect
 
@@ -706,9 +691,7 @@ def run_engine_job(
     requested_date = wildfire_target_date(payload)
     start_date, target_date = wildfire_date_range(payload, engine)
     if engine == "dynamic" and start_date is not None and start_date < target_date:
-        # The whole-region script has only one optical/LST input slot and cannot
-        # represent a temporally coherent multi-day window. Route ranges through
-        # the canonical AOI workflow, which reconstructs and scores every day.
+        # The whole-region script has only one optical/LST input slot and cannot represent a temporally coherent multi-day window. Route ranges through the canonical AOI workflow, which reconstructs and scores every day.
         parameters = dict(payload.parameters)
         parameters["calculation_mode"] = "dynamic"
         canonical_payload = payload.model_copy(update={"parameters": parameters})
@@ -739,9 +722,7 @@ def run_engine_job(
     print(f"[job {job_id}] phase 1/3 done in {_t.time() - _t0:.0f}s "
           f"(layer dates: {reconstruction.get('layer_dates')})", flush=True)
 
-    # Static-layer cache (regional tiles only): terrain/TWI/fuel/infra/WUI do
-    # not depend on the date, so reuse the previous run's outputs for the same
-    # tile geometry while the source tables are unchanged.
+    # Static-layer cache (regional tiles only): terrain/TWI/fuel/infra/WUI do not depend on the date, so reuse the previous run's outputs for the same tile geometry while the source tables are unchanged.
     lst_available = (input_dir / "LST" / "LST.tiff").is_file()
     region_breaks = (
         _region_breaks(

@@ -76,10 +76,7 @@ def unwrap_geojson_geometry(node: Any) -> dict | None:
 
 
 def _require_inside_coverage(geometry_wgs84) -> None:
-    """Reject AOIs outside the data region: the engine would otherwise
-    substitute nearest-cell weather and produce fabricated results.
-    The check fails closed when the authoritative boundary is unavailable.
-    """
+    """Reject AOIs outside the data region: the engine would otherwise substitute nearest-cell weather and produce fabricated results. The check fails closed when the authoritative boundary is unavailable."""
     import json
     import os
 
@@ -104,8 +101,7 @@ def _require_inside_coverage(geometry_wgs84) -> None:
     inside = geometry_wgs84.intersection(region).area
     total = geometry_wgs84.area
     mostly_inside = total > 0 and inside / total >= 0.5
-    # Anchored (representative point inside) only helps genuinely coastal /
-    # border AOIs; a continent-sized box anchored in Galicia must not pass.
+    # Anchored (representative point inside) only helps genuinely coastal / border AOIs; a continent-sized box anchored in Galicia must not pass.
     anchored = (
         region.contains(geometry_wgs84.representative_point())
         and total > 0 and inside / total >= 0.10

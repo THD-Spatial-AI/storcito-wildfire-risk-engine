@@ -13,8 +13,7 @@ def ffmc(temp, hum, wind, rain, f0) -> np.ndarray:
     # Create copies to avoid modifying originals
     mo = FFMC_COEFFICIENT * ((101.0 - f0) / (59.5 + f0))
     
-    # Rain logic (Vectorized)
-    # If precipitation > 0.5mm
+    # Rain logic (Vectorized) If precipitation > 0.5mm
     rain_mask = rain > 0.5
     rf = np.zeros_like(rain)
     rf[rain_mask] = rain[rain_mask] - 0.5

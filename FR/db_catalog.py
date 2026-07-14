@@ -1,14 +1,4 @@
-"""Read-only introspection of the PostGIS database for the API.
-
-Backs the ``/db/*`` endpoints: list tables, describe a table (columns, extent,
-region/date metadata), stream a vector table as GeoJSON, and summarise a raster
-table (tile count, extent, available regions/dates).
-
-Uses the same ``psycopg2`` connection as :mod:`FR.db_store`. Every connection is
-opened read-only, table/column names are validated against the live catalog and
-quoted via ``psycopg2.sql`` so they can never be used for injection, and result
-sets are capped.
-"""
+"""Read-only introspection of the PostGIS database for the API. Backs the ``/db/*`` endpoints: list tables, describe a table (columns, extent, region/date metadata), stream a vector table as GeoJSON, and summarise a raster table (tile count, extent, available regions/dates). Uses the same ``psycopg2`` connection as :mod:`FR.db_store`. Every connection is opened read-only, table/column names are validated against the live catalog and quoted via ``psycopg2.sql`` so they can never be used for injection, and result sets are capped."""
 from __future__ import annotations
 
 from typing import Any
@@ -40,29 +30,7 @@ def _connect():
 def _table_kind(cur, table: str) -> dict[str, Any] | None:
     """Return {kind, geom_type, geom_column, srid} for a public base table, or None."""
     cur.execute(
-        """
-        SELECT t.table_name,
-               CASE WHEN g.f_table_name IS NOT NULL THEN 'vector'
-                    WHEN r.r_table_name IS NOT NULL OR rc.has_raster THEN 'raster'
-                    ELSE 'table' END                       AS kind,
-               g.type                                      AS geom_type,
-               g.f_geometry_column                         AS geom_column,
-               COALESCE(g.srid, r.srid, 0)                 AS srid,
-               r.num_bands                                 AS num_bands
-        FROM information_schema.tables t
-        LEFT JOIN geometry_columns g ON g.f_table_name = t.table_name
-        LEFT JOIN raster_columns  r ON r.r_table_name = t.table_name
-        -- Also detect raster tables that carry a raster column but have no
-        -- raster_columns entry (e.g. simulation_results, written via
-        -- ST_FromGDALRaster without AddRasterConstraints).
-        LEFT JOIN (SELECT table_name, true AS has_raster
-                   FROM information_schema.columns
-                   WHERE table_schema = 'public' AND udt_name = 'raster'
-                   GROUP BY table_name) rc ON rc.table_name = t.table_name
-        WHERE t.table_schema = 'public'
-          AND t.table_type = 'BASE TABLE'
-          AND t.table_name = %s
-        """,
+        """SELECT t.table_name, CASE WHEN g.f_table_name IS NOT NULL THEN 'vector' WHEN r.r_table_name IS NOT NULL OR rc.has_raster THEN 'raster' ELSE 'table' END AS kind, g.type AS geom_type, g.f_geometry_column AS geom_column, COALESCE(g.srid, r.srid, 0) AS srid, r.num_bands AS num_bands FROM information_schema.tables t LEFT JOIN geometry_columns g ON g.f_table_name = t.table_name LEFT JOIN raster_columns r ON r.r_table_name = t.table_name -- Also detect raster tables that carry a raster column but have no -- raster_columns entry (e.g. simulation_results, written via -- ST_FromGDALRaster without AddRasterConstraints). LEFT JOIN (SELECT table_name, true AS has_raster FROM information_schema.columns WHERE table_schema = 'public' AND udt_name = 'raster' GROUP BY table_name) rc ON rc.table_name = t.table_name WHERE t.table_schema = 'public' AND t.table_type = 'BASE TABLE' AND t.table_name = %s""",
         (table,),
     )
     row = cur.fetchone()
@@ -73,12 +41,7 @@ def _table_kind(cur, table: str) -> dict[str, Any] | None:
 
 def _columns(cur, table: str) -> list[dict[str, str]]:
     cur.execute(
-        """
-        SELECT column_name AS name, data_type AS type
-        FROM information_schema.columns
-        WHERE table_schema = 'public' AND table_name = %s
-        ORDER BY ordinal_position
-        """,
+        """SELECT column_name AS name, data_type AS type FROM information_schema.columns WHERE table_schema = 'public' AND table_name = %s ORDER BY ordinal_position""",
         (table,),
     )
     return list(cur.fetchall())
@@ -98,11 +61,7 @@ def _has_raster_column(cur, table: str) -> bool:
 
 
 def _bbox4326(cur, geom_col: str, table: str, srid: int):
-    """Compute a WGS84 [minx,miny,maxx,maxy] for a vector table's geometry column.
-
-    ST_Extent strips the SRID, so the per-row geometry is transformed to 4326
-    first (with ST_SetSRID to restore the declared SRID) and then aggregated.
-    """
+    """Compute a WGS84 [minx,miny,maxx,maxy] for a vector table's geometry column. ST_Extent strips the SRID, so the per-row geometry is transformed to 4326 first (with ST_SetSRID to restore the declared SRID) and then aggregated."""
     geom = sql.Identifier(geom_col)
     if srid and srid > 0:
         per_row = sql.SQL("ST_Transform(ST_SetSRID({g}::geometry, {srid}), 4326)").format(
@@ -150,27 +109,7 @@ def list_tables() -> list[dict[str, Any]]:
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                """
-                SELECT t.table_name AS name,
-                       CASE WHEN g.f_table_name IS NOT NULL THEN 'vector'
-                            WHEN r.r_table_name IS NOT NULL OR rc.has_raster THEN 'raster'
-                            ELSE 'table' END               AS kind,
-                       COALESCE(g.type, '')                AS geom_type,
-                       COALESCE(g.srid, r.srid, 0)         AS srid,
-                       COALESCE(c.reltuples, 0)::bigint    AS approx_rows
-                FROM information_schema.tables t
-                LEFT JOIN geometry_columns g ON g.f_table_name = t.table_name
-                LEFT JOIN raster_columns  r ON r.r_table_name = t.table_name
-                LEFT JOIN (SELECT table_name, true AS has_raster
-                           FROM information_schema.columns
-                           WHERE table_schema = 'public' AND udt_name = 'raster'
-                           GROUP BY table_name) rc ON rc.table_name = t.table_name
-                LEFT JOIN pg_class c ON c.relname = t.table_name
-                     AND c.relnamespace = 'public'::regnamespace
-                WHERE t.table_schema = 'public' AND t.table_type = 'BASE TABLE'
-                  AND t.table_name <> ALL(%s)
-                ORDER BY kind, name
-                """,
+                """SELECT t.table_name AS name, CASE WHEN g.f_table_name IS NOT NULL THEN 'vector' WHEN r.r_table_name IS NOT NULL OR rc.has_raster THEN 'raster' ELSE 'table' END AS kind, COALESCE(g.type, '') AS geom_type, COALESCE(g.srid, r.srid, 0) AS srid, COALESCE(c.reltuples, 0)::bigint AS approx_rows FROM information_schema.tables t LEFT JOIN geometry_columns g ON g.f_table_name = t.table_name LEFT JOIN raster_columns r ON r.r_table_name = t.table_name LEFT JOIN (SELECT table_name, true AS has_raster FROM information_schema.columns WHERE table_schema = 'public' AND udt_name = 'raster' GROUP BY table_name) rc ON rc.table_name = t.table_name LEFT JOIN pg_class c ON c.relname = t.table_name AND c.relnamespace = 'public'::regnamespace WHERE t.table_schema = 'public' AND t.table_type = 'BASE TABLE' AND t.table_name <> ALL(%s) ORDER BY kind, name""",
                 (list(_HIDDEN_TABLES),),
             )
             return list(cur.fetchall())
@@ -299,9 +238,7 @@ def raster_metadata(table: str) -> dict[str, Any]:
             meta = _table_kind(cur, table)
             if meta is None:
                 raise UnknownTable(table)
-            # Accept any table carrying a raster column, even hybrids like
-            # simulation_results (which also has an aoi geometry, so its "kind"
-            # is reported as vector).
+            # Accept any table carrying a raster column, even hybrids like simulation_results (which also has an aoi geometry, so its "kind" is reported as vector).
             if not _has_raster_column(cur, table):
                 raise ValueError(f"Table '{table}' is not a raster table.")
             colnames = _column_names(cur, table)

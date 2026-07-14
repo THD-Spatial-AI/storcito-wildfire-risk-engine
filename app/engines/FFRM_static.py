@@ -27,17 +27,11 @@ def _env_flag(name: str, default: bool) -> bool:
         return default
     return raw.strip() not in {"0", "", "false", "False"}
 
-# ==========================================
-# 1. GENERACIÓN DE CAPAS
-# ==========================================
+# ========================================== 1. GENERACIÓN DE CAPAS ==========================================
 
-# ---------------------------
-# 1.1. RUTAS DE ENTRADA
-# ---------------------------
+# --------------------------- 1.1. RUTAS DE ENTRADA ---------------------------
 
-# Input root may be overridden per request (api.py sets FFRM_BASE_DIR to a job
-# folder whose INPUT/ tree was reconstructed from PostGIS). Direct runs use the
-# repository data directory.
+# Input root may be overridden per request (api.py sets FFRM_BASE_DIR to a job folder whose INPUT/ tree was reconstructed from PostGIS). Direct runs use the repository data directory.
 repo_root = Path(__file__).resolve().parents[2]
 base_dir = os.environ.get("FFRM_BASE_DIR", os.environ.get("STORCITO_DATA_DIR", str(repo_root / "data")))
 
@@ -60,9 +54,7 @@ input_clc = os.path.join(base_dir, 'INPUT', 'IUF', 'CLC_galicia.shp')
 # Meteorología
 input_fwi_folder = os.path.join(base_dir, 'INPUT', 'FWI')
 
-# ---------------------------
-# 1.2. CARPETAS DE SALIDA
-# ---------------------------
+# --------------------------- 1.2. CARPETAS DE SALIDA ---------------------------
 
 # Output root may be overridden per request (api.py sets FFRM_OUTPUT_DIR).
 output_base = os.environ.get("FFRM_OUTPUT_DIR", os.path.join(base_dir, 'OUTPUT'))
@@ -72,9 +64,7 @@ output_folder_cropped = os.path.join(output_base, 'Cropped')
 os.makedirs(output_folder_re, exist_ok=True)
 os.makedirs(output_folder_cropped, exist_ok=True)
 
-# ---------------------------
-# 1.3. RÁSTERES DE SALIDA BASE
-# ---------------------------
+# --------------------------- 1.3. RÁSTERES DE SALIDA BASE ---------------------------
 
 output_mdt = os.path.join(output_folder_re, 'MDT.tif')
 output_slope = os.path.join(output_folder_re, 'SLOPE.tif')
@@ -86,11 +76,7 @@ output_infra = os.path.join(output_folder_re, 'infra_layer.tif')
 output_wui = os.path.join(output_folder_re, 'WUI.tif')
 output_fwi = os.path.join(output_folder_re, 'FWI.tif')
 
-# ---------------------------
-# 1.4. CONTROL DE EJECUCIÓN
-# ---------------------------
-# Pon True o False según quieras regenerar cada capa.
-# Defaults overridable via FFRM_RUN_* env vars.
+# --------------------------- 1.4. CONTROL DE EJECUCIÓN --------------------------- Pon True o False según quieras regenerar cada capa. Defaults overridable via FFRM_RUN_* env vars.
 run_mdt = _env_flag("FFRM_RUN_MDT", True)
 run_twi = _env_flag("FFRM_RUN_TWI", True)
 run_fhist = _env_flag("FFRM_RUN_FHIST", True)
@@ -112,9 +98,7 @@ def _step(msg: str) -> None:
     _engine_last[0] = now
 
 
-# ---------------------------
-# 1.5. GENERACIÓN DE CAPAS
-# ---------------------------
+# --------------------------- 1.5. GENERACIÓN DE CAPAS ---------------------------
 
 if run_mdt:
     _step("terrain: elevation, slope, aspect risk layers")
@@ -183,19 +167,14 @@ import matplotlib.pyplot as _plt
 _plt.close('all')
 print("Todas las capas base del caso estático generadas/disponibles en 're\\'.")
 
-# ==========================================
-# 2. RECORTE CON BUFFER (Carpeta Cropped)
-# ==========================================
+# ========================================== 2. RECORTE CON BUFFER (Carpeta Cropped) ==========================================
 _step("cropping all layers to the study area (+buffer)")
 shapefile_for_buffer  = input_clc
 buffer_distance = 3000
 
 Cropped.cropped(output_folder_re, output_folder_cropped, shapefile_for_buffer, buffer_distance)
 
-# ==========================================
-# 3. COMBINACIÓN DE CAPAS (AHP) -> MAPA FINAL
-# ==========================================
-# Use the same audited static specification as the AOI workflow.
+# ========================================== 3. COMBINACIÓN DE CAPAS (AHP) -> MAPA FINAL ========================================== Use the same audited static specification as the AOI workflow.
 _step("AHP weighting -> final risk map")
 
 from pathlib import Path
@@ -259,9 +238,7 @@ outputs = _combine_layers(
 )
 
 print(f"Mapa final guardado exitosamente en:\n '{outputs['final_map']}'")
-# ==========================================
-# 4. LIMPIEZA DE CARPETA INTERMEDIA
-# ==========================================
+# ========================================== 4. LIMPIEZA DE CARPETA INTERMEDIA ==========================================
 print("\nRealizando limpieza de archivos temporales...")
 for folder in [output_folder_cropped]:
     if os.path.exists(folder):

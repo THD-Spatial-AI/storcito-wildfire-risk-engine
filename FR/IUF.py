@@ -28,29 +28,7 @@ def wui(input_road, input_clc, file_name:str='IUF_Risk_Map',
         urban_inner_buffer_m: float | None = None,
         use_reference_grid: bool | None = None)->None:
     
-    """_summary_
-
-    Args:
-        input_road (_type_): _description_
-        input_clc (_type_): _description_
-        file_name (str, optional): _description_. Defaults to 'IUF_Risk_Map'.
-        output_folder (Path, optional): _description_. Defaults to Path('OUTPUT').
-        reference_file (_type_, optional): _description_. Defaults to Path('REFERENCE')/'MDT'/'DEM_NationalScenario_2013.tif'.
-        export_image (bool, optional): _description_. Defaults to False.
-        show_plots (bool, optional): _description_. Defaults to False.
-        aoi_geometry: Optional AOI geometry used to spatially limit vector processing.
-        aoi_crs: CRS of ``aoi_geometry``. Defaults to EPSG:32629.
-        risk_profile: ``regional`` keeps Galicia WUI buffers; ``finca`` uses the
-            old parcel-scale buffers.
-        road_buffer_m: Optional road search buffer. Defaults to 2000 regional or
-            200 finca.
-        urban_outer_buffer_m: Optional urban mask buffer. Defaults to 400
-            regional or 40 finca.
-        urban_inner_buffer_m: Retained for documenting the legacy finca 5 m
-            inner buffer, though the original mask used only the outer buffer.
-        use_reference_grid: Rasterize on the reference raster's native grid.
-            Defaults to true for finca mode and false for regional mode.
-    """
+    """_summary_ Args: input_road (_type_): _description_ input_clc (_type_): _description_ file_name (str, optional): _description_. Defaults to 'IUF_Risk_Map'. output_folder (Path, optional): _description_. Defaults to Path('OUTPUT'). reference_file (_type_, optional): _description_. Defaults to Path('REFERENCE')/'MDT'/'DEM_NationalScenario_2013.tif'. export_image (bool, optional): _description_. Defaults to False. show_plots (bool, optional): _description_. Defaults to False. aoi_geometry: Optional AOI geometry used to spatially limit vector processing. aoi_crs: CRS of ``aoi_geometry``. Defaults to EPSG:32629. risk_profile: ``regional`` keeps Galicia WUI buffers; ``finca`` uses the old parcel-scale buffers. road_buffer_m: Optional road search buffer. Defaults to 2000 regional or 200 finca. urban_outer_buffer_m: Optional urban mask buffer. Defaults to 400 regional or 40 finca. urban_inner_buffer_m: Retained for documenting the legacy finca 5 m inner buffer, though the original mask used only the outer buffer. use_reference_grid: Rasterize on the reference raster's native grid. Defaults to true for finca mode and false for regional mode."""
     
     print('Wildland-Urban Interfaces layer processing...')
 
@@ -59,8 +37,7 @@ def wui(input_road, input_clc, file_name:str='IUF_Risk_Map',
         profile = "regional"
     road_buffer = road_buffer_m if road_buffer_m is not None else (200 if profile == "finca" else 2000)
     urban_outer_buffer = urban_outer_buffer_m if urban_outer_buffer_m is not None else (40 if profile == "finca" else 400)
-    # Kept as an explicit setting because the old finca code documented 5 m,
-    # even though it used the outer mask for rasterization.
+    # Kept as an explicit setting because the old finca code documented 5 m, even though it used the outer mask for rasterization.
     urban_inner_buffer = urban_inner_buffer_m if urban_inner_buffer_m is not None else (5 if profile == "finca" else 50)
     native_grid = (profile == "finca") if use_reference_grid is None else bool(use_reference_grid)
 
@@ -130,8 +107,7 @@ def wui(input_road, input_clc, file_name:str='IUF_Risk_Map',
     if len(pol1) == 0:
         return _save_empty_result()
     
-    # Crear máscara IUF en memoria. The legacy finca script documented an inner
-    # 5 m buffer but used only the outer 40 m mask; keep that exact behavior.
+    # Crear máscara IUF en memoria. The legacy finca script documented an inner 5 m buffer but used only the outer 40 m mask; keep that exact behavior.
   
     bf_outer = pol1.buffer(urban_outer_buffer).union_all()
     _bf_inner = pol1.buffer(urban_inner_buffer).union_all()
@@ -147,7 +123,7 @@ def wui(input_road, input_clc, file_name:str='IUF_Risk_Map',
     if len(pol2_sel) == 0:
         return _save_empty_result()
     
-    # Asignar valores de riesgo con np.select 
+    # Asignar valores de riesgo con np.select
     risk_array = np.zeros(len(pol2_sel), dtype=np.uint8)
     code = pol2_sel['Code_18'].values
     

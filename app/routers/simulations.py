@@ -22,10 +22,7 @@ router = APIRouter()
 
 @router.post("/run-dynamic")
 def run_dynamic(payload: WildfireCalculationRequest, request: Request):
-    """
-    Reconstruct inputs from PostGIS (clipped to the request boundary) and run the
-    dynamic risk engine.
-    """
+    """Reconstruct inputs from PostGIS (clipped to the request boundary) and run the dynamic risk engine."""
     try:
         return run_engine_job(payload, "dynamic", request)
     except Exception as e:
@@ -34,10 +31,7 @@ def run_dynamic(payload: WildfireCalculationRequest, request: Request):
 
 @router.post("/run-static")
 def run_static(payload: WildfireCalculationRequest, request: Request):
-    """
-    Reconstruct inputs from PostGIS (clipped to the request boundary) and run the
-    whole-region static risk engine.
-    """
+    """Reconstruct inputs from PostGIS (clipped to the request boundary) and run the whole-region static risk engine."""
     try:
         return run_engine_job(payload, "static", request)
     except Exception as e:
@@ -46,9 +40,7 @@ def run_static(payload: WildfireCalculationRequest, request: Request):
 
 @router.post("/run-static-aoi")
 def run_static_aoi_request(payload: StaticAOIRequest, request: Request):
-    """
-    Runs the static workflow for one coordinate AOI and one selected FWI date.
-    """
+    """Runs the static workflow for one coordinate AOI and one selected FWI date."""
     try:
         outputs = run_static_aoi(
             payload.longitude,
@@ -93,9 +85,7 @@ def run_static_aoi_request(payload: StaticAOIRequest, request: Request):
 
 @router.post("/run-static-aoi-wildfire")
 def run_static_aoi_wildfire_request(payload: WildfireCalculationRequest, request: Request):
-    """
-    Runs the static workflow from the generic wildfire calculation payload.
-    """
+    """Runs the static workflow from the generic wildfire calculation payload."""
     try:
         return run_wildfire_payload(payload, request)
     except Exception as e:
@@ -105,10 +95,7 @@ def run_static_aoi_wildfire_request(payload: WildfireCalculationRequest, request
 @router.post("/assessment/start")
 @router.post("/calliope/start")
 def calliope_start(payload: WildfireCalculationRequest, request: Request):
-    """
-    Start a wildfire risk assessment (wildfire-platform default endpoint;
-    /calliope/start is the legacy alias kept for older platform builds).
-    """
+    """Start a wildfire risk assessment (wildfire-platform default endpoint; /calliope/start is the legacy alias kept for older platform builds)."""
     try:
         return run_wildfire_payload(payload, request)
     except Exception as e:
