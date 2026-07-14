@@ -550,10 +550,19 @@ def run_static_aoi_for_geometry(
 
     if "meteo" in active_top_levels and not station_data_path:
         available_dates = Fwi.available_fwi_dates(input_dir / "FWI")
-        if start_date is not None and start_date not in available_dates:
+        newest = max(available_dates) if available_dates else None
+
+        def _within_forecast(day):
+            return (
+                newest is not None
+                and day > newest
+                and (day - newest).days <= Fwi.FWI_FORECAST_DAYS
+            )
+
+        if start_date is not None and start_date not in available_dates and not _within_forecast(start_date):
             available = ", ".join(day.isoformat() for day in available_dates)
             raise ValueError(f"FWI start date {start_date.isoformat()} is not available. Available dates: {available}")
-        if target_date not in available_dates:
+        if target_date not in available_dates and not _within_forecast(target_date):
             available = ", ".join(day.isoformat() for day in available_dates)
             raise ValueError(f"FWI date {target_date.isoformat()} is not available. Available dates: {available}")
 
