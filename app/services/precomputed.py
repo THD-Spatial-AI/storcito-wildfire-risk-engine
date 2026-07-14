@@ -41,36 +41,49 @@ def _valid_clipped_raster(
 
 def _clip_rasters(cur, target_date: date, aoi_geojson: str) -> dict[str, bytes]:
     cur.execute(
-        """
-        WITH aoi AS (
-            SELECT ST_SetSRID(ST_GeomFromGeoJSON(%s), 32629) AS g
-        ), chosen AS (
-            SELECT q.publication_id, q.model_version
-            FROM regional_runs q
-            WHERE q.engine = 'dynamic' AND q.target_date = %s
-              AND q.status = 'done' AND q.model_version = %s
-              AND q.publication_id IS NOT NULL
-            ORDER BY q.finished_at DESC NULLS LAST
-            LIMIT 1
-        )
-        -- The regional tiles overlap by ~12-16 km but each has its own pixel grid, so ST_Union refuses to mosaic them ("do not have the same alignment"). Serve from any single tile that covers the AOI; AOIs spanning a tile seam beyond the overlap fall back to on-demand compute (set(clipped) != _MAP_KINDS in the caller).
-        SELECT DISTINCT ON (r.map_kind)
-               r.map_kind,
-               ST_AsGDALRaster(ST_Clip(r.rast, aoi.g, true), 'GTiff')
-        FROM simulation_results r
-        JOIN chosen c
-          ON c.publication_id = r.publication_id
-         AND c.model_version = r.model_version
-        CROSS JOIN aoi
-        WHERE r.user_id = %s AND r.engine = 'dynamic'
-          AND r.target_date = %s
-          AND r.map_kind IN ('final_map', 'continuous_map', 'data_coverage')
-          AND ST_Covers(ST_ConvexHull(r.rast), aoi.g)
-        ORDER BY r.map_kind, ST_Area(ST_ConvexHull(r.rast)) ASC
-        """,
+        """WITH aoi AS ( SELECT ST_SetSRID(ST_GeomFromGeoJSON(%s), 32629) AS g ), chosen AS ( SELECT q.publication_id, q.model_version FROM regional_runs q WHERE q.engine = 'dynamic' AND q.target_date = %s AND q.status = 'done' AND q.model_version = %s AND q.publication_id IS NOT NULL ORDER BY q.finished_at DESC NULLS LAST LIMIT 1 ) -- The regional tiles overlap by ~12-16 km but each has its own pixel -- grid, so ST_Union refuses to mosaic them ("do not have the same -- alignment"). Fetch every tile piece intersecting the AOI; a single -- covering tile is served directly and multi-tile AOIs are mosaicked -- with gdalwarp, which absorbs the sub-pixel grid offsets. SELECT r.map_kind, ST_AsGDALRaster(ST_Clip(r.rast, aoi.g, true), 'GTiff'), ST_Covers(ST_ConvexHull(r.rast), aoi.g), ST_Area(ST_ConvexHull(r.rast)) FROM simulation_results r JOIN chosen c ON c.publication_id = r.publication_id AND c.model_version = r.model_version CROSS JOIN aoi WHERE r.user_id = %s AND r.engine = 'dynamic' AND r.target_date = %s AND r.map_kind IN ('final_map', 'continuous_map', 'data_coverage') AND ST_Intersects(ST_ConvexHull(r.rast), aoi.g) ORDER BY r.map_kind, ST_Area(ST_ConvexHull(r.rast)) ASC""",
         (aoi_geojson, target_date, MODEL_VERSION, _REGIONAL_USER, target_date),
     )
-    return {kind: bytes(raw) for kind, raw in cur.fetchall() if raw is not None}
+    pieces: dict[str, list[tuple[bytes, bool]]] = {}
+    for kind, raw, covers, _area in cur.fetchall():
+        if raw is not None:
+            pieces.setdefault(kind, []).append((bytes(raw), bool(covers)))
+
+    clipped: dict[str, bytes] = {}
+    for kind, rows in pieces.items():
+        covering = [raw for raw, covers in rows if covers]
+        if covering:
+            clipped[kind] = covering[0]  # smallest covering tile (query order)
+        elif len(rows) > 1:
+            merged = _merge_tile_pieces(
+                [raw for raw, _ in rows], classified=(kind == "final_map")
+            )
+            if merged is not None:
+                clipped[kind] = merged
+    return clipped
+
+
+def _merge_tile_pieces(pieces: list[bytes], *, classified: bool) -> bytes | None:
+    """Mosaic AOI-clipped tile fragments whose grids differ sub-pixel. gdalwarp resamples every piece onto the first piece's grid; nearest resampling keeps classified values intact and shifts data by less than a pixel. Overlap zones take the later tile (identical model output)."""
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        srcs = []
+        for i, raw in enumerate(pieces):
+            p = tmp_dir / f"piece_{i}.tif"
+            p.write_bytes(raw)
+            srcs.append(str(p))
+        out = tmp_dir / "merged.tif"
+        cmd = ["gdalwarp", "-of", "GTiff", "-r", "near", "-srcnodata", "0",
+               "-dstnodata", "0", "-overwrite", *srcs, str(out)]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0 or not out.exists():
+            logger.warning("Precomputed tile mosaic failed: %s",
+                           result.stderr.strip()[:500])
+            return None
+        return out.read_bytes()
 
 
 def _render_png(tif_path: Path, png_path: Path) -> None:
