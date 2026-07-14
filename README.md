@@ -332,6 +332,13 @@ calculation payload at `/run-static-aoi-wildfire` and `/calliope/start`.
   day's coherent risk map. Static mode uses the submitted year,
   then evaluates that year's hottest eligible FWI day from May 1 through
   October 31.
+- The peak day is the highest AOI-mean FWI, not the day whose combined map
+  shows the largest high-risk area: day ranking follows the fire-weather
+  standard used by EFFIS and the official alert levels, while the map's
+  colours also blend that day's surface-temperature and vegetation layers.
+  A lower-ranked day can therefore look redder - see "Peak-day selection"
+  in CHANGELOG.md for the full rationale; per-day means are disclosed in
+  `daily_mean_fwi`.
 - Canadian FWI is calculated at 12:00 local standard time (12:00 CET or 13:00
   CEST in Galicia) with assessment-to-assessment precipitation. Weather shown
   for 16:00 is a separate operational snapshot and is not classified with the

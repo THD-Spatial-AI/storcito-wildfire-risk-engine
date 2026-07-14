@@ -148,6 +148,39 @@ with the exact reason. FWI is never degraded (the weather signal is the
 core of the model, so an incomplete run-up still fails hard). Disable
 with `STORCITO_ALLOW_DEGRADED=0` to restore hard failures everywhere.
 
+## Peak-day selection: why mean FWI, not "largest red area"
+
+For a multi-day assessment the returned main map is the **peak-risk day**,
+selected as the day with the highest **AOI-mean Fire Weather Index at the
+12:00 local-standard-time observation**. Users sometimes notice that a
+lower-ranked day *looks* redder on the combined map and ask why it is not
+the peak. That is expected, and the criterion is deliberate:
+
+- **The ranking and the map colours measure different things.** The ranking
+  is fire *weather* (wind, humidity, temperature, accumulated drought).
+  The combined map additionally blends that day's surface temperature and
+  vegetation layers with date-independent layers (fuels, terrain, WUI) -
+  a hot afternoon can add red through the LST layer without the day's fire
+  weather being the worst of the window.
+- **FWI is the validated standard for "which day".** Canadian FWI, EFFIS,
+  and the official Galician/Spanish alert declarations all rank days by
+  fire-weather indices. Using the same criterion means the app's peak day
+  agrees with the official alert calendar - essential for the intended
+  users (municipalities and fire brigades), whose readiness and
+  restriction decisions must be defensible against that standard.
+- **Classified area is a fragile statistic.** "High + very-high km²" jumps
+  when pixels cross a class boundary, so two days with nearly identical
+  continuous risk can rank very differently. The continuous mean is smooth.
+- **The failure modes are not symmetric.** If mean FWI ever picks the
+  "wrong" day, that day still has the worst burning conditions. If a
+  red-area ranking picks the wrong day, a windier and drier day gets
+  demoted because of an afternoon surface-temperature artefact.
+
+Division of labour for operational users: **when** to reinforce or
+restrict = the FWI day ranking; **where** to patrol or warn = that day's
+combined map. The per-day mean FWI values are disclosed in the result
+metadata (`daily_mean_fwi`) so the ranking can always be audited.
+
 ## Future work
 
 - **Multi-day forecast mode.** Each MeteoGalicia WRF file carries 96 hourly
