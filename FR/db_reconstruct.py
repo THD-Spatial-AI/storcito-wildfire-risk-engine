@@ -614,9 +614,12 @@ def reconstruct_fwi(
             row = cur.fetchone()
             if row is None or row[0] is None or len(row[0]) != row[1]:
                 raise RuntimeError(f"FWI database blob is incomplete: {filename}")
-            tmp = _FWI_CACHE_DIR / f"{filename}.part"
-            tmp.write_bytes(bytes(row[0]))
-            tmp.replace(_FWI_CACHE_DIR / filename)  # atomic publish
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=f"{filename}.", suffix=".part", dir=_FWI_CACHE_DIR
+            )
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(bytes(row[0]))
+            os.replace(tmp_name, _FWI_CACHE_DIR / filename)
             del row
 
     copied: list[Path] = []
