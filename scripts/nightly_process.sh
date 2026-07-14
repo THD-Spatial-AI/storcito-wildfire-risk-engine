@@ -244,6 +244,11 @@ except Exception as e:
 	                    AND model_version='$MODEL_VERSION';
 	                  COMMIT;"
         echo "OK $d"
+        for jd in data/OUTPUT/jobs/regional_dynamic_${d}_t*_*/; do
+            [ -d "$jd" ] || continue
+            find "$jd" -type f ! -name "engine.log" -delete 2>/dev/null || true
+            find "$jd" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+        done
 	    else
 	        $PSQL -c "BEGIN;
 	                  DELETE FROM simulation_results

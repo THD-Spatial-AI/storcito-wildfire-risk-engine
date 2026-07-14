@@ -531,403 +531,411 @@ def run_static_aoi_for_geometry(
     write_aoi_geojson(output_aoi, job_dir / "aoi.geojson")
     write_aoi_geojson(processing_aoi, job_dir / "processing_aoi.geojson")
 
-    clip_geom_wgs84 = reproject_geometry(processing_aoi, DEFAULT_PROJECTED_CRS, "EPSG:4326")
-    input_dir = job_dir / "db_input"
-    print(f"[FFRM] reconstructing INPUT from PostGIS -> {input_dir}", flush=True)
-    reconstruction = DbReconstruct.reconstruct_inputs(
-        input_dir,
-        engine=mode,
-        target_date=target_date,
-        start_date=start_date,
-        include_weather="meteo" in active_top_levels and not station_data_path,
-        include_history=False,
-        include_terrain="topo" in active_top_levels,
-        include_satellite=False,
-        include_lst=False,
-        clip_geom=clip_geom_wgs84,
-        clip_geom_crs="EPSG:4326",
-    )
-
-    if "meteo" in active_top_levels and not station_data_path:
-        available_dates = Fwi.available_fwi_dates(input_dir / "FWI")
-        newest = max(available_dates) if available_dates else None
-
-        def _within_forecast(day):
-            return (
-                newest is not None
-                and day > newest
-                and (day - newest).days <= Fwi.FWI_FORECAST_DAYS
-            )
-
-        if start_date is not None and start_date not in available_dates and not _within_forecast(start_date):
-            available = ", ".join(day.isoformat() for day in available_dates)
-            raise ValueError(f"FWI start date {start_date.isoformat()} is not available. Available dates: {available}")
-        if target_date not in available_dates and not _within_forecast(target_date):
-            available = ", ".join(day.isoformat() for day in available_dates)
-            raise ValueError(f"FWI date {target_date.isoformat()} is not available. Available dates: {available}")
-
-    dtm_source = Path(dtm_path) if dtm_path else input_dir / "DTM" / "DTM.tif"
-    print(f"[FFRM] DTM source: {'UPLOADED' if dtm_path else 'database'} -> {dtm_source}")
-    cropped_dtm = crop_raster_to_geometry(
-        dtm_source,
-        inputs_dir / "DTM.tif",
-        processing_aoi,
-        target_crs=DEFAULT_PROJECTED_CRS,
-        resampling=Resampling.bilinear,
-    )
-    cropped_fuels = crop_raster_to_geometry(input_dir / "FUELS" / "FUELS.tif", inputs_dir / "FUELS.tif", processing_aoi)
-
-    Mdt.mdt(cropped_dtm, output_folder=base_output_dir, export_image=True, show_plots=False)
-    if "twi" in spec_keys and "topo" in active_top_levels:
-        cropped_twi = crop_raster_to_geometry(input_dir / "TWI" / "TWI.tif", inputs_dir / "TWI.tif", processing_aoi)
-        Twi.twi_risk(
-            cropped_twi,
-            base_output_dir / "TIFs" / "TWI_Risk_Map.tif",
-            breaks=(classification_breaks or {}).get("FFRM_TWI_BREAKS"),
-        )
-    Fmt.fmt(cropped_fuels, output_folder=base_output_dir, export_image=True, show_plots=False)
-
-    processing_reference = base_output_dir / "TIFs" / "MDT_RISK_MAP.tif"
-    Infra.infrastructure(
-        input_dir / "INFRA" / "galicia_entera.shp",
-        output_folder=base_output_dir,
-        ref_raster=processing_reference,
-        export_image=True,
-        show_plots=False,
-        aoi_geometry=processing_aoi,
-        aoi_crs=DEFAULT_PROJECTED_CRS,
-        risk_profile=profile,
-    )
-    Wui.wui(
-        input_dir / "INFRA" / "galicia_entera.shp",
-        input_dir / "IUF" / "CLC_galicia.shp",
-        output_folder=base_output_dir,
-        reference_file=processing_reference,
-        export_image=True,
-        show_plots=False,
-        aoi_geometry=processing_aoi,
-        aoi_crs=DEFAULT_PROJECTED_CRS,
-        risk_profile=profile,
-    )
-    output_reference = crop_raster_to_geometry(
-        processing_reference,
-        layers_dir / "reference_mdt.tif",
-        output_aoi,
-    )
-
-    fwi_result: Fwi.FWIRunResult | None = None
-    station_result: dict | None = None
-    selected_day = target_date
-    if "meteo" in active_top_levels:
-        if station_data_path:
-            print(f"[FFRM] FWI source: UPLOADED station file -> {station_data_path}")
-            station_result = _fwi_from_station_file(
-                station_data_path,
-                processing_reference,
-                base_output_dir,
-                inputs_dir,
-                profile,
-                start_date,
-                target_date,
-            )
-            selected_day = date.fromisoformat(str(station_result["last_date"]))
-        else:
-            print("[FFRM] FWI source: database netCDF series")
-            fwi_result = Fwi.f_w_index(
-                input_dir / "FWI",
-                output_folder=base_output_dir,
-                export_image=True,
-                export_daily=True,
-                return_details=True,
-                show_plots=False,
-                target_date=target_date,
-                start_date=start_date,
-                selection_geometry_wgs84=reproject_geometry(
-                    output_aoi, DEFAULT_PROJECTED_CRS, "EPSG:4326"
-                ),
-            )
-            selected_day = fwi_result.peak_date
-
-    historical_available = False
-    if historical_requested:
-        print(
-            f"[FFRM] reconstructing historical-fire overlay as of {selected_day.isoformat()}",
-            flush=True,
-        )
-        hist_info = DbReconstruct.reconstruct_hist(
-            input_dir / "HIST",
+    try:
+        clip_geom_wgs84 = reproject_geometry(processing_aoi, DEFAULT_PROJECTED_CRS, "EPSG:4326")
+        input_dir = job_dir / "db_input"
+        print(f"[FFRM] reconstructing INPUT from PostGIS -> {input_dir}", flush=True)
+        reconstruction = DbReconstruct.reconstruct_inputs(
+            input_dir,
+            engine=mode,
+            target_date=target_date,
+            start_date=start_date,
+            include_weather="meteo" in active_top_levels and not station_data_path,
+            include_history=False,
+            include_terrain="topo" in active_top_levels,
+            include_satellite=False,
+            include_lst=False,
             clip_geom=clip_geom_wgs84,
             clip_geom_crs="EPSG:4326",
-            target_date=selected_day,
         )
-        reconstruction["hist"] = hist_info
-        historical_available = bool(hist_info.get("complete_scene_years", []))
-        if historical_available:
-            Fhist.fire_history(
-                input_folder=input_dir / "HIST",
-                output_folder=base_output_dir,
-                export_image=True,
-                show_plots=False,
-            )
 
-    static_layer_paths: dict[str, Path | None] = {
-        "ftm": base_output_dir / "TIFs" / "FMT.tif",
-        "wui": base_output_dir / "TIFs" / "IUF_Risk_Map.tif",
-        "infra": base_output_dir / "TIFs" / "galicia_entera_(INFRA Risk_Map).tif",
-        "mdt": processing_reference,
-        "slope": base_output_dir / "TIFs" / "SLOPE_RISK_MAP.tif",
-        "aspect": base_output_dir / "TIFs" / "ASPECT_RISK_MAP.tif",
-        "twi": (
-            base_output_dir / "TIFs" / "TWI_Risk_Map.tif"
-            if "topo" in active_top_levels
-            else None
-        ),
-    }
-    export_only: dict[str, Path] = {}
-    if historical_requested and historical_available:
-        export_only["fhist"] = _find_fire_history_risk_map(base_output_dir)
+        if "meteo" in active_top_levels and not station_data_path:
+            available_dates = Fwi.available_fwi_dates(input_dir / "FWI")
+            newest = max(available_dates) if available_dates else None
 
-    if mode == "dynamic" and start_date is not None:
-        scoring_days = [
-            start_date + timedelta(days=offset)
-            for offset in range((target_date - start_date).days + 1)
-        ]
-    else:
-        scoring_days = [target_date]
-
-    daily_work = job_dir / "daily_work"
-    diagnostics_dir = job_dir / "diagnostics"
-    daily_risk_dates: list[str] = []
-    daily_source_dates: dict[str, dict[str, str]] = {}
-    daily_source_details: dict[str, dict[str, object]] = {}
-    daily_skipped_layers: dict[str, dict[str, str]] = {}
-    daily_source_resolutions: dict[str, dict[str, float]] = {}
-    outputs: dict[str, Path] | None = None
-
-    station_daily = station_result.get("daily_df") if station_result else None
-    for day in scoring_days:
-        day_key = day.isoformat()
-        day_work = daily_work / day_key
-        day_breaks = (classification_breaks_by_date or {}).get(day_key, classification_breaks or {})
-        temporal_paths, temporal_reconstruction = _prepare_temporal_risk_layers(
-            day=day,
-            work_dir=day_work / "temporal",
-            processing_aoi=processing_aoi,
-            clip_geom_wgs84=clip_geom_wgs84,
-            spec_keys=spec_keys,
-            weather_active="meteo" in active_top_levels,
-            ndvi_path=ndvi_path,
-            classification_breaks=day_breaks,
-        )
-        day_paths: dict[str, Path | None] = dict(static_layer_paths)
-        day_paths.update(temporal_paths)
-
-        if "meteo" in active_top_levels:
-            if fwi_result is not None:
-                day_paths["meteo"] = fwi_result.daily_risk_paths[day_key]
-            elif station_daily is not None:
-                row = station_daily[station_daily["date"] == day]
-                if row.empty:
-                    raise ValueError(f"Station data has no FWI result for {day_key}")
-                station_class = int(row.iloc[-1]["FWI_class"])
-                with rasterio.open(processing_reference) as ref:
-                    station_array = np.full(
-                        (ref.height, ref.width), station_class, dtype=np.float32
-                    )
-                day_paths["meteo"] = _write_array(
-                    day_work / "station_fwi.tif",
-                    station_array,
-                    processing_reference,
-                    "float32",
+            def _within_forecast(day):
+                return (
+                    newest is not None
+                    and day > newest
+                    and (day - newest).days <= Fwi.FWI_FORECAST_DAYS
                 )
 
-        is_selected = day == selected_day
-        combine_layers_dir = layers_dir if is_selected else day_work / "combined_layers"
-        final_map_path = (
-            job_dir / "forest_fire_risk_map.tif"
-            if is_selected
-            else day_work / "forest_fire_risk_map.tif"
+            if start_date is not None and start_date not in available_dates and not _within_forecast(start_date):
+                available = ", ".join(day.isoformat() for day in available_dates)
+                raise ValueError(f"FWI start date {start_date.isoformat()} is not available. Available dates: {available}")
+            if target_date not in available_dates and not _within_forecast(target_date):
+                available = ", ".join(day.isoformat() for day in available_dates)
+                raise ValueError(f"FWI date {target_date.isoformat()} is not available. Available dates: {available}")
+
+        dtm_source = Path(dtm_path) if dtm_path else input_dir / "DTM" / "DTM.tif"
+        print(f"[FFRM] DTM source: {'UPLOADED' if dtm_path else 'database'} -> {dtm_source}")
+        cropped_dtm = crop_raster_to_geometry(
+            dtm_source,
+            inputs_dir / "DTM.tif",
+            processing_aoi,
+            target_crs=DEFAULT_PROJECTED_CRS,
+            resampling=Resampling.bilinear,
         )
-        final_png_path = (
-            job_dir / "forest_fire_risk_map.png"
-            if is_selected
-            else day_work / "forest_fire_risk_map.png"
+        cropped_fuels = crop_raster_to_geometry(input_dir / "FUELS" / "FUELS.tif", inputs_dir / "FUELS.tif", processing_aoi)
+
+        Mdt.mdt(cropped_dtm, output_folder=base_output_dir, export_image=True, show_plots=False)
+        if "twi" in spec_keys and "topo" in active_top_levels:
+            cropped_twi = crop_raster_to_geometry(input_dir / "TWI" / "TWI.tif", inputs_dir / "TWI.tif", processing_aoi)
+            Twi.twi_risk(
+                cropped_twi,
+                base_output_dir / "TIFs" / "TWI_Risk_Map.tif",
+                breaks=(classification_breaks or {}).get("FFRM_TWI_BREAKS"),
+            )
+        Fmt.fmt(cropped_fuels, output_folder=base_output_dir, export_image=True, show_plots=False)
+
+        processing_reference = base_output_dir / "TIFs" / "MDT_RISK_MAP.tif"
+        Infra.infrastructure(
+            input_dir / "INFRA" / "galicia_entera.shp",
+            output_folder=base_output_dir,
+            ref_raster=processing_reference,
+            export_image=True,
+            show_plots=False,
+            aoi_geometry=processing_aoi,
+            aoi_crs=DEFAULT_PROJECTED_CRS,
+            risk_profile=profile,
         )
-        day_outputs = _combine_layers(
-            day_paths,
-            output_reference,
-            combine_layers_dir,
-            final_map_path,
-            final_png_path,
-            spec=spec,
-            active_topics=set(active_top_levels),
-            export_only=export_only if is_selected else None,
+        Wui.wui(
+            input_dir / "INFRA" / "galicia_entera.shp",
+            input_dir / "IUF" / "CLC_galicia.shp",
+            output_folder=base_output_dir,
+            reference_file=processing_reference,
+            export_image=True,
+            show_plots=False,
+            aoi_geometry=processing_aoi,
+            aoi_crs=DEFAULT_PROJECTED_CRS,
+            risk_profile=profile,
         )
+        output_reference = crop_raster_to_geometry(
+            processing_reference,
+            layers_dir / "reference_mdt.tif",
+            output_aoi,
+        )
+
+        fwi_result: Fwi.FWIRunResult | None = None
+        station_result: dict | None = None
+        selected_day = target_date
+        if "meteo" in active_top_levels:
+            if station_data_path:
+                print(f"[FFRM] FWI source: UPLOADED station file -> {station_data_path}")
+                station_result = _fwi_from_station_file(
+                    station_data_path,
+                    processing_reference,
+                    base_output_dir,
+                    inputs_dir,
+                    profile,
+                    start_date,
+                    target_date,
+                )
+                selected_day = date.fromisoformat(str(station_result["last_date"]))
+            else:
+                print("[FFRM] FWI source: database netCDF series")
+                fwi_result = Fwi.f_w_index(
+                    input_dir / "FWI",
+                    output_folder=base_output_dir,
+                    export_image=True,
+                    export_daily=True,
+                    return_details=True,
+                    show_plots=False,
+                    target_date=target_date,
+                    start_date=start_date,
+                    selection_geometry_wgs84=reproject_geometry(
+                        output_aoi, DEFAULT_PROJECTED_CRS, "EPSG:4326"
+                    ),
+                )
+                selected_day = fwi_result.peak_date
+
+        historical_available = False
+        if historical_requested:
+            print(
+                f"[FFRM] reconstructing historical-fire overlay as of {selected_day.isoformat()}",
+                flush=True,
+            )
+            hist_info = DbReconstruct.reconstruct_hist(
+                input_dir / "HIST",
+                clip_geom=clip_geom_wgs84,
+                clip_geom_crs="EPSG:4326",
+                target_date=selected_day,
+            )
+            reconstruction["hist"] = hist_info
+            historical_available = bool(hist_info.get("complete_scene_years", []))
+            if historical_available:
+                Fhist.fire_history(
+                    input_folder=input_dir / "HIST",
+                    output_folder=base_output_dir,
+                    export_image=True,
+                    show_plots=False,
+                )
+
+        static_layer_paths: dict[str, Path | None] = {
+            "ftm": base_output_dir / "TIFs" / "FMT.tif",
+            "wui": base_output_dir / "TIFs" / "IUF_Risk_Map.tif",
+            "infra": base_output_dir / "TIFs" / "galicia_entera_(INFRA Risk_Map).tif",
+            "mdt": processing_reference,
+            "slope": base_output_dir / "TIFs" / "SLOPE_RISK_MAP.tif",
+            "aspect": base_output_dir / "TIFs" / "ASPECT_RISK_MAP.tif",
+            "twi": (
+                base_output_dir / "TIFs" / "TWI_Risk_Map.tif"
+                if "topo" in active_top_levels
+                else None
+            ),
+        }
+        export_only: dict[str, Path] = {}
+        if historical_requested and historical_available:
+            export_only["fhist"] = _find_fire_history_risk_map(base_output_dir)
+
+        if mode == "dynamic" and start_date is not None:
+            scoring_days = [
+                start_date + timedelta(days=offset)
+                for offset in range((target_date - start_date).days + 1)
+            ]
+        else:
+            scoring_days = [target_date]
+
+        daily_work = job_dir / "daily_work"
+        diagnostics_dir = job_dir / "diagnostics"
+        daily_risk_dates: list[str] = []
+        daily_source_dates: dict[str, dict[str, str]] = {}
+        daily_source_details: dict[str, dict[str, object]] = {}
+        daily_skipped_layers: dict[str, dict[str, str]] = {}
+        daily_source_resolutions: dict[str, dict[str, float]] = {}
+        outputs: dict[str, Path] | None = None
+
+        station_daily = station_result.get("daily_df") if station_result else None
+        for day in scoring_days:
+            day_key = day.isoformat()
+            day_work = daily_work / day_key
+            day_breaks = (classification_breaks_by_date or {}).get(day_key, classification_breaks or {})
+            temporal_paths, temporal_reconstruction = _prepare_temporal_risk_layers(
+                day=day,
+                work_dir=day_work / "temporal",
+                processing_aoi=processing_aoi,
+                clip_geom_wgs84=clip_geom_wgs84,
+                spec_keys=spec_keys,
+                weather_active="meteo" in active_top_levels,
+                ndvi_path=ndvi_path,
+                classification_breaks=day_breaks,
+            )
+            day_paths: dict[str, Path | None] = dict(static_layer_paths)
+            day_paths.update(temporal_paths)
+
+            if "meteo" in active_top_levels:
+                if fwi_result is not None:
+                    day_paths["meteo"] = fwi_result.daily_risk_paths[day_key]
+                elif station_daily is not None:
+                    row = station_daily[station_daily["date"] == day]
+                    if row.empty:
+                        raise ValueError(f"Station data has no FWI result for {day_key}")
+                    station_class = int(row.iloc[-1]["FWI_class"])
+                    with rasterio.open(processing_reference) as ref:
+                        station_array = np.full(
+                            (ref.height, ref.width), station_class, dtype=np.float32
+                        )
+                    day_paths["meteo"] = _write_array(
+                        day_work / "station_fwi.tif",
+                        station_array,
+                        processing_reference,
+                        "float32",
+                    )
+
+            is_selected = day == selected_day
+            combine_layers_dir = layers_dir if is_selected else day_work / "combined_layers"
+            final_map_path = (
+                job_dir / "forest_fire_risk_map.tif"
+                if is_selected
+                else day_work / "forest_fire_risk_map.tif"
+            )
+            final_png_path = (
+                job_dir / "forest_fire_risk_map.png"
+                if is_selected
+                else day_work / "forest_fire_risk_map.png"
+            )
+            day_outputs = _combine_layers(
+                day_paths,
+                output_reference,
+                combine_layers_dir,
+                final_map_path,
+                final_png_path,
+                spec=spec,
+                active_topics=set(active_top_levels),
+                export_only=export_only if is_selected else None,
+            )
+
+            if mode == "dynamic":
+                shutil.copyfile(day_outputs["final_map"], layers_dir / f"risk_{day_key}.tif")
+                diagnostics_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(
+                    day_outputs["continuous_map"],
+                    diagnostics_dir / f"risk_continuous_{day_key}.tif",
+                )
+                shutil.copyfile(
+                    day_outputs["data_coverage"],
+                    diagnostics_dir / f"data_coverage_{day_key}.tif",
+                )
+                daily_risk_dates.append(day_key)
+
+            source_dates = dict(temporal_reconstruction.get("layer_dates", {}))
+            if "meteo" in active_top_levels:
+                source_dates["fwi"] = day_key
+            daily_source_dates[day_key] = source_dates
+            source_details = dict(
+                temporal_reconstruction.get("layer_date_details", {})
+            )
+            if "meteo" in active_top_levels:
+                source_details["fwi"] = {
+                    "primary": day_key,
+                    "contributors": [day_key],
+                    "observation": "12:00 local standard time",
+                }
+            daily_source_details[day_key] = source_details
+            daily_skipped_layers[day_key] = dict(
+                temporal_reconstruction.get("skipped_layers", {})
+            )
+            daily_source_resolutions[day_key] = dict(
+                temporal_reconstruction.get("layer_resolutions_m", {})
+            )
+            if is_selected:
+                selected_coverage_layer = layers_dir / "data_coverage.tif"
+                shutil.copyfile(day_outputs["data_coverage"], selected_coverage_layer)
+                day_outputs["layer_data_coverage"] = selected_coverage_layer
+                outputs = day_outputs
+
+        if outputs is None:
+            raise RuntimeError(f"Selected risk day {selected_day.isoformat()} was not produced")
+
+        if output_resolution_m is not None:
+            for key, raster_path in outputs.items():
+                if Path(raster_path).suffix.lower() not in {".tif", ".tiff"}:
+                    continue
+                resample_raster_resolution(
+                    raster_path,
+                    output_resolution_m,
+                    resampling=(
+                        Resampling.bilinear
+                        if key == "continuous_map" or "coverage" in key
+                        else Resampling.nearest
+                    ),
+                )
+            for daily_path in layers_dir.glob("risk_*.tif"):
+                resample_raster_resolution(
+                    daily_path,
+                    output_resolution_m,
+                    resampling=Resampling.nearest,
+                )
+            for daily_path in diagnostics_dir.glob("risk_continuous_*.tif"):
+                resample_raster_resolution(
+                    daily_path, output_resolution_m, resampling=Resampling.bilinear
+                )
+            for daily_path in diagnostics_dir.glob("data_coverage_*.tif"):
+                resample_raster_resolution(
+                    daily_path, output_resolution_m, resampling=Resampling.bilinear
+                )
 
         if mode == "dynamic":
-            shutil.copyfile(day_outputs["final_map"], layers_dir / f"risk_{day_key}.tif")
-            diagnostics_dir.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(
-                day_outputs["continuous_map"],
-                diagnostics_dir / f"risk_continuous_{day_key}.tif",
-            )
-            shutil.copyfile(
-                day_outputs["data_coverage"],
-                diagnostics_dir / f"data_coverage_{day_key}.tif",
-            )
-            daily_risk_dates.append(day_key)
-
-        source_dates = dict(temporal_reconstruction.get("layer_dates", {}))
-        if "meteo" in active_top_levels:
-            source_dates["fwi"] = day_key
-        daily_source_dates[day_key] = source_dates
-        source_details = dict(
-            temporal_reconstruction.get("layer_date_details", {})
-        )
-        if "meteo" in active_top_levels:
-            source_details["fwi"] = {
-                "primary": day_key,
-                "contributors": [day_key],
-                "observation": "12:00 local standard time",
-            }
-        daily_source_details[day_key] = source_details
-        daily_skipped_layers[day_key] = dict(
-            temporal_reconstruction.get("skipped_layers", {})
-        )
-        daily_source_resolutions[day_key] = dict(
-            temporal_reconstruction.get("layer_resolutions_m", {})
-        )
-        if is_selected:
-            selected_coverage_layer = layers_dir / "data_coverage.tif"
-            shutil.copyfile(day_outputs["data_coverage"], selected_coverage_layer)
-            day_outputs["layer_data_coverage"] = selected_coverage_layer
-            outputs = day_outputs
-
-    if outputs is None:
-        raise RuntimeError(f"Selected risk day {selected_day.isoformat()} was not produced")
-
-    if output_resolution_m is not None:
-        for key, raster_path in outputs.items():
-            if Path(raster_path).suffix.lower() not in {".tif", ".tiff"}:
-                continue
-            resample_raster_resolution(
-                raster_path,
-                output_resolution_m,
-                resampling=(
-                    Resampling.bilinear
-                    if key == "continuous_map" or "coverage" in key
-                    else Resampling.nearest
-                ),
-            )
-        for daily_path in layers_dir.glob("risk_*.tif"):
-            resample_raster_resolution(
-                daily_path,
-                output_resolution_m,
-                resampling=Resampling.nearest,
-            )
-        for daily_path in diagnostics_dir.glob("risk_continuous_*.tif"):
-            resample_raster_resolution(
-                daily_path, output_resolution_m, resampling=Resampling.bilinear
-            )
-        for daily_path in diagnostics_dir.glob("data_coverage_*.tif"):
-            resample_raster_resolution(
-                daily_path, output_resolution_m, resampling=Resampling.bilinear
+                outputs["final_map"], layers_dir / f"risk_{selected_day.isoformat()}.tif"
             )
 
-    if mode == "dynamic":
-        shutil.copyfile(
-            outputs["final_map"], layers_dir / f"risk_{selected_day.isoformat()}.tif"
-        )
+        source_resolutions = dict(daily_source_resolutions.get(selected_day.isoformat(), {}))
+        if fwi_result is not None:
+            fwi_path = fwi_result.daily_continuous_paths.get(selected_day.isoformat())
+            if fwi_path is not None:
+                fwi_resolution = DbReconstruct._raster_resolution_m(fwi_path)
+                if fwi_resolution is not None:
+                    source_resolutions["fwi"] = fwi_resolution
+        output_grid_resolution = DbReconstruct._raster_resolution_m(outputs["final_map"])
 
-    source_resolutions = dict(daily_source_resolutions.get(selected_day.isoformat(), {}))
-    if fwi_result is not None:
-        fwi_path = fwi_result.daily_continuous_paths.get(selected_day.isoformat())
-        if fwi_path is not None:
-            fwi_resolution = DbReconstruct._raster_resolution_m(fwi_path)
-            if fwi_resolution is not None:
-                source_resolutions["fwi"] = fwi_resolution
-    output_grid_resolution = DbReconstruct._raster_resolution_m(outputs["final_map"])
+        metadata = {
+            "request_id": request_id,
+            "context_buffer_m": context_buffer_m,
+            "fwi_start_date": start_date.isoformat() if start_date else None,
+            "fwi_date": selected_day.isoformat(),
+            "fwi_end_date": target_date.isoformat(),
+            "peak_date": selected_day.isoformat(),
+            "selected_assessment_date": selected_day.isoformat(),
+            "operational_window": "16:00-17:00 Europe/Madrid",
+            "standard_fwi_observation": "12:00 local standard time (Europe/Madrid)",
+            "crs": DEFAULT_PROJECTED_CRS,
+            "keep_intermediate": keep_intermediate,
+            "calculation_mode": mode,
+            "risk_profile": profile,
+            "output_resolution_m": output_resolution_m,
+            "weight_scheme": spec["name"],
+            "active_top_levels": sorted(active_top_levels),
+            "optional_layers": optional_layers or {},
+            "source_layer_dates": daily_source_dates.get(selected_day.isoformat(), {}),
+            "daily_source_layer_dates": daily_source_dates,
+            "source_layer_date_details": daily_source_details.get(
+                selected_day.isoformat(), {}
+            ),
+            "daily_source_layer_date_details": daily_source_details,
+            "classification_breaks": (
+                (classification_breaks_by_date or {}).get(
+                    selected_day.isoformat(), classification_breaks or {}
+                )
+            ),
+            "daily_classification_breaks": classification_breaks_by_date or {},
+            "daily_skipped_layers": daily_skipped_layers,
+            "daily_risk_dates": daily_risk_dates,
+            "historical_fire": {
+                "requested": historical_requested,
+                "available": historical_available,
+                "included_in_risk": False,
+                "role": "informational_overlay",
+                "as_of_date": selected_day.isoformat(),
+            },
+            "fwi_assessment": (
+                fwi_result.metadata if fwi_result is not None else {
+                    "source": "uploaded_station",
+                    "standard_observation": "12:00 local standard time",
+                }
+            ),
+            "operational_weather_window": {
+                "start": "16:00",
+                "end": "17:00",
+                "timezone": Fwi.FWI_STANDARD_TIMEZONE,
+                "included_in_fwi_equations": False,
+            },
+            "source_resolution_m": source_resolutions,
+            "sentinel_nominal_resolution_m": 20 if {"ndvi", "ndmi"} & spec_keys else None,
+            "output_grid_resolution_m": output_grid_resolution,
+            "resolution_interpretation": (
+                "The output grid preserves 20 m Sentinel/terrain patterns; FWI and LST "
+                "remain coarse-scale drivers and do not gain fine-scale precision when resampled."
+            ),
+            "model_interpretation": (
+                "Experimental wildfire susceptibility/risk index; AHP matrix consistency "
+                "is not evidence of out-of-sample predictive accuracy."
+            ),
+        }
+        if request_metadata:
+            metadata.update(request_metadata)
+            metadata["selected_assessment_date"] = selected_day.isoformat()
+            metadata["peak_date"] = selected_day.isoformat()
+        request_path = job_dir / "request.json"
+        request_path.write_text(json.dumps(metadata, indent=2))
+        outputs["request"] = request_path
+        outputs["job_dir"] = job_dir
+        outputs["request_id"] = request_id
+        outputs["peak_date"] = selected_day.isoformat()
 
-    metadata = {
-        "request_id": request_id,
-        "context_buffer_m": context_buffer_m,
-        "fwi_start_date": start_date.isoformat() if start_date else None,
-        "fwi_date": selected_day.isoformat(),
-        "fwi_end_date": target_date.isoformat(),
-        "peak_date": selected_day.isoformat(),
-        "selected_assessment_date": selected_day.isoformat(),
-        "operational_window": "16:00-17:00 Europe/Madrid",
-        "standard_fwi_observation": "12:00 local standard time (Europe/Madrid)",
-        "crs": DEFAULT_PROJECTED_CRS,
-        "keep_intermediate": keep_intermediate,
-        "calculation_mode": mode,
-        "risk_profile": profile,
-        "output_resolution_m": output_resolution_m,
-        "weight_scheme": spec["name"],
-        "active_top_levels": sorted(active_top_levels),
-        "optional_layers": optional_layers or {},
-        "source_layer_dates": daily_source_dates.get(selected_day.isoformat(), {}),
-        "daily_source_layer_dates": daily_source_dates,
-        "source_layer_date_details": daily_source_details.get(
-            selected_day.isoformat(), {}
-        ),
-        "daily_source_layer_date_details": daily_source_details,
-        "classification_breaks": (
-            (classification_breaks_by_date or {}).get(
-                selected_day.isoformat(), classification_breaks or {}
-            )
-        ),
-        "daily_classification_breaks": classification_breaks_by_date or {},
-        "daily_skipped_layers": daily_skipped_layers,
-        "daily_risk_dates": daily_risk_dates,
-        "historical_fire": {
-            "requested": historical_requested,
-            "available": historical_available,
-            "included_in_risk": False,
-            "role": "informational_overlay",
-            "as_of_date": selected_day.isoformat(),
-        },
-        "fwi_assessment": (
-            fwi_result.metadata if fwi_result is not None else {
-                "source": "uploaded_station",
-                "standard_observation": "12:00 local standard time",
-            }
-        ),
-        "operational_weather_window": {
-            "start": "16:00",
-            "end": "17:00",
-            "timezone": Fwi.FWI_STANDARD_TIMEZONE,
-            "included_in_fwi_equations": False,
-        },
-        "source_resolution_m": source_resolutions,
-        "sentinel_nominal_resolution_m": 20 if {"ndvi", "ndmi"} & spec_keys else None,
-        "output_grid_resolution_m": output_grid_resolution,
-        "resolution_interpretation": (
-            "The output grid preserves 20 m Sentinel/terrain patterns; FWI and LST "
-            "remain coarse-scale drivers and do not gain fine-scale precision when resampled."
-        ),
-        "model_interpretation": (
-            "Experimental wildfire susceptibility/risk index; AHP matrix consistency "
-            "is not evidence of out-of-sample predictive accuracy."
-        ),
-    }
-    if request_metadata:
-        metadata.update(request_metadata)
-        metadata["selected_assessment_date"] = selected_day.isoformat()
-        metadata["peak_date"] = selected_day.isoformat()
-    request_path = job_dir / "request.json"
-    request_path.write_text(json.dumps(metadata, indent=2))
-    outputs["request"] = request_path
-    outputs["job_dir"] = job_dir
-    outputs["request_id"] = request_id
-    outputs["peak_date"] = selected_day.isoformat()
+        if not keep_intermediate:
+            shutil.rmtree(base_output_dir)
+            shutil.rmtree(input_dir, ignore_errors=True)
+            shutil.rmtree(daily_work, ignore_errors=True)
 
-    if not keep_intermediate:
-        shutil.rmtree(base_output_dir)
-        shutil.rmtree(input_dir, ignore_errors=True)
-        shutil.rmtree(daily_work, ignore_errors=True)
-
-    return {key: str(value) for key, value in outputs.items()}
+        return {key: str(value) for key, value in outputs.items()}
+    except BaseException:
+        if not keep_intermediate:
+            shutil.rmtree(job_dir / "db_input", ignore_errors=True)
+            shutil.rmtree(job_dir / "base", ignore_errors=True)
+            shutil.rmtree(job_dir / "inputs", ignore_errors=True)
+            shutil.rmtree(job_dir / "daily_work", ignore_errors=True)
+        raise
 
 
 def run_static_aoi(

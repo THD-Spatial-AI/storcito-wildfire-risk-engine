@@ -103,6 +103,25 @@ def zip_job_outputs(job_dir: Path) -> Path:
     return zip_path
 
 
+def _prune_delivered_job_dir(job_dir: Path, zip_path: Path) -> None:
+    """Drop bulky result files once the platform confirmed receipt of the zip."""
+    if os.environ.get("STORCITO_KEEP_DELIVERED_OUTPUTS", "") == "1":
+        return
+    keep = {zip_path.name, "request.json", "callback.log"}
+    try:
+        for file in job_dir.rglob("*"):
+            if file.is_file() and file.name not in keep:
+                file.unlink(missing_ok=True)
+        for sub in sorted(job_dir.rglob("*"), reverse=True):
+            if sub.is_dir():
+                try:
+                    sub.rmdir()
+                except OSError:
+                    pass
+    except Exception as exc:
+        logger.warning("Unable to prune delivered job dir %s: %s", job_dir, exc)
+
+
 def post_result_callback(callback_url: str, zip_path: Path, session_id: str | None) -> dict[str, Any]:
     """POST the result zip to the wildfire callback (multipart/form-data, field 'file')."""
     timeout = httpx.Timeout(connect=15.0, read=600.0, write=600.0, pool=15.0)
@@ -456,6 +475,7 @@ def _finish_wildfire_response(outputs, payload, request, calculation_mode,
                     zip_path,
                     payload.session_id,
                 )
+                _prune_delivered_job_dir(Path(job_dir_str), zip_path)
             except Exception as exc:
                 callback_error = str(exc)
 
