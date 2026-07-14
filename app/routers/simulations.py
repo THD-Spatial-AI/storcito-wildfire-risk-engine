@@ -102,10 +102,12 @@ def run_static_aoi_wildfire_request(payload: WildfireCalculationRequest, request
         raise_aoi_http_error(e)
 
 
+@router.post("/assessment/start")
 @router.post("/calliope/start")
 def calliope_start(payload: WildfireCalculationRequest, request: Request):
     """
-    Start a wildfire risk assessment (wildfire-platform default endpoint).
+    Start a wildfire risk assessment (wildfire-platform default endpoint;
+    /calliope/start is the legacy alias kept for older platform builds).
     """
     try:
         return run_wildfire_payload(payload, request)
