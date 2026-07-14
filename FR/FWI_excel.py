@@ -176,6 +176,19 @@ def f_w_index_excel(
     )
     if midday_rows.empty:
         raise ValueError("Station data has no complete weather observation rows.")
+    while len(midday_rows) and float(midday_rows.iloc[0]["hour_diff"]) > 1:
+        print(f"[FWI excel] dropping partial leading day {midday_rows.iloc[0]['date']} "
+              "(no observation near the standard FWI time)", flush=True)
+        midday_rows = midday_rows.iloc[1:].reset_index(drop=True)
+    while len(midday_rows) and float(midday_rows.iloc[-1]["hour_diff"]) > 1:
+        print(f"[FWI excel] dropping partial trailing day {midday_rows.iloc[-1]['date']} "
+              "(no observation near the standard FWI time)", flush=True)
+        midday_rows = midday_rows.iloc[:-1].reset_index(drop=True)
+    if midday_rows.empty:
+        raise ValueError(
+            "Station data has no day with an observation within one hour of the "
+            "standard FWI assessment time (12:00 local standard time)."
+        )
     if (midday_rows["hour_diff"] > 1).any():
         bad_dates = midday_rows.loc[midday_rows["hour_diff"] > 1, "date"].astype(str).tolist()
         raise ValueError(
