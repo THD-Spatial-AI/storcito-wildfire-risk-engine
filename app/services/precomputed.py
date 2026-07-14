@@ -52,23 +52,21 @@ def _clip_rasters(cur, target_date: date, aoi_geojson: str) -> dict[str, bytes]:
               AND q.publication_id IS NOT NULL
             ORDER BY q.finished_at DESC NULLS LAST
             LIMIT 1
-        ), mosaics AS (
-            SELECT r.map_kind, ST_Union(r.rast) AS rast
-            FROM simulation_results r
-            JOIN chosen c
-              ON c.publication_id = r.publication_id
-             AND c.model_version = r.model_version
-            WHERE r.user_id = %s AND r.engine = 'dynamic'
-              AND r.target_date = %s
-              AND r.map_kind IN ('final_map', 'continuous_map', 'data_coverage')
-            GROUP BY r.map_kind
         )
-        SELECT m.map_kind,
-               ST_AsGDALRaster(ST_Clip(m.rast, aoi.g, true), 'GTiff')
-        FROM mosaics m
+        -- The regional tiles overlap by ~12-16 km but each has its own pixel grid, so ST_Union refuses to mosaic them ("do not have the same alignment"). Serve from any single tile that covers the AOI; AOIs spanning a tile seam beyond the overlap fall back to on-demand compute (set(clipped) != _MAP_KINDS in the caller).
+        SELECT DISTINCT ON (r.map_kind)
+               r.map_kind,
+               ST_AsGDALRaster(ST_Clip(r.rast, aoi.g, true), 'GTiff')
+        FROM simulation_results r
+        JOIN chosen c
+          ON c.publication_id = r.publication_id
+         AND c.model_version = r.model_version
         CROSS JOIN aoi
-        WHERE ST_Covers(ST_ConvexHull(m.rast), aoi.g)
-        ORDER BY m.map_kind
+        WHERE r.user_id = %s AND r.engine = 'dynamic'
+          AND r.target_date = %s
+          AND r.map_kind IN ('final_map', 'continuous_map', 'data_coverage')
+          AND ST_Covers(ST_ConvexHull(r.rast), aoi.g)
+        ORDER BY r.map_kind, ST_Area(ST_ConvexHull(r.rast)) ASC
         """,
         (aoi_geojson, target_date, MODEL_VERSION, _REGIONAL_USER, target_date),
     )
@@ -110,11 +108,7 @@ def _matching_output_grids(*paths: Path) -> bool:
 def get_precomputed_result(
     target_date: date, aoi_projected, *, resolution_m: float | None = None
 ) -> dict[str, Any] | None:
-    """Clip the regional dynamic map for target_date to the AOI (EPSG:32629).
-
-    Returns an outputs dict shaped like the AOI engine's, or None when no
-    regional run exists for the date (caller falls back to on-demand compute).
-    """
+    """Clip the regional dynamic map for target_date to the AOI (EPSG:32629). Returns an outputs dict shaped like the AOI engine's, or None when no regional run exists for the date (caller falls back to on-demand compute)."""
     aoi_geojson = json.dumps(mapping(aoi_projected))
     clipped: dict[str, bytes] = {}
     try:
