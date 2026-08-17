@@ -28,3 +28,5 @@ CREATE INDEX IF NOT EXISTS simulation_results_job_id_idx      ON public.simulati
 CREATE INDEX IF NOT EXISTS simulation_results_session_id_idx  ON public.simulation_results (session_id);
 CREATE INDEX IF NOT EXISTS simulation_results_target_date_idx ON public.simulation_results (target_date);
 CREATE INDEX IF NOT EXISTS simulation_results_aoi_gix         ON public.simulation_results USING gist (aoi);
+
+CREATE INDEX IF NOT EXISTS simulation_results_rast_gix        ON public.simulation_results USING gist (ST_ConvexHull(rast));

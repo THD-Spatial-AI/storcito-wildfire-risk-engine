@@ -54,7 +54,9 @@ def _clip_rasters(cur, target_date: date, aoi_geojson: str) -> dict[str, bytes]:
         covering = [raw for raw, covers in rows if covers]
         if covering:
             clipped[kind] = covering[0]  # smallest covering tile (query order)
-        elif len(rows) > 1:
+        elif len(rows) == 1:
+            clipped[kind] = rows[0][0]
+        elif rows:
             merged = _merge_tile_pieces(
                 [raw for raw, _ in rows], classified=(kind == "final_map")
             )
