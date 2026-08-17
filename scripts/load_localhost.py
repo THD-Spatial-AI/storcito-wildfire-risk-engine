@@ -478,18 +478,6 @@ def psql_sql(sql: str) -> None:
     run(psql_cmd() + ["-q", "-c", sql])
 
 
-# The _ts tables are read through GDAL's PostGISRaster driver (see
-# FR/db_reconstruct.export_ts_raster). That driver takes srid, scale, blocksize
-# and extent from the raster catalog; with no constraints it has to scan every
-# tile each time it opens the coverage. INSERT ... SELECT from a staging table
-# does not inherit the constraints raster2pgsql put on the staging table, so
-# they have to be (re)derived here.
-#
-# Constraints are dropped before the append and re-added after it: the extent
-# and blocksize constraints describe the rows already present, so leaving them
-# in place would reject a capture whose footprint or tiling differs from the
-# previous ones (the same trap that makes raster2pgsql -C unusable for these
-# tables, see raster2pgsql_load).
 def drop_raster_constraints_sql(table: str, *, schema: str = "public") -> str:
     """SQL clearing every raster constraint so the next append cannot be rejected."""
     return (
@@ -532,11 +520,9 @@ def sentinel_ts_append(path: Path, table: str, srid: int, capture_date: str) -> 
             ON public.{ts} (capture_date);
         CREATE INDEX IF NOT EXISTS {ts}_st_convexhull_idx
             ON public.{ts} USING gist (ST_ConvexHull(rast));
-        {drop_raster_constraints_sql(ts)}
         DELETE FROM public.{ts} WHERE capture_date = '{capture_date}';
         INSERT INTO public.{ts} (rast, filename, capture_date)
             SELECT rast, filename, '{capture_date}' FROM public.{staging};
-        {add_raster_constraints_sql(ts)}
         DROP TABLE public.{staging};
         """
     )
@@ -567,11 +553,9 @@ def sentinel_batch_append(
                     f"CREATE INDEX IF NOT EXISTS {ts}_capture_date_idx ON public.{ts} (capture_date);",
                     f"CREATE INDEX IF NOT EXISTS {ts}_st_convexhull_idx "
                     f"ON public.{ts} USING gist (ST_ConvexHull(rast));",
-                    drop_raster_constraints_sql(ts),
                     f"DELETE FROM public.{ts} WHERE capture_date = '{capture_date}';",
                     f"INSERT INTO public.{ts} (rast, filename, capture_date) "
                     f"SELECT rast, filename, '{capture_date}' FROM public.{stage};",
-                    add_raster_constraints_sql(ts),
                 ]
             )
             if skip_current:
@@ -1427,7 +1411,6 @@ def cmd_load_lst(args: argparse.Namespace) -> int:
             "CREATE INDEX IF NOT EXISTS lst_ts_capture_date_idx ON public.lst_ts (capture_date);",
             "CREATE INDEX IF NOT EXISTS lst_ts_st_convexhull_idx "
             "ON public.lst_ts USING gist (ST_ConvexHull(rast));",
-            drop_raster_constraints_sql("lst_ts"),
         ]
         for _path, capture_date, stage in stages:
             statements.extend(
@@ -1437,7 +1420,6 @@ def cmd_load_lst(args: argparse.Namespace) -> int:
                     f"SELECT rast, filename, '{capture_date}' FROM public.{stage};",
                 ]
             )
-        statements.append(add_raster_constraints_sql("lst_ts"))
         current_stage = stages[-1][2]
         statements.extend(
             [
