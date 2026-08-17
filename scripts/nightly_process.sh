@@ -210,19 +210,16 @@ except Exception as e:
 
 	    if [ "$ok" = "1" ]; then
 	        valid=$($PSQL -c "SELECT CASE WHEN
-	          (SELECT count(*) FROM simulation_results
-	           WHERE user_id='regional' AND engine='dynamic' AND target_date='$d'
-	             AND publication_id='$publication_id' AND model_version='$MODEL_VERSION') = 12
-	          AND
 	          (SELECT count(*) FROM (
 	             SELECT session_id FROM simulation_results
 	             WHERE user_id='regional' AND engine='dynamic' AND target_date='$d'
 	               AND publication_id='$publication_id' AND model_version='$MODEL_VERSION'
 	             GROUP BY session_id
-	             HAVING count(*) = 3 AND count(DISTINCT map_kind) = 3
+	             HAVING count(DISTINCT map_kind) = 3
 	               AND bool_or(map_kind = 'continuous_map')
 	               AND bool_or(map_kind = 'final_map')
 	               AND bool_or(map_kind = 'data_coverage')
+	               AND bool_and(rast IS NOT NULL)
 	           ) complete_sessions) = 4
 	          THEN 1 ELSE 0 END;")
 	        if [ "$valid" != "1" ]; then

@@ -279,7 +279,10 @@ vector tables carry a `geom` (or `ogc_fid`) geometry column.
 Data fetch/load is now handled by the two-script workflow in `scripts/`.
 
 **`simulation_results`** (written by the API when a simulation finishes — see
-`FR/db_store.py`) holds one row per output map:
+`FR/db_store.py`) holds one or more spatially georeferenced rows per output
+map. GeoTIFFs are streamed into PostGIS as 1024-pixel tiles (configurable with
+`STORCITO_RESULT_TILE_SIZE`) so regional maps never become a single oversized
+PostgreSQL value. All tiles for a request are committed atomically:
 
 | Column | Type | Notes |
 |---|---|---|
@@ -292,7 +295,7 @@ Data fetch/load is now handled by the two-script workflow in `scripts/`.
 | `metadata` | jsonb | full request metadata |
 | `aoi` | geometry(Geometry,4326) | request footprint |
 | `created_at` | timestamptz | insert time |
-| `rast` | raster | the result map (via `ST_FromGDALRaster`) |
+| `rast` | raster | one result-map tile (via `ST_FromGDALRaster`) |
 
 ### Database API endpoints
 

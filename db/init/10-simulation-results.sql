@@ -1,4 +1,5 @@
--- Simulation result store.
+-- Simulation result store. Large logical maps occupy multiple independently
+-- georeferenced raster rows; FR/db_store.py inserts them transactionally.
 -- Created at first DB init so the schema and /db/raster/simulation_results
 -- are valid before any simulation runs.
 -- FR/db_store.py also creates this table with CREATE TABLE IF NOT EXISTS as a
