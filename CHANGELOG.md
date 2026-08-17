@@ -3,6 +3,24 @@
 Notable changes of this engine relative to the original UVIGO codebase
 (https://github.com/Mat-GL-02/STORCITO), plus operational notes.
 
+## 2026-08-03 — Reproducibility freeze candidate 2026-08-03.1
+
+- The raster engine and database report sampler now share the same 360 x 360
+  regular-grid interpolation, moisture-code propagation and all-touched AOI
+  mask. This removes the former 3.379 versus 3.240 result caused by evaluating
+  the same weather on two different grids.
+- Missing raster cells are represented internally as NaN. Zero remains a valid
+  score for infrastructure, WUI and fire history; published copies of those
+  layers use -9999 as nodata. Resampling initializes pixels outside the source
+  footprint as nodata instead of zero.
+- AOI and whole-region engines apply the same artificial-surface fuel mask.
+  Regional AOI jobs refuse extent-local LST percentile fallbacks when a dated
+  LST layer exists but regional breakpoints are unavailable.
+- The configured FWI class thresholds are identified as project thresholds.
+  The earlier claim that they were official EFFIS bounds validated for Galicia
+  was unsupported and has been removed.
+- Model/cache version `2026-08-03.1` invalidates earlier derived products.
+
 ## 2026-07 — Source-data pipeline and API restructuring
 
 ### Fire Weather Index engine (differences vs. the original)
@@ -11,9 +29,9 @@ Notable changes of this engine relative to the original UVIGO codebase
   `exp(+0.115 * H)` instead of Van Wagner (1987)'s `exp(-0.115 * H)`; the
   positive exponent explodes (~1e5) on humid days and corrupted every FFMC
   value computed after them. Now matches the published FWI system exactly.
-- **EFFIS danger classes**: risk classes 1-5 now use the pan-European EFFIS
-  bounds (5.2 / 11.2 / 21.3 / 38), validated against EFFIS for Galicia;
-  the original used unsourced bounds (3 / 13 / 23 / 28).
+- **Configured danger classes**: risk classes 1-5 use the project-configured
+  bounds (5.2 / 11.2 / 21.3 / 38). These are not presented as official EFFIS
+  thresholds; the original used unsourced bounds (3 / 13 / 23 / 28).
 - **Standard FWI observation time**: Canadian FWI is evaluated at noon local
   standard time (12:00 CET / 13:00 CEST in Galicia). The submitted
   16:00-17:00 interval remains the operational weather-display window and is
@@ -180,6 +198,33 @@ Division of labour for operational users: **when** to reinforce or
 restrict = the FWI day ranking; **where** to patrol or warn = that day's
 combined map. The per-day mean FWI values are disclosed in the result
 metadata (`daily_mean_fwi`) so the ranking can always be audited.
+
+## Artificial surfaces are excluded from the risk map (2026-07-15)
+
+Built-up land (CORINE Land Cover class 1xx: urban fabric, industrial and
+commercial units, ports, airports) is now masked out of the analysis and
+shows as "not analyzed" instead of moderate/high risk. City blocks carry no
+continuous wildland fuel, but the index layers systematically misread them:
+
+- **NDVI**: a mixed 10 m urban pixel (roof + street tree + garden patch)
+  lands at NDVI 0.2-0.4, the same range as dry shrub - the most fire-prone
+  vegetation class in the FIRMS-calibrated bins.
+- **NDMI**: impervious surfaces read as "extremely dry vegetation".
+- **LST**: the urban heat island adds several degrees.
+- **Infrastructure proximity**: every city pixel is within 250 m of a road,
+  so the layer saturates at its maximum.
+
+The MFE fuel map assigns unclassified land (which includes urban) the
+lowest fuel risk, so it stayed in the analysis and the layers above pushed
+whole city centres to moderate/high. The fix zeroes CLC-artificial pixels
+in the fuel layer (a required AHP input), which removes them from the
+final map and from the AOI statistics (analyzed km², high + very-high
+km²). The meaningful urban fire risk - vegetation at the wildland-urban
+interface - is unaffected: the WUI layer scores vegetation *near* built-up
+areas, not the built-up areas themselves. Farmland keeps its low fuel risk
+and remains analyzed. `MODEL_VERSION` was bumped, which automatically
+re-queues all precomputed regional dates; old-version tiles are never
+served.
 
 ## Future work
 

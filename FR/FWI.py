@@ -69,7 +69,8 @@ FWI_RUNUP_DAYS = 60
 
 FWI_FORECAST_DAYS = 2
 
-# EFFIS pan-European danger-class upper bounds (classes 1-4; >38 = class 5, EFFIS "extreme" merged in). Region-independent; validated vs EFFIS (Galicia).
+FWI_GRID_SIZE = 360
+
 FWI_CLASS_BOUNDS = (5.2, 11.2, 21.3, 38.0)
 
 # The Canadian FWI System is evaluated at noon local standard time. Galicia uses Europe/Madrid: that is 12:00 CET in winter and 13:00 CEST on the clock in summer. The separate operational weather view remains 16:00-17:00.
@@ -160,7 +161,7 @@ def standard_fwi_hour_index(dataset, tz: str = FWI_STANDARD_TIMEZONE) -> int:
 
 
 def classify_fwi(values: np.ndarray) -> np.ndarray:
-    """Classify continuous FWI using the EFFIS bounds used by STORCITO. Class 1 is very low and class 5 combines EFFIS very-high and extreme values because the application exposes five risk classes."""
+    """Classify continuous FWI with STORCITO's configured five-class bounds."""
     values = np.asarray(values)
     b1, b2, b3, b4 = FWI_CLASS_BOUNDS
     valid = np.isfinite(values) & (values >= 0)
@@ -189,13 +190,139 @@ def _fwi_grid_transform(x_coord: np.ndarray, y_coord: np.ndarray, shape: tuple[i
     )
 
 
-def _mean_fwi_in_geometry(
-    values: np.ndarray,
-    transform,
-    geometry_wgs84,
-) -> float:
+def regularize_fwi_weather(
+    lon_grid: np.ndarray,
+    lat_grid: np.ndarray,
+    *,
+    temperature_k: np.ndarray,
+    relative_humidity: np.ndarray,
+    wind_speed_mps: np.ndarray,
+    precipitation_mm: np.ndarray,
+    wind_direction_deg: np.ndarray | None = None,
+    grid_size: int = FWI_GRID_SIZE,
+) -> dict[str, Any]:
+    """Interpolate WRF weather onto the canonical regular FWI grid.
+
+    This function is shared by the raster engine and DB-backed report sampler.
+    Sampling native WRF cells before advancing the moisture codes is not
+    equivalent to running the equations on the published regular grid.
+    """
+    lon = np.asarray(lon_grid, dtype="float64")
+    lat = np.asarray(lat_grid, dtype="float64")
+    if lon.shape != lat.shape or lon.ndim != 2:
+        raise ValueError("FWI longitude/latitude grids must be matching 2-D arrays")
+    if not np.isfinite(lon).all() or not np.isfinite(lat).all():
+        raise ValueError("FWI coordinate grid contains missing values")
+    if grid_size < 2:
+        raise ValueError("FWI regular grid must contain at least two cells per axis")
+
+    x = np.linspace(float(np.nanmin(lon)), float(np.nanmax(lon)), grid_size)
+    y = np.linspace(float(np.nanmin(lat)), float(np.nanmax(lat)), grid_size)
+    grid_x, grid_y = np.meshgrid(x, y)
+    coordinates = (lon.ravel(), lat.ravel())
+    target = (grid_x, grid_y)
+
+    def nearest(values: np.ndarray) -> np.ndarray:
+        array = np.asarray(values, dtype="float64")
+        if array.shape != lon.shape:
+            raise ValueError("FWI weather arrays must match the coordinate grid")
+        return griddata(coordinates, array.ravel(), target, method="nearest")
+
+    humidity_native_units = nearest(relative_humidity)
+    result: dict[str, Any] = {
+        "temperature_c": nearest(temperature_k) - 273.15,
+        "relative_humidity": humidity_native_units,
+        "relative_humidity_pct": rh_to_percent(humidity_native_units),
+        "wind_speed_kmh": nearest(wind_speed_mps) * 3.6,
+        "precipitation_mm": nearest(precipitation_mm),
+        "x": x,
+        "y": y,
+        "transform": _fwi_grid_transform(lon, lat, (grid_size, grid_size)),
+    }
+    if wind_direction_deg is not None:
+        result["wind_direction_deg"] = nearest(wind_direction_deg)
+    return result
+
+
+def accumulate_fwi_precipitation(
+    hourly_precipitation: np.ndarray,
+    observation_index: int,
+    previous_rain_tail: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return the standard 24 h rain input and the tail for the next day."""
+    precipitation = np.asarray(hourly_precipitation, dtype="float64")
+    if precipitation.ndim != 3:
+        raise ValueError("FWI precipitation must be time x row x column")
+    if observation_index < 0 or observation_index >= precipitation.shape[0]:
+        raise ValueError("FWI precipitation observation index is outside the day")
+    rain = np.sum(
+        precipitation[: observation_index + 1], axis=0, dtype="float64"
+    )
+    if previous_rain_tail is not None:
+        tail = np.asarray(previous_rain_tail, dtype="float64")
+        if tail.shape != rain.shape:
+            raise ValueError("FWI previous-day rain tail has a different grid")
+        rain = rain + tail
+    next_tail = np.sum(
+        precipitation[observation_index + 1 :], axis=0, dtype="float64"
+    )
+    return rain, next_tail
+
+
+def advance_fwi_state(
+    *,
+    temperature_c: np.ndarray,
+    relative_humidity_pct: np.ndarray,
+    wind_speed_kmh: np.ndarray,
+    precipitation_mm: np.ndarray,
+    month: int,
+    ffmc_previous: np.ndarray | None = None,
+    dmc_previous: np.ndarray | None = None,
+    dc_previous: np.ndarray | None = None,
+) -> dict[str, np.ndarray]:
+    """Advance one canonical FWI day and return codes plus indices."""
+    supplied = (ffmc_previous, dmc_previous, dc_previous)
+    if any(value is None for value in supplied):
+        if not all(value is None for value in supplied):
+            raise ValueError("FWI previous FFMC, DMC and DC must be supplied together")
+        initial_ffmc, initial_dmc, initial_dc = fwi_init_codes()
+        shape = np.asarray(relative_humidity_pct).shape
+        ffmc_previous = np.full(shape, initial_ffmc, dtype="float64")
+        dmc_previous = np.full(shape, initial_dmc, dtype="float64")
+        dc_previous = np.full(shape, initial_dc, dtype="float64")
+
+    ffmc = Fwi.ffmc(
+        temperature_c,
+        relative_humidity_pct,
+        wind_speed_kmh,
+        precipitation_mm,
+        ffmc_previous,
+    )
+    dmc = Fwi.dmc(
+        temperature_c,
+        relative_humidity_pct,
+        precipitation_mm,
+        dmc_previous,
+        month,
+    )
+    dc = Fwi.dc(temperature_c, precipitation_mm, month, dc_previous)
+    isi = Fwi.isi(wind_speed_kmh, ffmc)
+    bui = Fwi.bui(dmc, dc)
+    return {
+        "ffmc": ffmc,
+        "dmc": dmc,
+        "dc": dc,
+        "isi": isi,
+        "bui": bui,
+        "fwi": Fwi.fwi(isi, bui),
+    }
+
+
+def fwi_geometry_mask(values: np.ndarray, transform, geometry_wgs84) -> np.ndarray:
+    """Return finite regular-grid pixels selected by an optional WGS84 AOI."""
+    valid = np.isfinite(values)
     if geometry_wgs84 is None:
-        return float(np.nanmean(values))
+        return valid
 
     from rasterio.features import geometry_mask
     from shapely.geometry import mapping
@@ -207,7 +334,15 @@ def _mean_fwi_in_geometry(
         invert=True,
         all_touched=True,
     )
-    valid = selected & np.isfinite(values)
+    return selected & valid
+
+
+def _mean_fwi_in_geometry(
+    values: np.ndarray,
+    transform,
+    geometry_wgs84,
+) -> float:
+    valid = fwi_geometry_mask(values, transform, geometry_wgs84)
     if not np.any(valid):
         raise ValueError("The requested AOI does not overlap the FWI grid")
     return float(np.nanmean(values[valid]))
@@ -374,7 +509,6 @@ def f_w_index(
         f"({FWI_STANDARD_TIMEZONE})."
     )
 
-    grid_size = 360
     peak_mean = float("-inf")
     peak_date: date | None = None
     peak_continuous: np.ndarray | None = None
@@ -385,7 +519,6 @@ def f_w_index(
     daily_continuous_paths: dict[str, Path] = {}
     daily_dir = output_folder / "FWI_daily"
 
-    init_ffmc, init_dmc, init_dc = fwi_init_codes()
     ffmc_previous = dmc_previous = dc_previous = None
     previous_rain_tail = None
     previous_day = None
@@ -436,34 +569,39 @@ def f_w_index(
                 ma.filled(dataset["prec"][day_start:day_start + day_hours], np.nan).astype("float64"),
                 context=f"in {file.name}",
             )
-            rain = precipitation[: observation_index - day_start + 1].sum(axis=0)
-            if previous_rain_tail is not None:
-                rain = rain + previous_rain_tail
-            previous_rain_tail = precipitation[observation_index - day_start + 1 : day_hours].sum(axis=0)
+            rain, previous_rain_tail = accumulate_fwi_precipitation(
+                precipitation,
+                observation_index - day_start,
+                previous_rain_tail,
+            )
             month = int(nc.num2date(dataset["time"][0], dataset["time"].units).month)
 
-        x = np.linspace(float(x_coord.min()), float(x_coord.max()), grid_size)
-        y = np.linspace(float(y_coord.min()), float(y_coord.max()), grid_size)
-        grid_x, grid_y = np.meshgrid(x, y)
-        coordinates = (x_coord.ravel(), y_coord.ravel())
-        grid_coordinates = (grid_x, grid_y)
-        wind_grid = griddata(coordinates, wind.ravel() * 3.6, grid_coordinates, method="nearest")
-        rain_grid = griddata(coordinates, rain.ravel(), grid_coordinates, method="nearest")
-        humidity_grid = griddata(
-            coordinates, rh_to_percent(humidity).ravel(), grid_coordinates, method="nearest"
+        regular = regularize_fwi_weather(
+            x_coord,
+            y_coord,
+            temperature_k=temperature,
+            relative_humidity=humidity,
+            wind_speed_mps=wind,
+            precipitation_mm=rain,
         )
-        temperature_grid = griddata(
-            coordinates, temperature.ravel() - 273.15, grid_coordinates, method="nearest"
+        wind_grid = np.asarray(regular["wind_speed_kmh"])
+        rain_grid = np.asarray(regular["precipitation_mm"])
+        humidity_grid = np.asarray(regular["relative_humidity_pct"])
+        temperature_grid = np.asarray(regular["temperature_c"])
+
+        state = advance_fwi_state(
+            temperature_c=temperature_grid,
+            relative_humidity_pct=humidity_grid,
+            wind_speed_kmh=wind_grid,
+            precipitation_mm=rain_grid,
+            month=month,
+            ffmc_previous=ffmc_previous,
+            dmc_previous=dmc_previous,
+            dc_previous=dc_previous,
         )
-
-        if ffmc_previous is None:
-            ffmc_previous = np.full_like(humidity_grid, init_ffmc)
-            dmc_previous = np.full_like(humidity_grid, init_dmc)
-            dc_previous = np.full_like(humidity_grid, init_dc)
-
-        ffmc = Fwi.ffmc(temperature_grid, humidity_grid, wind_grid, rain_grid, ffmc_previous)
-        dmc = Fwi.dmc(temperature_grid, humidity_grid, rain_grid, dmc_previous, month)
-        dc = Fwi.dc(temperature_grid, rain_grid, month, dc_previous)
+        ffmc = state["ffmc"]
+        dmc = state["dmc"]
+        dc = state["dc"]
         ffmc_previous, dmc_previous, dc_previous = ffmc, dmc, dc
 
         in_window = score_start <= day <= score_end
@@ -476,10 +614,8 @@ def f_w_index(
         if not in_window:
             continue
 
-        isi = Fwi.isi(wind_grid, ffmc)
-        bui = Fwi.bui(dmc, dc)
-        continuous = Fwi.fwi(isi, bui)[::-1, :].astype("float32", copy=False)
-        transform = _fwi_grid_transform(x_coord, y_coord, continuous.shape)
+        continuous = state["fwi"][::-1, :].astype("float32", copy=False)
+        transform = regular["transform"]
         classified = classify_fwi(continuous)
         mean_fwi = _mean_fwi_in_geometry(
             continuous, transform, selection_geometry_wgs84
@@ -549,7 +685,10 @@ def f_w_index(
 
     result_metadata = {
         "method": "Canadian FWI System",
-        "classification": "EFFIS five-class display; very-high and extreme merged into class 5",
+        "classification": "STORCITO configured five-class display thresholds",
+        "classification_source": "project-configured; not established as official EFFIS bounds",
+        "predictive_validation": "not established",
+        "regular_grid_size": FWI_GRID_SIZE,
         "class_bounds": list(FWI_CLASS_BOUNDS),
         "standard_observation": {
             "local_standard_hour": FWI_STANDARD_LOCAL_HOUR,

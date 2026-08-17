@@ -1,5 +1,4 @@
 import os
-os.environ['GDAL_DATA'] = r'C:\Users\alvar\anaconda3\envs\storcito\Library\share\gdal'
 import sys
 import time
 import pandas as pd

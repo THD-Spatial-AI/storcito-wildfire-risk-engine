@@ -147,7 +147,7 @@ def _fwi_slice(cur, fdate, hour_index: int | None) -> dict[str, Any] | None:
 
     if hour_index is None:
         hour_index = _standard_fwi_hour_index_for_date(fdate)
-    cache_version = os.environ.get("STORCITO_MODEL_VERSION", "dev") + ":fwi-slice-v4"
+    cache_version = os.environ.get("STORCITO_MODEL_VERSION", "dev") + ":fwi-slice-v5"
     cur.execute(
         """CREATE TABLE IF NOT EXISTS fwi_slices ( fdate date NOT NULL, hour_index int NOT NULL, data bytea NOT NULL, cache_version text, PRIMARY KEY (fdate, hour_index) ); ALTER TABLE fwi_slices ADD COLUMN IF NOT EXISTS cache_version text"""
     )
@@ -256,9 +256,8 @@ def sample_fwi_area_from_db(
     hour_index: int | None = None,
     score_start_date: date | None = None,
 ) -> dict[str, Any]:
-    """Summarise WRF/FWI over the AOI, standard-noon by default."""
+    """Run and summarise FWI on the same regular grid as the raster engine."""
     import numpy as np
-    import FR.rutinas.FWI_Equations as Fwi
     import FR.FWI as FwiModule
     from FR.db_reconstruct import _pg_connect
 
@@ -267,9 +266,6 @@ def sample_fwi_area_from_db(
     dc0 = None
     sample: dict[str, Any] | None = None
     rows_seen = 0
-    grid_y_idx = None
-    grid_x_idx = None
-    area_info: dict[str, Any] | None = None
     prev_rain_tail = None
     history_start, history_end = _fwi_history_window(target_date, score_start_date)
     standard_observation = hour_index is None
@@ -299,75 +295,106 @@ def sample_fwi_area_from_db(
                 continue
             rows_seen += 1
 
-            if grid_y_idx is None or grid_x_idx is None:
-                grid_y_idx, grid_x_idx, area_info = _fwi_area_grid_indices(
-                    np.asarray(slice_data["lon"], dtype=float),
-                    np.asarray(slice_data["lat"], dtype=float),
-                    aoi_wgs84,
-                )
-
             month = int(slice_data["month"])
-            temperature_k = np.asarray(slice_data["temp"], dtype=float)[grid_y_idx, grid_x_idx]
-            temperature_c = temperature_k - 273.15
-            relative_humidity = np.asarray(slice_data["rh"], dtype=float)[grid_y_idx, grid_x_idx]
-            relative_humidity_pct = FwiModule.rh_to_percent(relative_humidity)
-            wind_speed_mps = np.asarray(slice_data["mod"], dtype=float)[grid_y_idx, grid_x_idx]
-            wind_direction_deg = np.asarray(slice_data["dir"], dtype=float)[grid_y_idx, grid_x_idx]
-            # 24 h rain accumulation up to the assessment hour.
-            prec_day = np.asarray(slice_data["prec_day"], dtype=float)[:, grid_y_idx, grid_x_idx]
+            lon_grid = np.asarray(slice_data["lon"], dtype="float64")
+            lat_grid = np.asarray(slice_data["lat"], dtype="float64")
+            temperature_k_native = np.asarray(slice_data["temp"], dtype="float64")
+            humidity_native = np.asarray(slice_data["rh"], dtype="float64")
+            wind_mps_native = np.asarray(slice_data["mod"], dtype="float64")
+            direction_native = np.asarray(slice_data["dir"], dtype="float64")
+
+            # Accumulate rain on the native WRF grid before regularisation,
+            # exactly as FR.FWI.f_w_index does.
+            prec_day = np.asarray(slice_data["prec_day"], dtype="float64")
             day_hours = prec_day.shape[0]
             resolved_hour_index = int(slice_data["hour_index"])
-            precipitation_mm = np.sum(prec_day[: resolved_hour_index + 1], axis=0)
-            if prev_rain_tail is not None:
-                precipitation_mm = precipitation_mm + prev_rain_tail
-            prev_rain_tail = np.sum(prec_day[resolved_hour_index + 1 : day_hours], axis=0)
+            precipitation_native, prev_rain_tail = (
+                FwiModule.accumulate_fwi_precipitation(
+                    prec_day[:day_hours], resolved_hour_index, prev_rain_tail
+                )
+            )
 
-            if f0 is None:
-                init_f, init_p, init_d = FwiModule.fwi_init_codes()
-                f0 = np.full(relative_humidity.shape, init_f, dtype=float)
-                dmc0 = np.full(relative_humidity.shape, init_p, dtype=float)
-                dc0 = np.full(relative_humidity.shape, init_d, dtype=float)
+            regular = FwiModule.regularize_fwi_weather(
+                lon_grid,
+                lat_grid,
+                temperature_k=temperature_k_native,
+                relative_humidity=humidity_native,
+                wind_speed_mps=wind_mps_native,
+                precipitation_mm=precipitation_native,
+                wind_direction_deg=direction_native,
+            )
+            temperature_c = np.asarray(regular["temperature_c"])
+            relative_humidity = np.asarray(regular["relative_humidity"])
+            relative_humidity_pct = np.asarray(regular["relative_humidity_pct"])
+            wind_kmh = np.asarray(regular["wind_speed_kmh"])
+            precipitation_mm = np.asarray(regular["precipitation_mm"])
+            wind_direction_deg = np.asarray(regular["wind_direction_deg"])
 
-            wind_kmh = wind_speed_mps * 3.6
-            # FWI equations expect RH in percent; the NetCDF stores a fraction.
-            rh_pct = relative_humidity_pct
-            ffmc = Fwi.ffmc(temperature_c, rh_pct, wind_kmh, precipitation_mm, f0)
-            dmc = Fwi.dmc(temperature_c, rh_pct, precipitation_mm, dmc0, month)
-            dc = Fwi.dc(temperature_c, precipitation_mm, month, dc0)
-            isi = Fwi.isi(wind_kmh, ffmc)
-            bui = Fwi.bui(dmc, dc)
-            fwi = Fwi.fwi(isi, bui)
+            state = FwiModule.advance_fwi_state(
+                temperature_c=temperature_c,
+                relative_humidity_pct=relative_humidity_pct,
+                wind_speed_kmh=wind_kmh,
+                precipitation_mm=precipitation_mm,
+                month=month,
+                ffmc_previous=f0,
+                dmc_previous=dmc0,
+                dc_previous=dc0,
+            )
+            ffmc = state["ffmc"]
+            dmc = state["dmc"]
+            dc = state["dc"]
+            isi = state["isi"]
+            bui = state["bui"]
+            fwi = state["fwi"]
 
             f0, dmc0, dc0 = ffmc, dmc, dc
 
             if fdate == target_date:
+                # The raster output is north-up, hence the vertical flip before
+                # applying the exact same all-touched AOI mask used by the engine.
+                fwi_north_up = np.asarray(fwi)[::-1, :].astype(
+                    "float32", copy=False
+                )
+                selection = FwiModule.fwi_geometry_mask(
+                    fwi_north_up, regular["transform"], aoi_wgs84
+                )
+                if not np.any(selection):
+                    raise ValueError("The requested AOI does not overlap the FWI grid")
+
+                def area_mean(values) -> float | None:
+                    return _nanmean_float(np.asarray(values)[::-1, :][selection])
+
+                representative = aoi_wgs84.representative_point()
                 sample = {
                     "date": fdate.isoformat(),
                     "filename": filename,
                     "time": str(slice_data["time_str"]),
                     "hour_index": resolved_hour_index,
-                    "method": area_info.get("method") if area_info else "aoi_grid_mean",
-                    "sample_count": area_info.get("sample_count") if area_info else int(relative_humidity.size),
-                    "sample_lon": area_info.get("sample_lon") if area_info else None,
-                    "sample_lat": area_info.get("sample_lat") if area_info else None,
-                    "grid_lon": area_info.get("grid_lon") if area_info else None,
-                    "grid_lat": area_info.get("grid_lat") if area_info else None,
-                    "temperature_k": _nanmean_float(temperature_k),
-                    "temperature_c": _nanmean_float(temperature_c),
-                    "relative_humidity": _nanmean_float(relative_humidity),
-                    "relative_humidity_pct": _nanmean_float(relative_humidity_pct),
-                    "wind_speed_mps": _nanmean_float(wind_speed_mps),
-                    "wind_speed_kmh": _nanmean_float(wind_kmh),
-                    "wind_direction_deg": _circular_mean_degrees(wind_direction_deg),
-                    "precipitation_mm": _nanmean_float(precipitation_mm),
-                    "ffmc": _nanmean_float(ffmc),
-                    "dmc": _nanmean_float(dmc),
-                    "dc": _nanmean_float(dc),
-                    "isi": _nanmean_float(isi),
-                    "bui": _nanmean_float(bui),
-                    "fwi": _nanmean_float(fwi),
+                    "method": "canonical_regular_grid_aoi_mean",
+                    "sample_count": int(np.count_nonzero(selection)),
+                    "sample_lon": float(representative.x),
+                    "sample_lat": float(representative.y),
+                    "grid_lon": None,
+                    "grid_lat": None,
+                    "temperature_k": area_mean(temperature_c + 273.15),
+                    "temperature_c": area_mean(temperature_c),
+                    "relative_humidity": area_mean(relative_humidity),
+                    "relative_humidity_pct": area_mean(relative_humidity_pct),
+                    "wind_speed_mps": area_mean(wind_kmh / 3.6),
+                    "wind_speed_kmh": area_mean(wind_kmh),
+                    "wind_direction_deg": _circular_mean_degrees(
+                        wind_direction_deg[::-1, :][selection]
+                    ),
+                    "precipitation_mm": area_mean(precipitation_mm),
+                    "ffmc": area_mean(ffmc),
+                    "dmc": area_mean(dmc),
+                    "dc": area_mean(dc),
+                    "isi": area_mean(isi),
+                    "bui": area_mean(bui),
+                    "fwi": float(np.nanmean(fwi_north_up[selection])),
                     "runup_days": rows_seen,
-                    "source": "database:fwi_slices",
+                    "source": "database:fwi_slices:canonical_regular_grid",
+                    "regular_grid_size": FwiModule.FWI_GRID_SIZE,
                     "standard_fwi_observation": standard_observation,
                     "classification_thresholds_applicable": standard_observation,
                 }

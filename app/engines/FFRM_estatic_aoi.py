@@ -44,18 +44,41 @@ INPUT_DIR = DATA_DIR / "INPUT"
 OUTPUT_DIR = DATA_DIR / "OUTPUT"
 
 
-def _align_raster_with_resampling(source_path: Path, reference_path: Path) -> np.ndarray:
+def _align_raster_with_resampling(
+    source_path: Path,
+    reference_path: Path,
+    *,
+    zero_is_valid: bool = False,
+) -> np.ndarray:
+    """Align a raster while representing missing pixels only as NaN.
+
+    Some legacy infrastructure/WUI/history rasters declare zero as nodata even
+    though zero is a valid distance/history score. For those layers the caller
+    explicitly opts into zero validity; all newly exported layers use an
+    unambiguous -9999 nodata value.
+    """
     with rasterio.open(source_path) as src, rasterio.open(reference_path) as ref:
+        src_data = src.read(1, out_dtype="float32")
+        source_nodata = src.nodata
+        nodata_is_legacy_zero = (
+            zero_is_valid
+            and source_nodata is not None
+            and np.isclose(float(source_nodata), 0.0)
+        )
+        invalid = ~np.isfinite(src_data)
+        if source_nodata is not None and not nodata_is_legacy_zero:
+            invalid |= np.isclose(src_data, float(source_nodata))
+        src_data[invalid] = np.nan
+
         if (
             src.width == ref.width
             and src.height == ref.height
             and src.transform == ref.transform
             and src.crs == ref.crs
         ):
-            return src.read(1, out_dtype="float32")
+            return src_data
 
-        src_data = src.read(1, out_dtype="float32")
-        aligned_data = np.zeros((ref.height, ref.width), dtype=np.float32)
+        aligned_data = np.full((ref.height, ref.width), np.nan, dtype=np.float32)
         reproject(
             src_data,
             aligned_data,
@@ -64,19 +87,33 @@ def _align_raster_with_resampling(source_path: Path, reference_path: Path) -> np
             dst_transform=ref.transform,
             dst_crs=ref.crs,
             resampling=Resampling.nearest,
-            src_nodata=src.nodata,
+            src_nodata=np.nan,
+            dst_nodata=np.nan,
+            init_dest_nodata=True,
         )
         return aligned_data
 
 
-def _write_array(path: Path, array: np.ndarray, reference_path: Path, dtype: str) -> Path:
+def _write_array(
+    path: Path,
+    array: np.ndarray,
+    reference_path: Path,
+    dtype: str,
+    *,
+    nodata: int | float = 0,
+    valid_mask: np.ndarray | None = None,
+) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     with rasterio.open(reference_path) as ref:
         profile = ref.profile
-    # The engine marks invalid pixels as 0 (masked/no-data areas); declare that instead of inheriting the reference's nodata (e.g. -9999) which is never actually written.
-    profile.update(dtype=dtype, count=1, nodata=0)
+    output = np.asarray(array).copy()
+    invalid = ~np.isfinite(output)
+    if valid_mask is not None:
+        invalid |= ~valid_mask
+    output[invalid] = nodata
+    profile.update(dtype=dtype, count=1, nodata=nodata)
     with rasterio.open(path, "w", **profile) as dst:
-        dst.write(array.astype(dtype, copy=False), 1)
+        dst.write(output.astype(dtype, copy=False), 1)
     return path
 
 
@@ -168,10 +205,13 @@ def _combine_layers(
     """AHP combination with explicit handling for optional raster gaps. LST and TWI are allowed to have missing pixels. Their subtopic weights are renormalized over data that is actually present, and ``data_coverage.tif`` records the fraction of the configured model weight supported at each pixel. Core inputs still fail closed and remain nodata in the final map."""
     active_topics = set(active_topics) & set(spec["top_order"])
     optional_gap_keys = {"lst", "twi"}
+    zero_valid_keys = {"infra", "wui", "fhist"}
 
     with rasterio.open(reference_path) as ref:
         ref_data = ref.read(1, out_dtype="float32")
-        master_mask = ref_data > 0
+        master_mask = np.isfinite(ref_data) & (ref_data > 0)
+        if ref.nodata is not None:
+            master_mask &= ~np.isclose(ref_data, float(ref.nodata))
     del ref_data
 
     def _load(key: str, path: Path | None) -> tuple[np.ndarray, np.ndarray]:
@@ -182,11 +222,12 @@ def _combine_layers(
                     np.zeros(master_mask.shape, dtype=bool),
                 )
             raise FileNotFoundError(f"Required risk layer is unavailable: {key} ({path})")
-        data = _align_raster_with_resampling(path, reference_path).astype(np.float32, copy=False)
-        zero_is_valid = key in {"infra", "wui", "fhist"}
+        zero_is_valid = key in zero_valid_keys
+        data = _align_raster_with_resampling(
+            path, reference_path, zero_is_valid=zero_is_valid
+        ).astype(np.float32, copy=False)
         if zero_is_valid:
-            valid_mask = np.isfinite(data) & (data != -9999)
-            data[~valid_mask] = np.nan
+            valid_mask = np.isfinite(data)
         else:
             data[data <= 0] = np.nan
             valid_mask = np.isfinite(data)
@@ -220,8 +261,14 @@ def _combine_layers(
         for key, w in zip(keys, weights):
             data, layer_mask = _load(key, raw_layer_paths.get(key))
             if raw_layer_paths.get(key) is not None and Path(raw_layer_paths[key]).is_file():
+                export_nodata = -9999.0 if key in zero_valid_keys else 0
                 exported_layers[key] = _write_array(
-                    layers_dir / f"{key}.tif", data, reference_path, "float32"
+                    layers_dir / f"{key}.tif",
+                    data,
+                    reference_path,
+                    "float32",
+                    nodata=export_nodata,
+                    valid_mask=layer_mask,
                 )
             acc += data * np.float32(w)
             available_weight += layer_mask.astype(np.float32) * np.float32(w)
@@ -238,7 +285,15 @@ def _combine_layers(
 
     for key, path in (export_only or {}).items():
         data, _layer_mask = _load(key, path)
-        exported_layers[key] = _write_array(layers_dir / f"{key}.tif", data, reference_path, "float32")
+        export_nodata = -9999.0 if key in zero_valid_keys else 0
+        exported_layers[key] = _write_array(
+            layers_dir / f"{key}.tif",
+            data,
+            reference_path,
+            "float32",
+            nodata=export_nodata,
+            valid_mask=_layer_mask,
+        )
         del data, _layer_mask
 
     # Top-level weights: matrix-based specs drop inactive rows/cols and re-derive; weight-based specs renormalize over the active topics.
@@ -309,7 +364,12 @@ def _combine_layers(
                 "active_topics": order,
                 "required_layers": sorted(required_layer_keys),
                 "optional_gap_layers": sorted(optional_gap_keys & set(raw_layer_paths)),
-                "nodata_policy": "renormalize optional LST/TWI weights; require all core layers",
+                "nodata_policy": (
+                    "NaN internally; exported zero-valid infra/WUI/history layers use "
+                    "-9999 nodata; risk outputs use 0 nodata; optional LST/TWI weights "
+                    "are renormalized and all core layers are required"
+                ),
+                "zero_is_valid_layers": sorted(zero_valid_keys),
                 "valid_output_fraction": (valid_count / master_count) if master_count else 0.0,
                 "mean_configured_weight_coverage": (
                     float(np.mean(valid_coverage)) if valid_coverage.size else 0.0
@@ -386,6 +446,47 @@ def _fwi_from_station_file(
     return result
 
 
+def _mask_artificial_surfaces(
+    fmt_path: Path,
+    clc_path: Path,
+    aoi_geometry: BaseGeometry | None,
+    aoi_crs: str = DEFAULT_PROJECTED_CRS,
+) -> None:
+    """Zero CLC artificial surfaces (Code_18 1xx) in the fuel risk layer. Built-up land carries no continuous wildland fuel, yet NDVI/NDMI/LST/infra score its mixed pixels as dry shrub; since ftm is a required AHP layer, zeroing it here removes those pixels from the final risk map entirely."""
+    import geopandas as gpd
+    import pandas as pd
+    from rasterio.features import rasterize
+
+    if not Path(clc_path).is_file():
+        print(f"[FFRM] CLC layer missing; artificial surfaces stay in the analysis: {clc_path}", flush=True)
+        return
+
+    clc = gpd.read_file(clc_path)
+    with rasterio.open(fmt_path, "r+") as fmt_src:
+        clc = clc.to_crs(fmt_src.crs)
+        codes = pd.to_numeric(clc["Code_18"], errors="coerce")
+        artificial = clc[(codes >= 100) & (codes < 200)]
+        if aoi_geometry is not None and not artificial.empty:
+            search = reproject_geometry(aoi_geometry, aoi_crs, fmt_src.crs.to_string())
+            artificial = artificial[artificial.intersects(search)]
+        if artificial.empty:
+            return
+        artificial_mask = rasterize(
+            ((geom, 1) for geom in artificial.geometry),
+            out_shape=(fmt_src.height, fmt_src.width),
+            transform=fmt_src.transform,
+            fill=0,
+            dtype="uint8",
+        )
+        data = fmt_src.read(1)
+        data[artificial_mask == 1] = 0
+        fmt_src.write(data, 1)
+    print(
+        f"[FFRM] masked {int((artificial_mask == 1).sum())} artificial-surface pixels out of the fuel layer",
+        flush=True,
+    )
+
+
 def _prepare_temporal_risk_layers(
     *,
     day: date,
@@ -396,6 +497,7 @@ def _prepare_temporal_risk_layers(
     weather_active: bool,
     ndvi_path: str | Path | None,
     classification_breaks: dict[str, str] | None,
+    require_regional_breaks: bool = False,
 ) -> tuple[dict[str, Path | None], dict[str, object]]:
     """Build optical/LST risk inputs whose source date must match one frame."""
     temporal_input = work_dir / "input"
@@ -463,6 +565,12 @@ def _prepare_temporal_risk_layers(
 
     lst_source = temporal_input / "LST" / "LST.tiff"
     if needs_lst and lst_source.is_file():
+        lst_breaks = (classification_breaks or {}).get("FFRM_LST_BREAKS")
+        if require_regional_breaks and not lst_breaks:
+            raise RuntimeError(
+                f"regional LST breakpoints are required for {day}; "
+                "refusing an extent-local classification"
+            )
         cropped_lst = crop_raster_to_geometry(
             lst_source, cropped_dir / "LST.tiff", processing_aoi
         )
@@ -470,7 +578,7 @@ def _prepare_temporal_risk_layers(
             Lst.lst_risk(
                 cropped_lst,
                 temporal_output / "TIFs" / "LST_Risk_Map.tif",
-                breaks=(classification_breaks or {}).get("FFRM_LST_BREAKS"),
+                breaks=lst_breaks,
             )
         )
     elif needs_lst:
@@ -587,6 +695,11 @@ def run_static_aoi_for_geometry(
                 breaks=(classification_breaks or {}).get("FFRM_TWI_BREAKS"),
             )
         Fmt.fmt(cropped_fuels, output_folder=base_output_dir, export_image=True, show_plots=False)
+        _mask_artificial_surfaces(
+            base_output_dir / "TIFs" / "FMT.tif",
+            input_dir / "IUF" / "CLC_galicia.shp",
+            processing_aoi,
+        )
 
         processing_reference = base_output_dir / "TIFs" / "MDT_RISK_MAP.tif"
         Infra.infrastructure(
@@ -719,6 +832,7 @@ def run_static_aoi_for_geometry(
                 weather_active="meteo" in active_top_levels,
                 ndvi_path=ndvi_path,
                 classification_breaks=day_breaks,
+                require_regional_breaks=profile == "regional",
             )
             day_paths: dict[str, Path | None] = dict(static_layer_paths)
             day_paths.update(temporal_paths)

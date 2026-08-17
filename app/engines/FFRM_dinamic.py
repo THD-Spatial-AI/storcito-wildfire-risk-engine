@@ -20,7 +20,11 @@ import FR.TWI as Twi
 import FR.FWI as Fwi
 import FR.LST as Lst
 import FR.cropped as Cropped
-from app.engines.FFRM_estatic_aoi import ORIGINAL_SPECS, _combine_layers
+from app.engines.FFRM_estatic_aoi import (
+    ORIGINAL_SPECS,
+    _combine_layers,
+    _mask_artificial_surfaces,
+)
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -139,6 +143,11 @@ if generate_fmt:
         output_folder=output_folder_re,
         export_image=True,
         show_plots=False,
+    )
+    _mask_artificial_surfaces(
+        Path(output_folder_re) / "TIFs" / "FMT.tif",
+        Path(input_clc),
+        None,
     )
 
 if generate_infra:
