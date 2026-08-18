@@ -48,6 +48,10 @@ Notable changes of this engine relative to the original UVIGO codebase
   eligible. This follows the CLC nomenclature and the Galicia study's use of
   individual cadastral building and road clipping rather than whole mixed
   land-cover polygons. Version `.2` precomputations must be regenerated.
+- Model version `2026-08-18.4` explicitly treats CLC+ code 255 as NoData while
+  exporting from PostGIS, whose imported raster bands do not retain that
+  metadata. This prevents NoData pixels participating in categorical mode
+  resampling. Version `.3` precomputations must be regenerated.
 
 ## 2026-07 — Source-data pipeline and API restructuring
 

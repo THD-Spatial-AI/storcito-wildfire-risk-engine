@@ -108,6 +108,8 @@ def export_raster_table(
     target_srs: str | None = None,
     resampling: str = "near",
     target_resolution_m: float | None = None,
+    src_nodata: float | int | None = None,
+    dst_nodata: float | int | None = None,
 ) -> Path:
     """Export a PostGIS raster table to a clipped/reprojected GeoTIFF.
 
@@ -128,6 +130,10 @@ def export_raster_table(
             cmd += ["-t_srs", target_srs]
         if target_resolution_m is not None:
             cmd += ["-tr", str(target_resolution_m), str(target_resolution_m)]
+        if src_nodata is not None:
+            cmd += ["-srcnodata", str(src_nodata)]
+        if dst_nodata is not None:
+            cmd += ["-dstnodata", str(dst_nodata)]
         cmd += [src, str(dest_tif)]
         _run(cmd)
         return dest_tif
@@ -144,6 +150,10 @@ def export_raster_table(
             cmd += ["-t_srs", target_srs]
         if target_resolution_m is not None:
             cmd += ["-tr", str(target_resolution_m), str(target_resolution_m)]
+        if src_nodata is not None:
+            cmd += ["-srcnodata", str(src_nodata)]
+        if dst_nodata is not None:
+            cmd += ["-dstnodata", str(dst_nodata)]
         cmd += [src, str(dest_tif)]
         _run(cmd)
     finally:
@@ -1277,18 +1287,30 @@ def reconstruct_inputs(
             destination=rel,
         ):
             if kind == _RASTER:
-                if table == "clcplus_2023":
+                is_clcplus = table == "clcplus_2023"
+                if is_clcplus:
                     resampling = "mode"
                 elif table == "fuels":
                     resampling = "near"
                 else:
                     resampling = "bilinear"
+                target_resolution_m = 25.0 if is_clcplus else None
+                nodata = 255 if is_clcplus else None
+                log_event(
+                    "DB_EXPORT",
+                    "CONFIG",
+                    table=table,
+                    resampling=resampling,
+                    target_srs=ENGINE_RASTER_SRS,
+                    target_resolution_m=target_resolution_m,
+                    src_nodata=nodata,
+                    dst_nodata=nodata,
+                )
                 export_raster_table(table, dest, clip_geom=clip_geom,
                                     clip_geom_crs=clip_geom_crs, target_srs=ENGINE_RASTER_SRS,
                                     resampling=resampling,
-                                    target_resolution_m=(
-                                        25.0 if table == "clcplus_2023" else None
-                                    ))
+                                    target_resolution_m=target_resolution_m,
+                                    src_nodata=nodata, dst_nodata=nodata)
             else:
                 export_vector_table(table, dest, clip_geom=clip_geom, clip_geom_crs=clip_geom_crs,
                                     t_srs=ENGINE_VECTOR_SRS, select_sql=_VECTOR_SELECT_SQL.get(table))
