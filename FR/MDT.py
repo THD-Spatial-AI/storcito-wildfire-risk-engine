@@ -41,7 +41,7 @@ def mdt(ruta_mdt,output_folder:str|Path=Path('data/OUTPUT'),
 
     # leer MDT completo (masked to avoid extra nan passes)
     with rasterio.open(ruta_mdt) as src:
-        mdt = src.read(1, masked=True).filled(np.nan).astype('float32')
+        mdt = src.read(1, masked=True).astype('float32').filled(np.nan)
         meta = src.meta.copy()
     print("MDT original cargado.")
 

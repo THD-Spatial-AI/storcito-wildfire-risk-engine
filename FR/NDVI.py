@@ -45,10 +45,10 @@ def ndvi(b4:str|Path,b8:str|Path,output_folder:str='data/OUTPUT',export_image:bo
     np.seterr(divide='ignore', invalid='ignore')
 
     with rasterio.open(b4) as src_b3:
-        band4 = src_b3.read(1, masked=True).filled(np.nan).astype('float32')
+        band4 = src_b3.read(1, masked=True).astype('float32').filled(np.nan)
         meta_ref = src_b3.meta.copy()
     with rasterio.open(b8) as src_b8:
-        band8 = src_b8.read(1, masked=True).filled(np.nan).astype('float32')
+        band8 = src_b8.read(1, masked=True).astype('float32').filled(np.nan)
     log_array_stats("NDVI", "red-band", band4)
     log_array_stats("NDVI", "nir-band", band8)
     
