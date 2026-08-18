@@ -11,6 +11,7 @@ from typing import Iterable
 
 from shapely.geometry import mapping
 from shapely.geometry.base import BaseGeometry
+from FR.processing_log import log_event, logged_step, processing_step
 
 
 def _pg_connect():
@@ -101,7 +102,11 @@ def export_raster_table(
     src = _gdal_raster_dsn(table)
 
     if clip_geom is None:
-        cmd = ["gdalwarp", "-of", "GTiff", "-co", "TILED=YES", "-r", resampling, "-overwrite"]
+        cmd = [
+            "gdalwarp", "-of", "GTiff", "-r", resampling,
+            "-co", "COMPRESS=DEFLATE", "-co", "TILED=YES",
+            "-co", "BIGTIFF=IF_SAFER", "-overwrite",
+        ]
         if target_srs is not None:
             cmd += ["-t_srs", target_srs]
         cmd += [src, str(dest_tif)]
@@ -110,8 +115,12 @@ def export_raster_table(
 
     cutline = _write_cutline(clip_geom, clip_geom_crs, dest_tif.parent)
     try:
-        cmd = ["gdalwarp", "-of", "GTiff", "-r", resampling,
-               "-cutline", str(cutline), "-crop_to_cutline", "-overwrite"]
+        cmd = [
+            "gdalwarp", "-of", "GTiff", "-r", resampling,
+            "-co", "COMPRESS=DEFLATE", "-co", "TILED=YES",
+            "-co", "BIGTIFF=IF_SAFER",
+            "-cutline", str(cutline), "-crop_to_cutline", "-overwrite",
+        ]
         if target_srs is not None:
             cmd += ["-t_srs", target_srs]
         cmd += [src, str(dest_tif)]
@@ -234,47 +243,183 @@ def _composite_newest_valid(
 
 
 def _composite_files_newest_valid(primary: Path, fillers: list) -> list:
-    """Fill invalid pixels of the primary GeoTIFF from older captures. Each filler is exported to a temp file and applied in order (newest first). Returns the capture dates actually used."""
+    """Fill invalid pixels from older captures without loading a regional raster into RAM."""
     used: list = []
-    try:
-        import numpy as np
-        import rasterio
+    import numpy as np
+    import rasterio
+    from rasterio.enums import Resampling
+    from rasterio.vrt import WarpedVRT
 
-        with rasterio.open(primary) as src:
-            base = src.read(1).astype("float64")
-            profile = src.profile
-        invalid = ~np.isfinite(base) | (base <= 0)
+    with rasterio.open(primary, "r+") as base:
         for capture, ts_table in fillers:
-            if not invalid.any():
-                break
             fd, name = tempfile.mkstemp(suffix=".tif", dir=primary.parent)
             os.close(fd)
             fpath = Path(name)
+            capture_used = False
             try:
                 _export_capture_to_file(ts_table, capture, fpath)
-                with rasterio.open(fpath) as src:
-                    cand = src.read(1).astype("float64")
-                if cand.shape != base.shape:
-                    continue
-                usable = invalid & np.isfinite(cand) & (cand > 0)
-                if usable.any():
-                    base[usable] = cand[usable]
-                    invalid &= ~usable
+                with rasterio.open(fpath) as source:
+                    with WarpedVRT(
+                        source,
+                        crs=base.crs,
+                        transform=base.transform,
+                        width=base.width,
+                        height=base.height,
+                        nodata=0,
+                        resampling=Resampling.nearest,
+                    ) as candidate:
+                        for _index, window in base.block_windows(1):
+                            current = base.read(1, window=window)
+                            missing = ~np.isfinite(current) | (current <= 0)
+                            if not missing.any():
+                                continue
+                            values = candidate.read(1, window=window)
+                            usable = missing & np.isfinite(values) & (values > 0)
+                            if usable.any():
+                                current[usable] = values[usable]
+                                base.write(current, 1, window=window)
+                                capture_used = True
+                if capture_used:
                     used.append(capture)
+            except Exception as exc:
+                print(
+                    f"[reconstruct] unable to use fallback capture {capture}: {exc}",
+                    flush=True,
+                )
             finally:
                 fpath.unlink(missing_ok=True)
-        with rasterio.open(primary, "w", **profile) as dst:
-            dst.write(base.astype(profile.get("dtype", "float32")), 1)
-    except Exception:
-        return used
+    return used
+
+
+def _joint_spectral_fill_mask(current_bands: list, candidate_bands: list):
+    """Pixels needing replacement for which one fallback date has every band."""
+    import numpy as np
+
+    if not current_bands or len(current_bands) != len(candidate_bands):
+        raise ValueError("current and candidate Sentinel band groups must be non-empty and equal")
+    current_valid = np.logical_and.reduce(
+        [np.isfinite(values) & (values > 0) for values in current_bands]
+    )
+    candidate_valid = np.logical_and.reduce(
+        [np.isfinite(values) & (values > 0) for values in candidate_bands]
+    )
+    return ~current_valid & candidate_valid
+
+
+def _composite_spectral_group_newest_valid(
+    primaries: dict[str, Path],
+    ts_tables: dict[str, str],
+    fallback_dates: Iterable[str],
+    *,
+    resampling: str = "bilinear",
+) -> list[str]:
+    """Fill all Sentinel bands from one shared source date at each pixel."""
+    from contextlib import ExitStack
+
+    import rasterio
+    from rasterio.enums import Resampling
+    from rasterio.vrt import WarpedVRT
+
+    if set(primaries) != set(ts_tables):
+        raise ValueError("Sentinel output bands and time-series tables do not match")
+    resampling_method = getattr(Resampling, resampling)
+    used: list[str] = []
+
+    with ExitStack() as base_stack:
+        bases = {
+            name: base_stack.enter_context(rasterio.open(path, "r+"))
+            for name, path in primaries.items()
+        }
+        reference = next(iter(bases.values()))
+        for name, dataset in bases.items():
+            if (
+                dataset.shape != reference.shape
+                or dataset.crs != reference.crs
+                or dataset.transform != reference.transform
+            ):
+                raise ValueError(f"Sentinel band {name} is not aligned to the common grid")
+
+        for capture in fallback_dates:
+            temp_paths: dict[str, Path] = {}
+            capture_used = False
+            filled_pixels = 0
+            try:
+                for name, ts_table in ts_tables.items():
+                    fd, filename = tempfile.mkstemp(
+                        suffix=".tif", dir=next(iter(primaries.values())).parent
+                    )
+                    os.close(fd)
+                    temp_path = Path(filename)
+                    temp_paths[name] = temp_path
+                    _export_capture_to_file(ts_table, capture, temp_path)
+            except Exception as exc:
+                print(
+                    f"[reconstruct] unable to export synchronized fallback capture "
+                    f"{capture}: {exc}",
+                    flush=True,
+                )
+                for temp_path in temp_paths.values():
+                    temp_path.unlink(missing_ok=True)
+                continue
+
+            try:
+                with ExitStack() as candidate_stack:
+                    candidates = {}
+                    for name, temp_path in temp_paths.items():
+                        source = candidate_stack.enter_context(rasterio.open(temp_path))
+                        candidates[name] = candidate_stack.enter_context(
+                            WarpedVRT(
+                                source,
+                                crs=reference.crs,
+                                transform=reference.transform,
+                                width=reference.width,
+                                height=reference.height,
+                                src_nodata=source.nodata,
+                                nodata=0,
+                                resampling=resampling_method,
+                            )
+                        )
+
+                    names = list(bases)
+                    for _index, window in reference.block_windows(1):
+                        current = [bases[name].read(1, window=window) for name in names]
+                        candidate = [
+                            candidates[name].read(1, window=window) for name in names
+                        ]
+                        usable = _joint_spectral_fill_mask(current, candidate)
+                        if not usable.any():
+                            continue
+                        filled_pixels += int(usable.sum())
+                        for name, current_values, candidate_values in zip(
+                            names, current, candidate
+                        ):
+                            current_values[usable] = candidate_values[usable]
+                            bases[name].write(current_values, 1, window=window)
+                        capture_used = True
+                if capture_used:
+                    used.append(str(capture))
+                    log_event(
+                        "SENTINEL",
+                        "FALLBACK",
+                        capture=capture,
+                        filled_pixels=filled_pixels,
+                        bands=",".join(names),
+                    )
+            finally:
+                for temp_path in temp_paths.values():
+                    temp_path.unlink(missing_ok=True)
+
     return used
 
 
 def _export_capture_to_file(ts_table: str, capture_date, dest: Path) -> Path:
     """Stream one capture_date of a *_ts table to a GeoTIFF via gdalwarp. The PostGISRaster driver reads tiles windowed, so raster size is not limited by PostgreSQL's 1 GB single-value allocation cap (which ST_AsGDALRaster on a unioned large raster breaches)."""
     src = _gdal_raster_dsn(ts_table, where=f"capture_date = \\'{capture_date}\\'")
-    _run(["gdalwarp", "-of", "GTiff", "-co", "COMPRESS=DEFLATE", "-co", "TILED=YES",
-          "-overwrite", src, str(dest)])
+    _run([
+        "gdalwarp", "-of", "GTiff",
+        "-co", "COMPRESS=DEFLATE", "-co", "TILED=YES",
+        "-co", "BIGTIFF=IF_SAFER", "-overwrite", src, str(dest),
+    ])
     return dest
 
 
@@ -290,6 +435,7 @@ def export_ts_raster(
     resampling: str = "bilinear",
     capture_date: str | None = None,
     max_age_days: int | None = None,
+    fallback_capture_dates: Iterable[str] | None = None,
 ) -> tuple[Path, str]:
     """Export the raster matching the assessment date from a *_ts time series. Returns (path, capture_date_used). Future or excessively stale captures are never substituted."""
     dest_tif = Path(dest_tif)
@@ -308,7 +454,12 @@ def export_ts_raster(
     os.close(fd)
     tmp = Path(tmp_name)
     filler_dates: list = []
-    if max_age_days is not None and max_age_days > 0:
+    if fallback_capture_dates is not None:
+        filler_dates = [
+            value for value in dict.fromkeys(fallback_capture_dates)
+            if str(value) != str(capture_date)
+        ]
+    elif max_age_days is not None and max_age_days > 0:
         if isinstance(target_date, str):
             _t = date.fromisoformat(target_date)
         else:
@@ -321,6 +472,7 @@ def export_ts_raster(
                 (_t - timedelta(days=max_age_days), capture_date),
             )
             filler_dates = [row[0] for row in cur.fetchall()]
+    cutline: Path | None = None
     try:
         _export_capture_to_file(ts_table, capture_date, tmp)
         if filler_dates:
@@ -329,7 +481,11 @@ def export_ts_raster(
                 tmp, [(d, ts_table) for d in filler_dates]
             )
             source_dates.extend(str(d) for d in used)
-        cmd = ["gdalwarp", "-of", "GTiff", "-r", resampling, "-overwrite"]
+        cmd = [
+            "gdalwarp", "-of", "GTiff", "-r", resampling,
+            "-co", "COMPRESS=DEFLATE", "-co", "TILED=YES",
+            "-co", "BIGTIFF=IF_SAFER", "-overwrite",
+        ]
         if clip_geom is not None:
             cutline = _write_cutline(clip_geom, clip_geom_crs, dest_tif.parent)
             cmd += ["-cutline", str(cutline), "-crop_to_cutline"]
@@ -348,7 +504,7 @@ def export_ts_raster(
             pass
     finally:
         tmp.unlink(missing_ok=True)
-        if clip_geom is not None:
+        if cutline is not None:
             cutline.unlink(missing_ok=True)
     return dest_tif, capture_date
 
@@ -366,6 +522,7 @@ def _raster_has_positive_data(path: str | Path) -> bool:
     return False
 
 
+@logged_step("SENTINEL", "export-coherent-band-group")
 def export_common_ts_rasters(
     layers: list[tuple[str, str, Path]],
     target_date,
@@ -386,8 +543,16 @@ def export_common_ts_rasters(
     )
     rejected: list[str] = []
     outputs = {name: Path(dest) for name, _ts_table, dest in layers}
+    log_event(
+        "SENTINEL",
+        "CANDIDATES",
+        target_date=target_date,
+        max_age_days=max_age_days,
+        bands=",".join(name for name, _table, _dest in layers),
+        dates=",".join(str(value) for value in candidates),
+    )
 
-    for capture in candidates:
+    for capture_index, capture in enumerate(candidates):
         for path in outputs.values():
             path.unlink(missing_ok=True)
         blank_layer = None
@@ -407,7 +572,42 @@ def export_common_ts_rasters(
                 blank_layer = name
                 break
         if blank_layer is None:
-            if rejected:
+            fallback_dates = candidates[capture_index + 1 :]
+            used = _composite_spectral_group_newest_valid(
+                outputs,
+                {name: table for name, table, _dest in layers},
+                fallback_dates,
+                resampling=resampling,
+            )
+            contributors = [capture, *used]
+            log_event(
+                "SENTINEL",
+                "SELECTED",
+                primary=capture,
+                contributors=",".join(str(value) for value in contributors),
+                coherence="shared-source-date-per-pixel",
+            )
+            for path in outputs.values():
+                try:
+                    import rasterio
+
+                    with rasterio.open(path, "r+") as dataset:
+                        dataset.update_tags(
+                            STORCITO_PRIMARY_SOURCE_DATE=str(capture),
+                            STORCITO_SOURCE_DATES=",".join(contributors),
+                            STORCITO_SPECTRAL_DATE_COHERENCE="shared-per-pixel",
+                        )
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Unable to record Sentinel source-date provenance for {path}"
+                    ) from exc
+            if len(contributors) > 1:
+                print(
+                    f"[reconstruct] Sentinel composite starts at {capture}; "
+                    f"cloud/no-data gaps filled from {', '.join(contributors[1:])}",
+                    flush=True,
+                )
+            elif rejected:
                 skipped = ", ".join(rejected)
                 print(
                     f"[reconstruct] Sentinel capture {capture} selected; "
@@ -579,15 +779,14 @@ def available_fwi_dates_db() -> list[date]:
 
 
 def available_dynamic_fwi_dates_db() -> list[date]:
-    """Dates satisfying FWI run-up plus fresh LST and common Sentinel inputs."""
+    """Dates satisfying FWI spin-up plus fresh common Sentinel B4/B8 inputs."""
     sentinel_age = int(os.environ.get("STORCITO_MAX_SENTINEL_AGE_DAYS", "14"))
-    lst_age = int(os.environ.get("STORCITO_MAX_LST_AGE_DAYS", "3"))
-    if sentinel_age < 0 or lst_age < 0:
+    if sentinel_age < 0:
         raise ValueError("dynamic source age limits must be non-negative")
     with _pg_connect() as conn, conn.cursor() as cur:
         cur.execute(
-            """WITH dates AS ( SELECT DISTINCT fdate FROM fwi_files WHERE fdate IS NOT NULL ), eligible AS ( SELECT d.fdate FROM dates d WHERE EXTRACT(MONTH FROM d.fdate) BETWEEN 5 AND 10 AND (SELECT count(DISTINCT f.fdate) FROM fwi_files f WHERE f.fdate BETWEEN d.fdate - 60 AND d.fdate) = 61 ) SELECT e.fdate FROM eligible e WHERE EXISTS ( SELECT 1 FROM lst_ts l WHERE l.capture_date BETWEEN e.fdate - %s AND e.fdate ) AND EXISTS ( SELECT 1 FROM sentinel_b4_ts b4 WHERE b4.capture_date BETWEEN e.fdate - %s AND e.fdate AND EXISTS (SELECT 1 FROM sentinel_b8_ts b8 WHERE b8.capture_date = b4.capture_date) AND EXISTS (SELECT 1 FROM sentinel_b11_ts b11 WHERE b11.capture_date = b4.capture_date) ) ORDER BY e.fdate""",
-            (lst_age, sentinel_age),
+            """WITH dates AS ( SELECT DISTINCT fdate FROM fwi_files WHERE fdate IS NOT NULL ), eligible AS ( SELECT d.fdate FROM dates d WHERE EXTRACT(MONTH FROM d.fdate) BETWEEN 5 AND 10 AND (SELECT count(DISTINCT f.fdate) FROM fwi_files f WHERE f.fdate BETWEEN d.fdate - 60 AND d.fdate) = 61 ) SELECT e.fdate FROM eligible e WHERE EXISTS ( SELECT 1 FROM sentinel_b4_ts b4 WHERE b4.capture_date BETWEEN e.fdate - %s AND e.fdate AND EXISTS (SELECT 1 FROM sentinel_b8_ts b8 WHERE b8.capture_date = b4.capture_date) ) ORDER BY e.fdate""",
+            (sentinel_age,),
         )
         return [row[0] for row in cur.fetchall()]
 
@@ -783,22 +982,37 @@ def _raster_source_dates(path: str | Path, fallback: str) -> list[str]:
         return [str(fallback)]
 
 
+@logged_step("RECONSTRUCT", "temporal-inputs")
 def reconstruct_temporal_inputs(
     dest_input_dir: str | Path,
     *,
     target_date,
     include_lst: bool,
     include_satellite: bool,
+    sentinel_bands: Iterable[str] | None = None,
     clip_geom: BaseGeometry | None = None,
     clip_geom_crs: str = "EPSG:4326",
 ) -> dict[str, object]:
-    """Reconstruct only date-dependent layers as of one assessment day. LST is an optional enhancer: if no physically valid capture exists inside the freshness window, it is omitted and the combiner reports/renormalizes the missing weight. Sentinel vegetation layers remain required for the dynamic vegetation topic and therefore fail closed when unavailable."""
+    """Reconstruct synchronized temporal inputs and fill recent cloud gaps."""
     dest_input_dir = Path(dest_input_dir)
     produced: dict[str, str] = {}
     layer_dates: dict[str, str] = {}
     layer_date_details: dict[str, dict[str, object]] = {}
     skipped: dict[str, str] = {}
     resolutions: dict[str, float] = {}
+    if sentinel_bands is not None:
+        sentinel_bands = tuple(sorted(set(sentinel_bands)))
+    log_event(
+        "RECONSTRUCT",
+        "TEMPORAL_CONFIG",
+        target_date=target_date,
+        include_lst=include_lst,
+        include_satellite=include_satellite,
+        requested_sentinel_bands=(
+            ",".join(sentinel_bands) if sentinel_bands is not None else "all"
+        ),
+        clip=clip_geom is not None,
+    )
 
     if include_lst:
         lst_age = int(os.environ.get("STORCITO_MAX_LST_AGE_DAYS", "3"))
@@ -839,39 +1053,75 @@ def reconstruct_temporal_inputs(
                 flush=True,
             )
 
+    sentinel_destinations = {
+        "sentinel_b4": "Sentinel/B4.tiff",
+        "sentinel_b8": "Sentinel/B8.tiff",
+        "sentinel_b11": "Sentinel/B11.tiff",
+    }
+    if sentinel_bands is None:
+        requested_sentinel_bands = tuple(sentinel_destinations)
+    else:
+        requested = set(sentinel_bands)
+        unknown = requested - set(sentinel_destinations)
+        if unknown:
+            raise ValueError(
+                "Unknown Sentinel band(s): " + ", ".join(sorted(unknown))
+            )
+        requested_sentinel_bands = tuple(
+            name for name in sentinel_destinations if name in requested
+        )
+
     if include_satellite:
+        if not requested_sentinel_bands:
+            raise ValueError(
+                "include_satellite=True requires at least one Sentinel band"
+            )
         sentinel_age = int(os.environ.get("STORCITO_MAX_SENTINEL_AGE_DAYS", "14"))
         if sentinel_age < 0:
             raise ValueError("STORCITO_MAX_SENTINEL_AGE_DAYS must be non-negative")
         layers = [
-            (name, TEMPORAL_TS_TABLES[name], dest_input_dir / relative)
-            for name, relative in (
-                ("sentinel_b4", "Sentinel/B4.tiff"),
-                ("sentinel_b8", "Sentinel/B8.tiff"),
-                ("sentinel_b11", "Sentinel/B11.tiff"),
+            (
+                name,
+                TEMPORAL_TS_TABLES[name],
+                dest_input_dir / sentinel_destinations[name],
             )
+            for name in requested_sentinel_bands
         ]
-        paths, capture = export_common_ts_rasters(
-            layers,
-            target_date,
-            max_age_days=sentinel_age,
-            clip_geom=clip_geom,
-            clip_geom_crs=clip_geom_crs,
-            target_srs=ENGINE_RASTER_SRS,
-            resampling="bilinear",
-        )
-        for name, _table, path in layers:
-            relative = str(path.relative_to(dest_input_dir))
-            produced[relative] = str(paths[name])
-            layer_dates[name] = capture
-            layer_date_details[name] = {
-                "primary": capture,
-                "contributors": [capture],
-                "selection": "synchronized common Sentinel capture",
-            }
-            resolution = _raster_resolution_m(paths[name])
-            if resolution is not None:
-                resolutions[name] = resolution
+        try:
+            paths, capture = export_common_ts_rasters(
+                layers,
+                target_date,
+                max_age_days=sentinel_age,
+                clip_geom=clip_geom,
+                clip_geom_crs=clip_geom_crs,
+                target_srs=ENGINE_RASTER_SRS,
+                resampling="bilinear",
+            )
+        except LookupError as exc:
+            for name, _table, path in layers:
+                path.unlink(missing_ok=True)
+                skipped[name] = str(exc)
+            log_event(
+                "SENTINEL",
+                "UNAVAILABLE",
+                target_date=target_date,
+                bands=",".join(requested_sentinel_bands),
+                reason=str(exc),
+            )
+        else:
+            for name, _table, path in layers:
+                relative = str(path.relative_to(dest_input_dir))
+                produced[relative] = str(paths[name])
+                layer_dates[name] = capture
+                contributors = _raster_source_dates(paths[name], capture)
+                layer_date_details[name] = {
+                    "primary": capture,
+                    "contributors": contributors,
+                    "selection": "synchronized newest-valid Sentinel composite",
+                }
+                resolution = _raster_resolution_m(paths[name])
+                if resolution is not None:
+                    resolutions[name] = resolution
 
     return {
         "input_dir": str(dest_input_dir),
@@ -880,7 +1130,11 @@ def reconstruct_temporal_inputs(
         "layer_date_details": layer_date_details,
         "skipped_layers": skipped,
         "layer_resolutions_m": resolutions,
-        "sentinel_nominal_resolution_m": 20 if include_satellite else None,
+        "sentinel_nominal_resolution_m": (
+            20
+            if any(name in layer_dates for name in requested_sentinel_bands)
+            else None
+        ),
     }
 
 # PostgreSQL lowercases identifiers on import, but the engine modules expect the original shapefile column casing. Re-alias on export (the SELECT must include the geometry column so OGR carries it through).
@@ -913,6 +1167,7 @@ _ENGINE_PLANS: dict[str, list[tuple[str, str, str]]] = {
 }
 
 
+@logged_step("RECONSTRUCT", "materialize-engine-input-tree")
 def reconstruct_inputs(
     dest_input_dir: str | Path,
     *,
@@ -923,6 +1178,7 @@ def reconstruct_inputs(
     include_history: bool = True,
     include_terrain: bool = True,
     include_satellite: bool = True,
+    sentinel_bands: Iterable[str] | None = None,
     include_lst: bool | None = None,
     clip_geom: BaseGeometry | None = None,
     clip_geom_crs: str = "EPSG:4326",
@@ -934,6 +1190,19 @@ def reconstruct_inputs(
     dest_input_dir = Path(dest_input_dir)
     produced: dict[str, str] = {}
     include_lst = (include_weather and engine == "dynamic") if include_lst is None else include_lst
+    log_event(
+        "RECONSTRUCT",
+        "CONFIG",
+        engine=engine,
+        target_date=target_date,
+        start_date=start_date,
+        include_weather=include_weather,
+        include_history=include_history,
+        include_terrain=include_terrain,
+        include_satellite=include_satellite,
+        include_lst=include_lst,
+        destination=dest_input_dir,
+    )
 
     fwi_files: list[Path] = []
     if include_weather:
@@ -948,6 +1217,7 @@ def reconstruct_inputs(
         target_date=target_date,
         include_lst=bool(include_lst),
         include_satellite=bool(include_satellite and engine == "dynamic"),
+        sentinel_bands=sentinel_bands,
         clip_geom=clip_geom,
         clip_geom_crs=clip_geom_crs,
     )
@@ -962,14 +1232,23 @@ def reconstruct_inputs(
     for _n, (kind, table, rel) in enumerate(_plan, start=1):
         print(f"[reconstruct] {_n:>2}/{len(_plan)} exporting {table} -> {rel}", flush=True)
         dest = dest_input_dir / rel
-        if kind == _RASTER:
-            resampling = "near" if table in {"fuels"} else "bilinear"
-            export_raster_table(table, dest, clip_geom=clip_geom,
-                                clip_geom_crs=clip_geom_crs, target_srs=ENGINE_RASTER_SRS,
-                                resampling=resampling)
-        else:
-            export_vector_table(table, dest, clip_geom=clip_geom, clip_geom_crs=clip_geom_crs,
-                                t_srs=ENGINE_VECTOR_SRS, select_sql=_VECTOR_SELECT_SQL.get(table))
+        with processing_step(
+            "DB_EXPORT",
+            "export-layer",
+            position=_n,
+            total=len(_plan),
+            table=table,
+            kind=kind,
+            destination=rel,
+        ):
+            if kind == _RASTER:
+                resampling = "near" if table in {"fuels"} else "bilinear"
+                export_raster_table(table, dest, clip_geom=clip_geom,
+                                    clip_geom_crs=clip_geom_crs, target_srs=ENGINE_RASTER_SRS,
+                                    resampling=resampling)
+            else:
+                export_vector_table(table, dest, clip_geom=clip_geom, clip_geom_crs=clip_geom_crs,
+                                    t_srs=ENGINE_VECTOR_SRS, select_sql=_VECTOR_SELECT_SQL.get(table))
         produced[rel] = str(dest)
 
     # Historical fire (both engines): yearly perimeters from the `hist` table plus the on-disk PRE_FIRE / POST_FIRE Sentinel scenes.

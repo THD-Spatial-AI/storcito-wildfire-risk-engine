@@ -31,13 +31,13 @@ def _combine_layers(
     final_png_path: Path,
     active_top_levels: set[str] | None = None,
 ) -> dict[str, Path]:
-    """Call the canonical original-model combiner with the legacy signature. Dynamic inputs are identifiable by their NDMI or LST layers. Historical fire is exported for display, but the original STORCITO matrices do not use it as a predictor."""
+    """Call the audited published-profile combiner with the legacy signature."""
     active = set(active_top_levels or TOP_LEVEL_KEYS)
     unknown = active - set(TOP_LEVEL_KEYS)
     if unknown:
         raise ValueError(f"Unknown top-level layers requested: {sorted(unknown)}")
 
-    mode = "dynamic" if {"ndmi", "lst"} & set(raw_layer_paths) else "static"
+    mode = "dynamic" if "ndvi" in raw_layer_paths else "static"
     spec = ORIGINAL_SPECS[mode]
     weighted_topics = active & set(spec["top_order"])
     export_only = None

@@ -37,6 +37,7 @@ from app.services.payload import (
     wildfire_clip_geometry_wgs84,
     wildfire_context_buffer,
     wildfire_date_range,
+    wildfire_fwi_classification,
     wildfire_geometry,
     wildfire_optional_layers,
     wildfire_risk_profile,
@@ -373,6 +374,7 @@ def _run_wildfire_payload(
 ):
     calculation_mode = wildfire_calculation_mode(payload)
     risk_profile = wildfire_risk_profile(payload)
+    fwi_classification = wildfire_fwi_classification(payload)
     requested_date = wildfire_target_date(payload)
     start_date, target_date = wildfire_date_range(payload, calculation_mode)
     output_aoi = wildfire_geometry(payload)
@@ -405,6 +407,7 @@ def _run_wildfire_payload(
     if (
         calculation_mode == "dynamic"
         and risk_profile == "regional"
+        and fwi_classification == "published_galicia_2020"
         # Keep this guard explicit if a future per-day multi-output mode is added.
         and (start_date is None or start_date == target_date)
         and not user_inputs
@@ -468,6 +471,7 @@ def _run_wildfire_payload(
         station_data_path=user_inputs.get("station_data"),
         calculation_mode=calculation_mode,
         risk_profile=risk_profile,
+        fwi_classification=fwi_classification,
         classification_breaks=classification_breaks,
         classification_breaks_by_date=classification_breaks_by_date,
         output_resolution_m=payload.resolution,
@@ -487,6 +491,7 @@ def _run_wildfire_payload(
             "resolution": payload.resolution,
             "calculation_mode": calculation_mode,
             "risk_profile": risk_profile,
+            "fwi_classification": fwi_classification,
             "optional_layers": optional_layers or {},
         },
     )
@@ -708,22 +713,20 @@ _STATIC_REQUIRED = (
     Path("TIFs/MDT_RISK_MAP.tif"),
     Path("TIFs/SLOPE_RISK_MAP.tif"),
     Path("TIFs/ASPECT_RISK_MAP.tif"),
-    Path("twi.tif"),
-    Path("twi_risk_map.tif"),
     Path("TIFs/FMT.tif"),
     Path("TIFs/galicia_solo_vehiculos_(INFRA Risk_Map).tif"),
     Path("TIFs/IUF_Risk_Map.tif"),
 )
 
 
-def _static_signature(twi_breaks: str | None) -> dict | None:
+def _static_signature() -> dict | None:
     """Fingerprint of the date-independent source tables; a reseed of any of them (or a cache-version bump) invalidates the cached static layers."""
     try:
         from FR.db_reconstruct import _pg_connect
 
-        sig: dict = {"v": STATIC_CACHE_VERSION, "twi_breaks": twi_breaks}
+        sig: dict = {"v": STATIC_CACHE_VERSION}
         with _pg_connect() as conn, conn.cursor() as cur:
-            for t in ("dtm", "twi", "fuels"):
+            for t in ("dtm", "fuels"):
                 cur.execute(
                     f"SELECT count(*), coalesce(max(rid), 0), "
                     f"coalesce(max(xmin::text::bigint), 0) FROM {t}"
@@ -820,26 +823,28 @@ def run_engine_job(
         target_date=target_date,
         start_date=start_date,
         include_history=engine == "static",
+        include_terrain=False,
+        include_lst=False,
+        sentinel_bands=(
+            {"sentinel_b4", "sentinel_b8"} if engine == "dynamic" else None
+        ),
         clip_geom=clip_geom,
         clip_geom_crs="EPSG:4326",
     )
     print(f"[job {job_id}] phase 1/3 done in {_t.time() - _t0:.0f}s "
           f"(layer dates: {reconstruction.get('layer_dates')})", flush=True)
 
-    # Static-layer cache (regional tiles only): terrain/TWI/fuel/infra/WUI do not depend on the date, so reuse the previous run's outputs for the same tile geometry while the source tables are unchanged.
-    lst_available = (input_dir / "LST" / "LST.tiff").is_file()
-    region_breaks = (
-        _region_breaks(
-            target_date,
-            strict=True,
-            include_lst=lst_available,
-            include_twi=True,
-        )
-        if engine == "dynamic"
-        else {}
+    # Regional static layers are date-independent; reuse them for an unchanged tile/source signature.
+    region_breaks = {}
+    skipped_temporal = reconstruction.get("skipped_layers", {})
+    sentinel_unavailable = bool(
+        isinstance(skipped_temporal, dict)
+        and {"sentinel_b4", "sentinel_b8"} & set(skipped_temporal)
     )
-    temporal_flags = (
-        {"FFRM_RUN_LST": "0"} if engine == "dynamic" and not lst_available else {}
+    temporal_flags: dict[str, str] = (
+        {"FFRM_RUN_NDVI": "0", "FFRM_GENERATE_NDVI": "0"}
+        if engine == "dynamic" and sentinel_unavailable
+        else {}
     )
     static_flags: dict[str, str] = {}
     cache_dir = None
@@ -847,7 +852,7 @@ def run_engine_job(
     if payload.user_id == "regional" and engine == "dynamic" and clip_geom is not None:
         key = hashlib.sha1(clip_geom.wkt.encode()).hexdigest()[:16]
         cache_dir = JOBS_OUTPUT_ROOT.parent / "cache" / "static_layers" / key
-        static_sig = _static_signature(region_breaks.get("FFRM_TWI_BREAKS"))
+        static_sig = _static_signature()
         if _valid_static_cache(cache_dir, static_sig):
             shutil.copytree(cache_dir / "re", output_dir / "re", dirs_exist_ok=True)
             static_flags = {"FFRM_GENERATE_MDT": "0", "FFRM_GENERATE_TWI": "0",
@@ -855,17 +860,19 @@ def run_engine_job(
                             "FFRM_GENERATE_WUI": "0"}
             print(f"[job {job_id}] static layers reused from cache {key}", flush=True)
 
-    print(f"[job {job_id}] phase 2/3: region-wide LST/TWI class breakpoints", flush=True)
+    print(f"[job {job_id}] phase 2/3: scientific model configuration", flush=True)
     env = {
         **os.environ,
         "FFRM_BASE_DIR": str(job_dir),
         "FFRM_OUTPUT_DIR": str(output_dir),
+        "STORCITO_JOB_ID": job_id,
         "MPLBACKEND": "Agg",
         **region_breaks,
         **cfg["run_flags"],
         **temporal_flags,
         "FFRM_FWI_TARGET_DATE": target_date.isoformat(),
         "FFRM_FWI_START_DATE": start_date.isoformat() if start_date else "",
+        "FFRM_FWI_CLASSIFICATION": wildfire_fwi_classification(payload),
         **(
             {"FFRM_RUN_FHIST": "0"}
             if engine == "static"
@@ -956,6 +963,7 @@ def run_engine_job(
     response: dict[str, Any] = {
         "status": "success",
         "engine": engine,
+        "fwi_classification": wildfire_fwi_classification(payload),
         "served_by": __import__("socket").gethostname(),
         "job_id": job_id,
         "session_id": payload.session_id,
@@ -974,6 +982,7 @@ def run_engine_job(
             "model_id": payload.model_id,
             "engine": engine,
             "calculation_mode": engine,
+            "fwi_classification": wildfire_fwi_classification(payload),
             "request_type": "engine_job",
             "target_date": target_date.isoformat(),
             "requested_date": requested_date.isoformat(),

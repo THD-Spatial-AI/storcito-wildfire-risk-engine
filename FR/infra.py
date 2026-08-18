@@ -15,6 +15,23 @@ from rasterio.features import rasterize
 from rasterio.transform import from_bounds
 from shapely.geometry.base import BaseGeometry
 from FR.aoi import reproject_geometry
+from FR.processing_log import log_array_stats, log_event, logged_step
+
+PUBLISHED_ROAD_DISTANCE_BOUNDS_M = (300, 600, 900, 1200)
+
+
+def classify_road_distance_risk(
+    distance_m: np.ndarray,
+    radii: list[int] | tuple[int, ...] = PUBLISHED_ROAD_DISTANCE_BOUNDS_M,
+) -> np.ndarray:
+    """Map road distance to descending risk classes."""
+    if not radii or len(radii) > 5 or list(radii) != sorted(radii):
+        raise ValueError("road-distance radii must contain 1-5 increasing distances")
+    risks = [5, 4, 3, 2, 1][:len(radii)]
+    result = np.full(np.shape(distance_m), max(0, 5 - len(radii)), dtype="uint8")
+    for radius, risk in sorted(zip(radii, risks), reverse=True):
+        result[np.asarray(distance_m) <= radius] = risk
+    return result
 
 # sys.path.append(r'..\geo_auxy')
 
@@ -32,6 +49,7 @@ def _create_risk_rings(geometry: BaseGeometry, radii: list[int], risks: list[int
     
     return gpd.GeoDataFrame(anillos_data)
 
+@logged_step("ROADS", "classify-road-distance")
 def infrastructure(input_infra: str|Path,
                    output_folder: str|Path = Path('data/OUTPUT'),
                    ref_raster: str|Path = Path(r'REFERENCE\MDT\DEM_NationalScenario_2013.tif'),
@@ -45,7 +63,12 @@ def infrastructure(input_infra: str|Path,
                    risk_profile: str = "regional",
                    radii_m: list[int] | None = None,
                    use_reference_grid: bool | None = None) -> npt.NDArray:
-    """Calculate infrastructure proximity risk from roads and railways. Creates concentric buffer rings around infrastructure features and assigns decreasing risk values (5 to 1) based on distance (250m to 1250m). Args: input_infra: Path to infrastructure shapefile (roads/railways) output_folder: Output directory for results. Defaults to 'OUTPUT' ref_raster: Reference raster for extent and resolution. Defaults to DEM epsg: Target CRS EPSG code. Defaults to 32629 (UTM 29N) export_image: Whether to save results as GeoTIFF/PNG. Defaults to False show_plots: Whether to display matplotlib plots. Defaults to False simplify: Whether to simplify geometries for performance. Defaults to False tolerance: Simplification tolerance in meters. Defaults to 10 aoi_geometry: Optional AOI geometry used to spatially limit vector processing. aoi_crs: CRS of ``aoi_geometry``. Defaults to EPSG:32629. risk_profile: ``regional`` keeps 250-1250 m buffers; ``finca`` uses the old parcel-scale 25-125 m buffers. radii_m: Optional explicit buffer radii in meters. use_reference_grid: Rasterize on the reference raster's native grid. Defaults to true for finca mode and false for regional mode. Returns: Rasterized risk array with values 0-5 (0=no infrastructure nearby) Raises: FileNotFoundError: If input shapefile or reference raster not found"""
+    """Classify distance to roads on the reference grid.
+
+    Regional mode reproduces the published Galicia classes: class 5 through
+    300 m, classes 4/3/2 through 600/900/1200 m, and class 1 beyond 1200 m.
+    Finca mode retains the legacy parcel-scale buffers.
+    """
     
     # Validar y convertir paths
 
@@ -55,9 +78,27 @@ def infrastructure(input_infra: str|Path,
     profile = (risk_profile or "regional").strip().lower()
     if profile not in {"regional", "finca"}:
         profile = "regional"
-    radii = radii_m or ([25, 50, 75, 100, 125] if profile == "finca" else [250, 500, 750, 1000, 1250])
-    risks = [5, 4, 3, 2, 1]
+    radii = list(
+        radii_m
+        or (
+            [25, 50, 75, 100, 125]
+            if profile == "finca"
+            else list(PUBLISHED_ROAD_DISTANCE_BOUNDS_M)
+        )
+    )
+    if not radii or len(radii) > 5 or radii != sorted(radii):
+        raise ValueError("road-distance radii must contain 1-5 increasing distances")
+    outside_risk = max(0, 5 - len(radii))
     native_grid = (profile == "finca") if use_reference_grid is None else bool(use_reference_grid)
+    log_event(
+        "ROADS",
+        "INPUT",
+        vectors=input_infra,
+        reference=ref_raster,
+        profile=profile,
+        radii_m=",".join(str(value) for value in radii),
+        outside_risk=outside_risk,
+    )
     
     # Validar existencia de archivos
     if not input_infra.exists():
@@ -70,6 +111,7 @@ def infrastructure(input_infra: str|Path,
     if aoi_geometry is not None:
         projected_aoi = reproject_geometry(aoi_geometry, aoi_crs, f"EPSG:{epsg}")
         road = road[road.intersects(projected_aoi.buffer(max(radii)))].copy()
+    log_event("ROADS", "VECTOR", feature_count=len(road), crs=f"EPSG:{epsg}")
     
     # Simplificar geometrías si se solicita
     if simplify:
@@ -93,7 +135,10 @@ def infrastructure(input_infra: str|Path,
 
     
     if road.empty:
-        raster_data = np.zeros((y_res, x_res), dtype=rasterio.uint8)
+        dist = np.full((y_res, x_res), np.inf)
+        raster_data = classify_road_distance_risk(
+            dist, radii
+        )
         output_crs = ref_crs
     else:
         from scipy.ndimage import distance_transform_edt
@@ -110,10 +155,18 @@ def infrastructure(input_infra: str|Path,
             road_mask == 0,
             sampling=(abs(transform.e), abs(transform.a)),
         )
-        raster_data = np.zeros((y_res, x_res), dtype=rasterio.uint8)
-        for r, val in sorted(zip(radii, risks), reverse=True):
-            raster_data[dist <= r] = val
+        raster_data = classify_road_distance_risk(dist, radii)
         output_crs = ref_crs
+    log_array_stats("ROADS", "distance-m", dist)
+    log_array_stats("ROADS", "road-distance-risk", raster_data)
+    log_event(
+        "ROADS",
+        "GRID",
+        width=x_res,
+        height=y_res,
+        pixel_x_m=abs(transform.a),
+        pixel_y_m=abs(transform.e),
+    )
     
     # Configuración de metadatos para guardar
     meta_info = {
@@ -156,4 +209,3 @@ if __name__=='__main__':
     results = pstats.Stats(profile)
     results.sort_stats(pstats.SortKey.TIME)
     results.print_stats(20)
-

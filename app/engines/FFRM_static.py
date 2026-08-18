@@ -18,6 +18,7 @@ import FR.FHIST as Fhist
 import FR.FWI as Fwi
 import FR.cropped as Cropped
 from app.engines.FFRM_estatic_aoi import ORIGINAL_SPECS, _combine_layers
+from FR.processing_log import log_event
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -78,12 +79,27 @@ output_fwi = os.path.join(output_folder_re, 'FWI.tif')
 
 # --------------------------- 1.4. CONTROL DE EJECUCIÓN --------------------------- Pon True o False según quieras regenerar cada capa. Defaults overridable via FFRM_RUN_* env vars.
 run_mdt = _env_flag("FFRM_RUN_MDT", True)
-run_twi = _env_flag("FFRM_RUN_TWI", True)
+run_twi = _env_flag("FFRM_RUN_TWI", False)
 run_fhist = _env_flag("FFRM_RUN_FHIST", True)
 run_fmt = _env_flag("FFRM_RUN_FMT", True)
 run_infra = _env_flag("FFRM_RUN_INFRA", True)
 run_wui = _env_flag("FFRM_RUN_WUI", True)
 run_fwi = _env_flag("FFRM_RUN_FWI", True)
+
+log_event(
+    "ENGINE",
+    "CONFIG",
+    mode="static",
+    base_dir=base_dir,
+    output_dir=output_base,
+    run_mdt=run_mdt,
+    run_fmt=run_fmt,
+    run_roads=run_infra,
+    run_settlement=run_wui,
+    run_fwi=run_fwi,
+    run_history=run_fhist,
+    run_twi=run_twi,
+)
 
 
 import time as _time
@@ -95,6 +111,13 @@ def _step(msg: str) -> None:
     now = _time.time()
     print(f"\n[engine +{now - _engine_t0:6.0f}s] ===== {msg} "
           f"(previous step took {now - _engine_last[0]:.0f}s) =====", flush=True)
+    log_event(
+        "ENGINE",
+        "STEP",
+        name=msg,
+        elapsed_total_s=now - _engine_t0,
+        previous_step_s=now - _engine_last[0],
+    )
     _engine_last[0] = now
 
 
@@ -142,7 +165,7 @@ if run_infra:
     )
 
 if run_wui:
-    _step("wildland-urban interface risk layer")
+    _step("settlement-distance risk layer (CLC proxy)")
     Wui.wui(
         input_infra,
         input_clc,
@@ -161,6 +184,9 @@ if run_fwi:
         show_plots=False,
         target_date=os.environ.get("FFRM_FWI_TARGET_DATE") or None,
         start_date=os.environ.get("FFRM_FWI_START_DATE") or None,
+        classification_scheme=os.environ.get(
+            "FFRM_FWI_CLASSIFICATION", Fwi.FWI_DEFAULT_CLASSIFICATION
+        ),
     )
 
 import matplotlib.pyplot as _plt
@@ -203,9 +229,8 @@ if run_mdt:
     raw_layer_paths["mdt"] = Path(reference_path)
     raw_layer_paths["slope"] = Path(_cropped('SLOPE_RISK_MAP_cropped.tif'))
     raw_layer_paths["aspect"] = Path(_cropped('ASPECT_RISK_MAP_cropped.tif'))
-    if not run_twi:
-        raise RuntimeError("The canonical static topography topic requires TWI.")
-    raw_layer_paths["twi"] = Path(_cropped('twi_risk_map_cropped.tif'))
+    if run_twi:
+        raw_layer_paths["twi"] = Path(_cropped('twi_risk_map_cropped.tif'))
 
 # Meteorology (FWI).
 if run_fwi:

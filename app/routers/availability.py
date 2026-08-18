@@ -31,23 +31,30 @@ def available_dynamic_dates():
             _pg_connect,
             FIRE_SEASON_END_MONTH,
             FIRE_SEASON_START_MONTH,
-            _ts_date_for,
+            _common_ts_date,
         )
 
         newest = dates[-1]
-        # Only days beyond the FWI archive are forecasts; if eligibility is capped by Sentinel/LST instead, +1/+2 are past dates, not forecasts.
+        # Only days beyond the FWI archive are forecasts; a fresh synchronized
+        # Sentinel B4/B8 capture is still required for the default NDVI input.
         with _pg_connect() as conn, conn.cursor() as cur:
             cur.execute("SELECT max(fdate) FROM fwi_files")
             newest_fwi = cur.fetchone()[0]
         if newest_fwi is None or newest < newest_fwi:
             return {"dates": [day.isoformat() for day in dates], "forecast_dates": []}
-        lst_age = int(os.environ.get("STORCITO_MAX_LST_AGE_DAYS", "3"))
+        sentinel_age = int(
+            os.environ.get("STORCITO_MAX_SENTINEL_AGE_DAYS", "14")
+        )
         for offset in (1, 2):
             day = newest + timedelta(days=offset)
             if not FIRE_SEASON_START_MONTH <= day.month <= FIRE_SEASON_END_MONTH:
                 continue
             try:
-                if _ts_date_for("lst_ts", day, max_age_days=lst_age):
+                if _common_ts_date(
+                    ("sentinel_b4_ts", "sentinel_b8_ts"),
+                    day,
+                    max_age_days=sentinel_age,
+                ):
                     forecast.append(day.isoformat())
             except LookupError:
                 break

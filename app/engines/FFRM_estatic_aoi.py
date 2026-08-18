@@ -36,6 +36,14 @@ from FR.aoi import (
     resample_raster_resolution,
     write_aoi_geojson,
 )
+from FR.processing_log import (
+    bind_log_context,
+    log_array_stats,
+    log_event,
+    logged_step,
+    processing_step,
+    reset_log_context,
+)
 import FR.db_reconstruct as DbReconstruct
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -91,6 +99,27 @@ def _write_array(path: Path, array: np.ndarray, reference_path: Path, dtype: str
     return path
 
 
+def _build_display_overviews(
+    path: Path, resampling: Resampling = Resampling.nearest
+) -> None:
+    with rasterio.open(path, "r+") as dataset:
+        factors = [
+            factor
+            for factor in (2, 4, 8, 16, 32, 64)
+            if min(dataset.width, dataset.height) // factor >= 128
+        ]
+        if not factors or dataset.overviews(1) == factors:
+            return
+        predictor = "3" if np.dtype(dataset.dtypes[0]).kind == "f" else "2"
+        with rasterio.Env(
+            COMPRESS_OVERVIEW="DEFLATE",
+            PREDICTOR_OVERVIEW=predictor,
+            BIGTIFF_OVERVIEW="IF_SAFER",
+        ):
+            dataset.build_overviews(factors, resampling)
+        dataset.update_tags(ns="rio_overview", resampling=resampling.name)
+
+
 def _find_fire_history_risk_map(base_output_dir: Path) -> Path:
     matches = sorted((base_output_dir / "TIFs").glob("Fire_History_*(Risk_Map)_*.tif"))
     if not matches:
@@ -101,60 +130,85 @@ def _find_fire_history_risk_map(base_output_dir: Path) -> Path:
     raise FileNotFoundError("Unable to find exported historical fire risk map.")
 
 
-_M_TOPO = [[1, 2, 3, 3], [1 / 2, 1, 2, 2], [1 / 3, 1 / 2, 1, 2], [1 / 3, 1 / 2, 1 / 2, 1]]
-_M_AI = [[1, 2], [1 / 2, 1]]
+# Published Galicia AHP model (Fernandez-Alonso et al., Remote Sensing 2020,
+# doi:10.3390/rs12223705), renormalized after excluding its historical-fire
+# term.  The available FIRMS/dNBR overlay is not equivalent to the paper's
+# historical-fire-regime predictor, so it remains informational.
+_PUBLISHED_TOP_WEIGHTS_NO_HISTORY = {
+    "veg": 0.359 / 0.945,
+    "topo": 0.108 / 0.945,
+    "ai": 0.180 / 0.945,
+    "meteo": 0.298 / 0.945,
+}
+_PUBLISHED_TOPO_WEIGHTS = {"mdt": 0.164, "slope": 0.297, "aspect": 0.539}
+_PUBLISHED_AI_WEIGHTS = {"infra": 0.750, "wui": 0.250}
+_PUBLISHED_VEGETATION_WEIGHTS = {"ftm": 0.750, "ndvi": 0.250}
 
+# Keep the public name for compatibility with the whole-region entry points.
 ORIGINAL_SPECS: dict[str, dict] = {
     "static": {
-        "name": "original-static",
+        "name": "published-galicia-2020-static-degraded",
         "topics": {
-            "topo": (["mdt", "slope", "aspect", "twi"], _M_TOPO),
-            "ai": (["infra", "wui"], _M_AI),
+            "topo": (["mdt", "slope", "aspect"], _PUBLISHED_TOPO_WEIGHTS),
+            "ai": (["infra", "wui"], _PUBLISHED_AI_WEIGHTS),
             "veg": (["ftm"], None),
             "meteo": (["meteo"], None),
         },
-        "top_order": ["topo", "ai", "veg", "meteo"],
-        "top_matrix": [[1, 1 / 3, 3, 3], [3, 1, 2, 3], [1 / 3, 1 / 2, 1, 2], [1 / 3, 1 / 3, 1 / 2, 1]],
-        "interp_keys": {"meteo", "aspect", "twi"},
+        "top_order": ["veg", "topo", "ai", "meteo"],
+        "top_weights": _PUBLISHED_TOP_WEIGHTS_NO_HISTORY,
+        "interp_keys": set(),
+        "scientific_basis": "doi:10.3390/rs12223705; historical-fire term omitted",
+        "layer_roles": {
+            "infra": "road distance",
+            "wui": "settlement distance (CLC artificial-surface proxy)",
+        },
+        "limitations": (
+            "Static mode lacks the published NDVI predictor; CLC artificial "
+            "surfaces proxy the study's cadastral settlement layer; historical "
+            "fire is omitted because the available overlay is not equivalent."
+        ),
     },
     "dynamic": {
-        "name": "original-dynamic",
+        "name": "published-galicia-2020-no-history",
         "topics": {
-            "topo": (["mdt", "slope", "aspect", "twi"], _M_TOPO),
-            "veg": (["ftm", "ndvi", "ndmi"], [[1, 3, 5], [1 / 3, 1, 2], [1 / 5, 1 / 2, 1]]),
-            "ai": (["infra", "wui"], _M_AI),
-            "meteo": (["meteo", "lst"], [[1, 3], [1 / 3, 1]]),
+            "veg": (["ftm", "ndvi"], _PUBLISHED_VEGETATION_WEIGHTS),
+            "topo": (["mdt", "slope", "aspect"], _PUBLISHED_TOPO_WEIGHTS),
+            "ai": (["infra", "wui"], _PUBLISHED_AI_WEIGHTS),
+            "meteo": (["meteo"], None),
         },
-        "top_order": ["topo", "veg", "ai", "meteo"],
-        "top_matrix": [[1, 1 / 4, 1 / 2, 1 / 3], [4, 1, 3, 2], [2, 1 / 3, 1, 1 / 3], [3, 1 / 2, 3, 1]],
-        "interp_keys": {"ndvi", "ndmi", "meteo", "lst", "aspect"},
+        "top_order": ["veg", "topo", "ai", "meteo"],
+        "top_weights": _PUBLISHED_TOP_WEIGHTS_NO_HISTORY,
+        "interp_keys": set(),
+        "scientific_basis": "doi:10.3390/rs12223705; historical-fire term omitted",
+        "layer_roles": {
+            "infra": "road distance",
+            "wui": "settlement distance (CLC artificial-surface proxy)",
+        },
+        "limitations": (
+            "Expert AHP developed for two Galicia roadside study areas; CLC "
+            "artificial surfaces proxy the cadastral settlement layer; the "
+            "historical-fire term is omitted; whole-region predictive validation "
+            "is not established."
+        ),
     },
 }
-
-# Legacy scheme fitted against FIRMS fire history (scripts/fit_weights.py).
-FITTED_SPEC: dict = {
-    "name": "fitted",
-    "topics": {
-        "veg": (["ftm", "ndvi"], {"ftm": 0.0, "ndvi": 1.0}),
-        "topo": (["mdt", "slope", "aspect"], {"mdt": 0.181, "slope": 0.819, "aspect": 0.0}),
-        "ai": (["infra", "wui"], {"infra": 0.5, "wui": 0.5}),
-        "meteo": (["meteo"], None),
-        "fhist": (["fhist"], None),
-    },
-    "top_order": ["veg", "topo", "meteo", "ai", "fhist"],
-    "top_weights": {"veg": 0.1577, "topo": 0.4898, "meteo": 0.2981, "ai": 0.0, "fhist": 0.0544},
-    "interp_keys": {"ndvi", "meteo", "aspect"},
-}
-
 
 def _weight_scheme() -> str:
-    scheme = os.environ.get("FFRM_WEIGHT_SCHEME", "original").strip().lower()
-    return scheme if scheme in {"original", "fitted"} else "original"
+    scheme = os.environ.get(
+        "FFRM_WEIGHT_SCHEME", "published_galicia_2020"
+    ).strip().lower()
+    if scheme == "fitted":
+        raise ValueError(
+            "FFRM_WEIGHT_SCHEME=fitted is disabled: its FIRMS training and "
+            "out-of-sample validation artifacts are not available"
+        )
+    if scheme in {"", "original", "published_galicia_2020"}:
+        return "published_galicia_2020"
+    raise ValueError("FFRM_WEIGHT_SCHEME must be 'published_galicia_2020'")
 
 
 def _resolve_spec(calculation_mode: str) -> dict:
-    if _weight_scheme() == "fitted":
-        return FITTED_SPEC
+    _weight_scheme()
     return ORIGINAL_SPECS["dynamic" if calculation_mode == "dynamic" else "static"]
 
 
@@ -166,6 +220,18 @@ def _sub_weights(keys: list, spec_weights) -> np.ndarray:
     return calculate_weights(normalize_matrix(np.array(spec_weights, dtype=np.float32))).astype(np.float32)
 
 
+def _minimum_weight_coverage() -> float:
+    raw = os.environ.get("FFRM_MIN_WEIGHT_COVERAGE", "0.75").strip()
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError("FFRM_MIN_WEIGHT_COVERAGE must be a number in 0..1") from exc
+    if not 0.0 <= value <= 1.0:
+        raise ValueError("FFRM_MIN_WEIGHT_COVERAGE must be a number in 0..1")
+    return value
+
+
+@logged_step("AHP", "align-weight-and-classify")
 def _combine_layers(
     raw_layer_paths: dict[str, Path | None],
     reference_path: Path,
@@ -176,9 +242,18 @@ def _combine_layers(
     active_topics: set[str],
     export_only: dict[str, Path] | None = None,
 ) -> dict[str, Path]:
-    """AHP combination with explicit handling for optional raster gaps. LST and TWI are allowed to have missing pixels. Their subtopic weights are renormalized over data that is actually present, and ``data_coverage.tif`` records the fraction of the configured model weight supported at each pixel. Core inputs still fail closed and remain nodata in the final map."""
+    """Combine layers while recording and renormalizing optional data gaps."""
     active_topics = set(active_topics) & set(spec["top_order"])
-    optional_gap_keys = {"lst", "twi"}
+    optional_gap_keys = {"lst", "twi", "ndvi", "ndmi"}
+    minimum_weight_coverage = _minimum_weight_coverage()
+    log_event(
+        "AHP",
+        "CONFIG",
+        model=spec["name"],
+        active_topics=",".join(sorted(active_topics)),
+        minimum_weight_coverage=minimum_weight_coverage,
+        reference=reference_path,
+    )
 
     with rasterio.open(reference_path) as ref:
         ref_data = ref.read(1, out_dtype="float32")
@@ -217,10 +292,12 @@ def _combine_layers(
     topic_coverage: dict[str, np.ndarray] = {}
     subtopic_weights: dict[str, dict[str, float]] = {}
     required_layer_keys: set[str] = set()
+    model_layer_keys: set[str] = set()
     for topic in spec["top_order"]:
         if topic not in active_topics:
             continue
         keys, sub = spec["topics"][topic]
+        model_layer_keys.update(keys)
         weights = _sub_weights(keys, sub)
         subtopic_weights[topic] = {
             key: float(weight) for key, weight in zip(keys, weights)
@@ -230,9 +307,22 @@ def _combine_layers(
         required_mask = master_mask.copy()
         for key, w in zip(keys, weights):
             data, layer_mask = _load(key, raw_layer_paths.get(key))
+            log_event(
+                "AHP",
+                "LAYER",
+                topic=topic,
+                layer=key,
+                configured_subweight=float(w),
+                source=raw_layer_paths.get(key),
+                available=bool(
+                    raw_layer_paths.get(key) is not None
+                    and Path(raw_layer_paths[key]).is_file()
+                ),
+            )
+            log_array_stats("AHP", f"{key}-aligned-risk", data, nodata=0)
             if raw_layer_paths.get(key) is not None and Path(raw_layer_paths[key]).is_file():
                 exported_layers[key] = _write_array(
-                    layers_dir / f"{key}.tif", data, reference_path, "float32"
+                    layers_dir / f"{key}.tif", data, reference_path, "uint8"
                 )
             acc += data * np.float32(w)
             available_weight += layer_mask.astype(np.float32) * np.float32(w)
@@ -249,7 +339,9 @@ def _combine_layers(
 
     for key, path in (export_only or {}).items():
         data, _layer_mask = _load(key, path)
-        exported_layers[key] = _write_array(layers_dir / f"{key}.tif", data, reference_path, "float32")
+        exported_layers[key] = _write_array(
+            layers_dir / f"{key}.tif", data, reference_path, "uint8"
+        )
         del data, _layer_mask
 
     # Top-level weights: matrix-based specs drop inactive rows/cols and re-derive; weight-based specs renormalize over the active topics.
@@ -262,7 +354,16 @@ def _combine_layers(
     else:
         raw = np.array([spec["top_weights"][t] for t in order], dtype=np.float32)
         final_weights = raw / raw.sum()
-        cr = 0.0
+        cr = None
+    log_event(
+        "AHP",
+        "WEIGHTS",
+        top_weights=",".join(
+            f"{topic}:{float(weight):.6f}"
+            for topic, weight in zip(order, final_weights)
+        ),
+        consistency_ratio=cr,
+    )
 
     fr_map = np.zeros(master_mask.shape, dtype=np.float32)
     coverage_map = np.zeros(master_mask.shape, dtype=np.float32)
@@ -271,6 +372,7 @@ def _combine_layers(
         fr_map += topic_arrays[topic] * np.float32(weight)
         coverage_map += topic_coverage[topic] * np.float32(weight)
         final_valid_mask &= topic_masks[topic]
+    final_valid_mask &= coverage_map >= np.float32(minimum_weight_coverage)
     fr_map[~final_valid_mask] = 0
     coverage_map[~master_mask] = 0
     del topic_arrays, topic_masks, topic_coverage
@@ -283,14 +385,17 @@ def _combine_layers(
         "float32",
     )
 
-    fr_classified = np.zeros_like(fr_map, dtype="float32")
+    fr_classified = np.zeros_like(fr_map, dtype="uint8")
     fr_classified[(fr_map > 0) & (fr_map <= 1)] = 1
     fr_classified[(fr_map > 1) & (fr_map <= 2)] = 2
     fr_classified[(fr_map > 2) & (fr_map <= 3)] = 3
     fr_classified[(fr_map > 3) & (fr_map <= 4)] = 4
     fr_classified[fr_map > 4] = 5
     fr_classified[~final_valid_mask] = 0
-    _write_array(final_map_path, fr_classified, reference_path, "float32")
+    _write_array(final_map_path, fr_classified, reference_path, "uint8")
+    log_array_stats("AHP", "continuous-risk", fr_map, nodata=0)
+    log_array_stats("AHP", "classified-risk", fr_classified, nodata=0)
+    log_array_stats("AHP", "configured-weight-coverage", coverage_map, nodata=0)
 
     plot_data = fr_classified.astype("float32")
     plot_data[fr_classified == 0] = np.nan
@@ -314,13 +419,25 @@ def _combine_layers(
                 "weight_scheme": spec["name"],
                 "top_level_weights": {t: float(w) for t, w in zip(order, final_weights)},
                 "subtopic_weights": subtopic_weights,
-                "comparison_matrix_consistency_ratio": float(cr),
-                "comparison_matrix_consistent": bool(cr < 0.1),
+                "comparison_matrix_consistency_ratio": (
+                    float(cr) if cr is not None else None
+                ),
+                "comparison_matrix_consistent": (
+                    bool(cr < 0.1) if cr is not None else None
+                ),
                 "predictive_validation": "not established by AHP consistency",
+                "scientific_basis": spec.get("scientific_basis"),
+                "model_limitations": spec.get("limitations"),
+                "layer_roles": spec.get("layer_roles", {}),
                 "active_topics": order,
                 "required_layers": sorted(required_layer_keys),
-                "optional_gap_layers": sorted(optional_gap_keys & set(raw_layer_paths)),
-                "nodata_policy": "renormalize optional LST/TWI weights; require all core layers",
+                "optional_gap_layers": sorted(optional_gap_keys & model_layer_keys),
+                "nodata_policy": (
+                    "renormalize configured optional-layer gaps locally, require "
+                    "all core layers, and mask pixels below the configured "
+                    "model-weight coverage threshold"
+                ),
+                "minimum_configured_weight_coverage": minimum_weight_coverage,
                 "valid_output_fraction": (valid_count / master_count) if master_count else 0.0,
                 "mean_configured_weight_coverage": (
                     float(np.mean(valid_coverage)) if valid_coverage.size else 0.0
@@ -368,12 +485,12 @@ def _fwi_from_station_file(
     reference_raster,
     base_output_dir: Path,
     inputs_dir: Path,
-    risk_profile: str,
+    fwi_classification: str,
     start_date: date | None,
     target_date: date,
 ) -> dict:
     """Compute the FWI risk layer from an uploaded station file (Excel/CSV) and place the classified raster where the layer combination step expects it (``base_output_dir/TIFs/FWI_Risk_Map.tif``)."""
-    from FR.FWI_excel import FINCA_FWI_CLASS_BOUNDS, convert_station_file_to_csv, f_w_index_excel
+    from FR.FWI_excel import convert_station_file_to_csv, f_w_index_excel
 
     csv_path = convert_station_file_to_csv(station_data_path, inputs_dir / "station_data.csv")
     re_dir = base_output_dir / "re"
@@ -385,7 +502,7 @@ def _fwi_from_station_file(
         output_folder=str(base_output_dir),
         show_plots=False,
         save=True,
-        class_bounds=FINCA_FWI_CLASS_BOUNDS if risk_profile == "finca" else None,
+        classification_scheme=fwi_classification,
         start_date=start_date,
         target_date=target_date,
     )
@@ -412,13 +529,19 @@ def _prepare_temporal_risk_layers(
     temporal_input = work_dir / "input"
     temporal_output = work_dir / "output"
     cropped_dir = work_dir / "cropped"
-    needs_satellite = bool({"ndvi", "ndmi"} & spec_keys)
+    sentinel_bands: set[str] = set()
+    if "ndvi" in spec_keys and not ndvi_path:
+        sentinel_bands.update({"sentinel_b4", "sentinel_b8"})
+    if "ndmi" in spec_keys:
+        sentinel_bands.update({"sentinel_b8", "sentinel_b11"})
+    needs_satellite = bool(sentinel_bands)
     needs_lst = weather_active and "lst" in spec_keys
     reconstruction = DbReconstruct.reconstruct_temporal_inputs(
         temporal_input,
         target_date=day,
         include_lst=needs_lst,
         include_satellite=needs_satellite,
+        sentinel_bands=sentinel_bands,
         clip_geom=clip_geom_wgs84,
         clip_geom_crs="EPSG:4326",
     )
@@ -426,15 +549,19 @@ def _prepare_temporal_risk_layers(
     result: dict[str, Path | None] = {}
     cropped_b4: Path | None = None
     cropped_b8: Path | None = None
-    if "ndvi" in spec_keys and not ndvi_path:
+    b4_source = temporal_input / "Sentinel" / "B4.tiff"
+    b8_source = temporal_input / "Sentinel" / "B8.tiff"
+    if "ndvi" in spec_keys and not ndvi_path and b4_source.is_file():
         cropped_b4 = crop_raster_to_geometry(
-            temporal_input / "Sentinel" / "B4.tiff",
+            b4_source,
             cropped_dir / "B4.tiff",
             processing_aoi,
         )
-    if "ndmi" in spec_keys or ("ndvi" in spec_keys and not ndvi_path):
+    if (
+        "ndmi" in spec_keys or ("ndvi" in spec_keys and not ndvi_path)
+    ) and b8_source.is_file():
         cropped_b8 = crop_raster_to_geometry(
-            temporal_input / "Sentinel" / "B8.tiff",
+            b8_source,
             cropped_dir / "B8.tiff",
             processing_aoi,
         )
@@ -452,25 +579,39 @@ def _prepare_temporal_risk_layers(
             )
         else:
             if cropped_b4 is None or cropped_b8 is None:
-                raise RuntimeError("Sentinel B4/B8 inputs were not reconstructed for NDVI")
-            Ndvi.ndvi(cropped_b4, cropped_b8, output_folder=temporal_output, export_image=True)
-        result["ndvi"] = temporal_output / "TIFs" / "estatic_(NDVI_Risk_Map).tif"
+                result["ndvi"] = None
+            else:
+                Ndvi.ndvi(
+                    cropped_b4,
+                    cropped_b8,
+                    output_folder=temporal_output,
+                    export_image=True,
+                )
+                result["ndvi"] = (
+                    temporal_output / "TIFs" / "estatic_(NDVI_Risk_Map).tif"
+                )
+        if ndvi_path:
+            result["ndvi"] = (
+                temporal_output / "TIFs" / "estatic_(NDVI_Risk_Map).tif"
+            )
 
     if "ndmi" in spec_keys:
-        if cropped_b8 is None:
-            raise RuntimeError("Sentinel B8 input was not reconstructed for NDMI")
-        cropped_b11 = crop_raster_to_geometry(
-            temporal_input / "Sentinel" / "B11.tiff",
-            cropped_dir / "B11.tiff",
-            processing_aoi,
-        )
-        result["ndmi"] = Path(
-            Ndmi.ndmi_risk(
-                cropped_b8,
-                cropped_b11,
-                temporal_output / "TIFs" / "NDMI_Risk_Map.tif",
+        b11_source = temporal_input / "Sentinel" / "B11.tiff"
+        if cropped_b8 is None or not b11_source.is_file():
+            result["ndmi"] = None
+        else:
+            cropped_b11 = crop_raster_to_geometry(
+                b11_source,
+                cropped_dir / "B11.tiff",
+                processing_aoi,
             )
-        )
+            result["ndmi"] = Path(
+                Ndmi.ndmi_risk(
+                    cropped_b8,
+                    cropped_b11,
+                    temporal_output / "TIFs" / "NDMI_Risk_Map.tif",
+                )
+            )
 
     lst_source = temporal_input / "LST" / "LST.tiff"
     if needs_lst and lst_source.is_file():
@@ -505,6 +646,7 @@ def run_static_aoi_for_geometry(
     station_data_path: str | Path | None = None,
     calculation_mode: str | None = None,
     risk_profile: str = "regional",
+    fwi_classification: str = Fwi.FWI_DEFAULT_CLASSIFICATION,
     classification_breaks: dict[str, str] | None = None,
     classification_breaks_by_date: dict[str, dict[str, str]] | None = None,
     output_resolution_m: float | None = None,
@@ -515,6 +657,9 @@ def run_static_aoi_for_geometry(
     profile = (risk_profile or "regional").strip().lower()
     if profile not in {"regional", "finca"}:
         profile = "regional"
+    fwi_classification, _fwi_classification_spec = Fwi.resolve_fwi_classification(
+        fwi_classification
+    )
 
     mode = (calculation_mode or ("dynamic" if start_date else "static")).strip().lower()
     if mode not in {"static", "dynamic"}:
@@ -541,6 +686,17 @@ def run_static_aoi_for_geometry(
     processing_aoi = output_aoi.buffer(context_buffer_m)
     write_aoi_geojson(output_aoi, job_dir / "aoi.geojson")
     write_aoi_geojson(processing_aoi, job_dir / "processing_aoi.geojson")
+    log_token = bind_log_context(job=request_id, mode=mode, profile=profile)
+    log_event(
+        "WORKFLOW",
+        "START",
+        target_date=target_date,
+        start_date=start_date,
+        model=spec["name"],
+        fwi_classification=fwi_classification,
+        context_buffer_m=context_buffer_m,
+        keep_intermediate=keep_intermediate,
+    )
 
     try:
         clip_geom_wgs84 = reproject_geometry(processing_aoi, DEFAULT_PROJECTED_CRS, "EPSG:4326")
@@ -553,7 +709,7 @@ def run_static_aoi_for_geometry(
             start_date=start_date,
             include_weather="meteo" in active_top_levels and not station_data_path,
             include_history=False,
-            include_terrain="topo" in active_top_levels,
+            include_terrain="twi" in spec_keys and "topo" in active_top_levels,
             include_satellite=False,
             include_lst=False,
             clip_geom=clip_geom_wgs84,
@@ -580,14 +736,19 @@ def run_static_aoi_for_geometry(
 
         dtm_source = Path(dtm_path) if dtm_path else input_dir / "DTM" / "DTM.tif"
         print(f"[FFRM] DTM source: {'UPLOADED' if dtm_path else 'database'} -> {dtm_source}")
-        cropped_dtm = crop_raster_to_geometry(
-            dtm_source,
-            inputs_dir / "DTM.tif",
-            processing_aoi,
-            target_crs=DEFAULT_PROJECTED_CRS,
-            resampling=Resampling.bilinear,
-        )
-        cropped_fuels = crop_raster_to_geometry(input_dir / "FUELS" / "FUELS.tif", inputs_dir / "FUELS.tif", processing_aoi)
+        with processing_step("CROP", "static-source-rasters"):
+            cropped_dtm = crop_raster_to_geometry(
+                dtm_source,
+                inputs_dir / "DTM.tif",
+                processing_aoi,
+                target_crs=DEFAULT_PROJECTED_CRS,
+                resampling=Resampling.bilinear,
+            )
+            cropped_fuels = crop_raster_to_geometry(
+                input_dir / "FUELS" / "FUELS.tif",
+                inputs_dir / "FUELS.tif",
+                processing_aoi,
+            )
 
         Mdt.mdt(cropped_dtm, output_folder=base_output_dir, export_image=True, show_plots=False)
         if "twi" in spec_keys and "topo" in active_top_levels:
@@ -638,11 +799,11 @@ def run_static_aoi_for_geometry(
                     processing_reference,
                     base_output_dir,
                     inputs_dir,
-                    profile,
+                    fwi_classification,
                     start_date,
                     target_date,
                 )
-                selected_day = date.fromisoformat(str(station_result["last_date"]))
+                selected_day = date.fromisoformat(str(station_result["peak_date"]))
             else:
                 print("[FFRM] FWI source: database netCDF series")
                 fwi_result = Fwi.f_w_index(
@@ -657,6 +818,7 @@ def run_static_aoi_for_geometry(
                     selection_geometry_wgs84=reproject_geometry(
                         output_aoi, DEFAULT_PROJECTED_CRS, "EPSG:4326"
                     ),
+                    classification_scheme=fwi_classification,
                 )
                 selected_day = fwi_result.peak_date
 
@@ -851,6 +1013,19 @@ def run_static_aoi_for_geometry(
                 outputs["final_map"], layers_dir / f"risk_{selected_day.isoformat()}.tif"
             )
 
+        display_rasters = {Path(outputs["final_map"])}
+        display_rasters.update(
+            path for path in layers_dir.glob("*.tif") if path.name != "reference_mdt.tif"
+        )
+        print(f"[FFRM] optimizing {len(display_rasters)} map layer(s) for display", flush=True)
+        for raster_path in sorted(display_rasters):
+            _build_display_overviews(
+                raster_path,
+                Resampling.average
+                if raster_path.name == "data_coverage.tif"
+                else Resampling.nearest,
+            )
+
         source_resolutions = dict(daily_source_resolutions.get(selected_day.isoformat(), {}))
         if fwi_result is not None:
             fwi_path = fwi_result.daily_continuous_paths.get(selected_day.isoformat())
@@ -874,6 +1049,7 @@ def run_static_aoi_for_geometry(
             "keep_intermediate": keep_intermediate,
             "calculation_mode": mode,
             "risk_profile": profile,
+            "fwi_classification": fwi_classification,
             "output_resolution_m": output_resolution_m,
             "weight_scheme": spec["name"],
             "active_top_levels": sorted(active_top_levels),
@@ -912,11 +1088,16 @@ def run_static_aoi_for_geometry(
                 "included_in_fwi_equations": False,
             },
             "source_resolution_m": source_resolutions,
-            "sentinel_nominal_resolution_m": 20 if {"ndvi", "ndmi"} & spec_keys else None,
+            "sentinel_nominal_resolution_m": (
+                20
+                if {"sentinel_b4", "sentinel_b8", "sentinel_b11"}
+                & set(daily_source_dates.get(selected_day.isoformat(), {}))
+                else None
+            ),
             "output_grid_resolution_m": output_grid_resolution,
             "resolution_interpretation": (
-                "The output grid preserves 20 m Sentinel/terrain patterns; FWI and LST "
-                "remain coarse-scale drivers and do not gain fine-scale precision when resampled."
+                "The output grid preserves Sentinel/terrain patterns; FWI remains "
+                "a coarse-scale driver and does not gain fine-scale precision when resampled."
             ),
             "model_interpretation": (
                 "Experimental wildfire susceptibility/risk index; AHP matrix consistency "
@@ -939,14 +1120,29 @@ def run_static_aoi_for_geometry(
             shutil.rmtree(input_dir, ignore_errors=True)
             shutil.rmtree(daily_work, ignore_errors=True)
 
+        log_event(
+            "WORKFLOW",
+            "DONE",
+            peak_date=selected_day.isoformat(),
+            final_map=outputs.get("final_map"),
+            output_count=len(outputs),
+        )
         return {key: str(value) for key, value in outputs.items()}
-    except BaseException:
+    except BaseException as exc:
+        log_event(
+            "WORKFLOW",
+            "FAILED",
+            error_type=type(exc).__name__,
+            error=str(exc)[:500],
+        )
         if not keep_intermediate:
             shutil.rmtree(job_dir / "db_input", ignore_errors=True)
             shutil.rmtree(job_dir / "base", ignore_errors=True)
             shutil.rmtree(job_dir / "inputs", ignore_errors=True)
             shutil.rmtree(job_dir / "daily_work", ignore_errors=True)
         raise
+    finally:
+        reset_log_context(log_token)
 
 
 def run_static_aoi(
@@ -961,6 +1157,7 @@ def run_static_aoi(
     keep_intermediate: bool = False,
     optional_layers: dict[str, bool] | None = None,
     risk_profile: str = "regional",
+    fwi_classification: str = Fwi.FWI_DEFAULT_CLASSIFICATION,
     output_resolution_m: float | None = None,
 ) -> dict[str, str]:
     """Run a point-buffer static workflow for the selected calendar year."""
@@ -981,6 +1178,7 @@ def run_static_aoi(
         keep_intermediate=keep_intermediate,
         optional_layers=optional_layers,
         risk_profile=risk_profile,
+        fwi_classification=fwi_classification,
         output_resolution_m=output_resolution_m,
         request_metadata={
             "request_type": "point",
@@ -1006,6 +1204,15 @@ if __name__ == "__main__":
     parser.add_argument("--buffer-m", type=float, default=3000, help="Output AOI radius in meters.")
     parser.add_argument("--context-buffer-m", type=float, default=3000, help="Extra processing margin in meters.")
     parser.add_argument("--risk-profile", choices=["regional", "finca"], default="regional")
+    parser.add_argument(
+        "--fwi-classification",
+        choices=[
+            "published_galicia_2020",
+            "galicia_irdi_2026",
+            "effis_5class",
+        ],
+        default=Fwi.FWI_DEFAULT_CLASSIFICATION,
+    )
     args = parser.parse_args()
 
     result = run_static_aoi(
@@ -1015,5 +1222,6 @@ if __name__ == "__main__":
         buffer_m=args.buffer_m,
         context_buffer_m=args.context_buffer_m,
         risk_profile=args.risk_profile,
+        fwi_classification=args.fwi_classification,
     )
     print(json.dumps(result, indent=2))

@@ -3,6 +3,42 @@
 Notable changes of this engine relative to the original UVIGO codebase
 (https://github.com/Mat-GL-02/STORCITO), plus operational notes.
 
+## 2026-08 — Audited Galicia scientific profile
+
+- The default AHP equation now reproduces the published Galicia 2020 model
+  (DOI `10.3390/rs12223705`): vegetation, topography, anthropogenic influence,
+  and FWI use the paper's group/subgroup weights and class definitions.
+  Historical fire remains an overlay; its 0.055 paper weight is removed and
+  the remaining top-level weights are renormalized because the available
+  FIRMS/dNBR product is not the paper's historical-fire-regime variable.
+- Restored the published elevation, NDVI, fuel, road-distance, and
+  settlement-distance classes. Flat terrain is class 1 rather than nodata,
+  road/settlement areas beyond the outer threshold are class 1 rather than 0,
+  and CLC artificial surfaces are explicitly disclosed as the settlement
+  proxy.
+- FWI classifications are named and auditable: `published_galicia_2020`
+  (default, 3/13/23/28), `galicia_irdi_2026` (PLADIGA 2026,
+  12/24/38/50), and `effis_5class` (EFFIS compressed to five AHP classes).
+- Removed TWI, NDMI, and LST from the default score because the repository has
+  no fitted and out-of-sample-validated weights for those additions. The
+  unsupported `fitted` profile now fails explicitly instead of presenting
+  training-derived rules as validated science.
+- Sentinel B4/B8 gap filling now uses one shared source date per pixel, exports
+  source-date provenance, and skips B11 when the model only requires NDVI.
+  Missing NDVI is locally renormalized only above the configured model-weight
+  coverage threshold; `data_coverage.tif` makes that degradation visible.
+- Added structured lifecycle diagnostics for database reconstruction,
+  Sentinel selection, terrain, fuels, NDVI, FWI/station FWI, road/settlement
+  distance, optional indices, cropping, history, and AHP. Logs include
+  START/DONE/FAILED, elapsed time, inputs, sampled ranges/classes, dates, and
+  weights.
+- GeoTIFF exports are internally DEFLATE-compressed, tiled, and BigTIFF-safe;
+  callback archives omit working directories and enforce a 2 GiB archive
+  limit. This prevents a small ZIP from expanding back into several gigabytes
+  of uncompressed raster files on the receiving backend.
+- Model version `2026-08-18.1` invalidates older precomputed maps and static
+  caches. Recompute them before serving the new profile.
+
 ## 2026-07 — Source-data pipeline and API restructuring
 
 ### Fire Weather Index engine (differences vs. the original)
@@ -11,9 +47,9 @@ Notable changes of this engine relative to the original UVIGO codebase
   `exp(+0.115 * H)` instead of Van Wagner (1987)'s `exp(-0.115 * H)`; the
   positive exponent explodes (~1e5) on humid days and corrupted every FFMC
   value computed after them. Now matches the published FWI system exactly.
-- **EFFIS danger classes**: risk classes 1-5 now use the pan-European EFFIS
-  bounds (5.2 / 11.2 / 21.3 / 38), validated against EFFIS for Galicia;
-  the original used unsourced bounds (3 / 13 / 23 / 28).
+- **Historical note (superseded in 2026-08)**: July temporarily applied a
+  custom five-class threshold set. The audited release now separates the
+  published model, current Galicia IRDI, and EFFIS profiles explicitly.
 - **Standard FWI observation time**: Canadian FWI is evaluated at noon local
   standard time (12:00 CET / 13:00 CEST in Galicia). The submitted
   16:00-17:00 interval remains the operational weather-display window and is
@@ -21,20 +57,20 @@ Notable changes of this engine relative to the original UVIGO codebase
 - **24 h precipitation**: rain input is the FWI-defined 24 h accumulation up
   to the standard observation, including the previous day's post-observation
   tail.
-- **Bounded, deterministic runs**: moisture-code run-up is capped at 60 days
-  before the scoring window (DC memory is ~52 days), and the output is the
-  peak-FWI day inside the requested AOI and user-selected window. The original
-  processed every file in the input folder and returned whichever day came
-  last.
+- **Bounded, deterministic runs**: the operational moisture-code spin-up is 60
+  contiguous days before the scoring window, and the output is the peak-FWI
+  day inside the requested AOI and user-selected window. This fixed
+  initialization is reproducible but is not equivalent to a persisted
+  year-round/overwintered DC state. The original processed every file in the
+  input folder and returned whichever day came last.
 - **Coherent dynamic frames**: FWI state is advanced once for the whole window;
-  each daily map uses that date's FWI and LST/Sentinel captures on or before
-  the same date. The selected main TIFF is copied from the AOI peak day's full
+  each daily map uses that date's FWI and a coherent Sentinel B4/B8 capture on
+  or before the same date. The selected main TIFF is copied from the AOI peak day's full
   daily result, rather than combining peak FWI with end-date imagery.
-- **Coverage-aware AHP**: missing LST/TWI pixels renormalize only their local
+- **Coverage-aware AHP**: optional-layer gaps renormalize only their local
   subtopic weights, while core-layer gaps remain nodata. `data_coverage.tif`
-  records the configured model-weight coverage. Historical fire remains an
-  informational overlay with zero model weight.
-- Model version `2026-07-12.1` invalidates regional maps and FWI slice caches
+  records configured model-weight coverage.
+- Model version `2026-07-12.1` invalidated regional maps and FWI slice caches
   produced with the former 16:00 calculation; they must be regenerated by the
   normal nightly process before precomputed serving resumes.
 
@@ -105,9 +141,9 @@ Notable changes of this engine relative to the original UVIGO codebase
   when the fetch partially fails.
 - Dynamic payloads accept an inclusive date window; FWI scores every day and
   returns the peak-risk map. Satellite bands share a common bounded capture
-  on or before the window end, LST uses a bounded past-only fallback, and FWI
-  requires every date in its run-up and scoring window. Region-wide LST/TWI
-  breakpoints are used for regional and on-demand AOI classification.
+  on or before the assessed day, and FWI requires every date in its spin-up
+  and scoring window. July's LST/TWI additions are retained only as optional
+  utilities and are not predictors in the audited default profile.
 - FIRMS rows enforce the configured confidence threshold, FWI summaries use
   the assessment-hour 24-hour rain window, TWI wetness now decreases risk,
   and the Sentinel default is the native 20 m working resolution.
@@ -128,25 +164,21 @@ Per-layer rules (all measured against the assessment date, not today):
 
 | Layer | Requirement | Rationale |
 |---|---|---|
-| LST | capture within 3 days before the date (`STORCITO_MAX_LST_AGE_DAYS`) | surface temperature changes daily |
-| FWI | 60 contiguous daily files before the date | drought code has a ~52-day memory; gaps would fabricate moisture state |
+| LST (optional utility) | capture within 3 days before the date (`STORCITO_MAX_LST_AGE_DAYS`) | surface temperature changes daily |
+| FWI | 60 contiguous daily files before the date | deterministic spin-up; gaps would fabricate moisture state |
 | Sentinel-2 | capture within ~14 days before the date (`STORCITO_MAX_SENTINEL_AGE_DAYS`) | vegetation indices change weekly |
 | terrain / TWI / fuel / infra / WUI / CLC | none | date-independent |
 
 Operational consequence: to assess dates in month X the FWI archive must
 start 60 days earlier. For the May-October season that means fetching
 weather from early March (`make fwi START=<year>-03-02 ...`), and the
-daily update job's season gate runs March-October accordingly. LST must
-have its daily series seeded for every assessable period
-(`make lst START=<year>-05-01 [END=...]`).
+daily update job's season gate runs March-October accordingly. Seed LST only
+for workflows that explicitly enable that optional utility.
 
-Degraded mode (implemented): when LST or Sentinel have no capture fresh
-enough for the assessment date, the run excludes that layer instead of
-failing - the AHP sub-weights renormalise over the remaining layers and
-the exclusions are disclosed in the result metadata as `skipped_layers`
-with the exact reason. FWI is never degraded (the weather signal is the
-core of the model, so an incomplete run-up still fails hard). Disable
-with `STORCITO_ALLOW_DEGRADED=0` to restore hard failures everywhere.
+Degraded mode: when a fresh Sentinel composite is unavailable, NDVI can be
+excluded and its local sub-weight renormalized only where total configured
+model coverage remains above the threshold. The exclusion is disclosed in
+metadata and `data_coverage.tif`. FWI and the core layers never degrade.
 
 ## Peak-day selection: why mean FWI, not "largest red area"
 
@@ -157,24 +189,20 @@ lower-ranked day *looks* redder on the combined map and ask why it is not
 the peak. That is expected, and the criterion is deliberate:
 
 - **The ranking and the map colours measure different things.** The ranking
-  is fire *weather* (wind, humidity, temperature, accumulated drought).
-  The combined map additionally blends that day's surface temperature and
-  vegetation layers with date-independent layers (fuels, terrain, WUI) -
-  a hot afternoon can add red through the LST layer without the day's fire
-  weather being the worst of the window.
-- **FWI is the validated standard for "which day".** Canadian FWI, EFFIS,
-  and the official Galician/Spanish alert declarations all rank days by
-  fire-weather indices. Using the same criterion means the app's peak day
-  agrees with the official alert calendar - essential for the intended
-  users (municipalities and fire brigades), whose readiness and
-  restriction decisions must be defensible against that standard.
+  is continuous fire weather. The map combines its classified value with
+  fuels, NDVI, terrain, and anthropogenic proximity, then classifies the
+  weighted result. A new Sentinel capture can also change NDVI between days.
+- **FWI is an established fire-danger indicator, not a validation result.**
+  It is the documented temporal driver in the published model. The app's
+  value need not exactly match an official alert because weather sources,
+  initialization, spatial grids, and the selected classification profile can
+  differ.
 - **Classified area is a fragile statistic.** "High + very-high km²" jumps
   when pixels cross a class boundary, so two days with nearly identical
   continuous risk can rank very differently. The continuous mean is smooth.
-- **The failure modes are not symmetric.** If mean FWI ever picks the
-  "wrong" day, that day still has the worst burning conditions. If a
-  red-area ranking picks the wrong day, a windier and drier day gets
-  demoted because of an afternoon surface-temperature artefact.
+- **The criterion is explicit and auditable.** It selects the worst modeled
+  weather day and avoids ranking instability caused solely by class-boundary
+  crossings in the combined raster.
 
 Division of labour for operational users: **when** to reinforce or
 restrict = the FWI day ranking; **where** to patrol or warn = that day's

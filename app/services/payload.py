@@ -191,6 +191,32 @@ def wildfire_risk_profile(payload: WildfireCalculationRequest) -> str:
     return profile
 
 
+def wildfire_fwi_classification(payload: WildfireCalculationRequest) -> str:
+    raw = payload.parameters.get("fwi_classification", "published_galicia_2020")
+    if not isinstance(raw, str):
+        raise ValueError("parameters.fwi_classification must be a string when provided.")
+    value = raw.strip().lower().replace("-", "_")
+    aliases = {
+        "published": "published_galicia_2020",
+        "storcito_2020": "published_galicia_2020",
+        "galicia": "galicia_irdi_2026",
+        "irdi": "galicia_irdi_2026",
+        "galicia_irdi": "galicia_irdi_2026",
+        "effis": "effis_5class",
+    }
+    value = aliases.get(value, value)
+    if value not in {
+        "published_galicia_2020",
+        "galicia_irdi_2026",
+        "effis_5class",
+    }:
+        raise ValueError(
+            "parameters.fwi_classification must be 'published_galicia_2020', "
+            "'galicia_irdi_2026', or 'effis_5class'."
+        )
+    return value
+
+
 def wildfire_user_input_model_id(payload: WildfireCalculationRequest) -> str:
     """Persistent model id for reusable user inputs (run ids append a timestamp)."""
     raw = payload.parameters.get("source_model_id")

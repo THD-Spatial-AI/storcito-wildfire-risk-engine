@@ -2,6 +2,7 @@ import os
 import rasterio
 import numpy as np
 import matplotlib.pyplot as plt
+from FR.processing_log import log_array_stats, log_event, logged_step
 
 
 def _env_breaks(name):
@@ -30,6 +31,7 @@ def _coerce_breaks(value):
     return tuple(float(part) for part in parts)
 
 
+@logged_step("LST", "classify-land-surface-temperature")
 def Lst(input_lst, output_lst=None, output_lst_risk=None, show_plots=True):
     print('Executing LST layer...')
 
@@ -67,6 +69,13 @@ def Lst(input_lst, output_lst=None, output_lst_risk=None, show_plots=True):
     # Reclasification by percentiles: assign values 1-5 for risk levels
     fixed = _env_breaks("FFRM_LST_BREAKS")
     p20, p40, p60, p80 = fixed if fixed else np.percentile(lst_clean[valid], [20, 40, 60, 80])
+    log_event(
+        "LST",
+        "BREAKS",
+        input=input_lst,
+        values=",".join(f"{value:.3f}" for value in (p20, p40, p60, p80)),
+        source="configured" if fixed else "local-percentiles",
+    )
 
     reclasificado = np.zeros_like(lst, dtype='int32')
     reclasificado[(lst_clean <= p20) & valid] = 1
@@ -74,6 +83,8 @@ def Lst(input_lst, output_lst=None, output_lst_risk=None, show_plots=True):
     reclasificado[(lst_clean > p40) & (lst_clean <= p60)] = 3
     reclasificado[(lst_clean > p60) & (lst_clean <= p80)] = 4
     reclasificado[(lst_clean > p80) & valid] = 5
+    log_array_stats("LST", "kelvin", lst_clean)
+    log_array_stats("LST", "risk-class", reclasificado, nodata=0)
     
     base_dir = os.path.dirname(str(output_lst)) if output_lst else 'data/OUTPUT'
     out_dir_tif = base_dir
@@ -145,6 +156,7 @@ def Lst(input_lst, output_lst=None, output_lst_risk=None, show_plots=True):
     print('LST Layer completed')
 
 
+@logged_step("LST", "classify-risk-raster")
 def lst_risk(input_lst, output_risk, *, breaks=None):
     """Non-interactive LST risk layer (Kelvin filter + percentile classes, as the original)."""
     with rasterio.open(input_lst) as src:
@@ -166,6 +178,15 @@ def lst_risk(input_lst, output_risk, *, breaks=None):
     r[(lst_clean > p40) & (lst_clean <= p60)] = 3
     r[(lst_clean > p60) & (lst_clean <= p80)] = 4
     r[(lst_clean > p80) & valid] = 5
+    log_event(
+        "LST",
+        "BREAKS",
+        input=input_lst,
+        values=",".join(f"{value:.3f}" for value in (p20, p40, p60, p80)),
+        source="configured" if fixed else "local-percentiles",
+    )
+    log_array_stats("LST", "kelvin", lst_clean)
+    log_array_stats("LST", "risk-class", r, nodata=0)
     meta.update(driver="GTiff", dtype="int32", count=1, nodata=0)
     os.makedirs(os.path.dirname(str(output_risk)), exist_ok=True)
     with rasterio.open(output_risk, "w", **meta) as dst:

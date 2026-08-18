@@ -2,12 +2,16 @@ import os
 import rasterio
 import numpy as np
 import matplotlib.pyplot as plt
+from FR.processing_log import log_array_stats, log_event, logged_step
 
+@logged_step("NDMI", "calculate-nir-swir-index")
 def Ndmi(input_band8, input_band11, output_folder=None, export_image=False,
          show_plots=False):
     from FR.rutinas.setup import save_file, default_imshow
 
-    print('NDMI Layer processing...')
+    log_event(
+        "NDMI", "INPUT", nir=input_band8, swir=input_band11, output=output_folder
+    )
 
     with rasterio.open(input_band8) as b8_src:
         nir_band = b8_src.read(1).astype('float32')
@@ -26,6 +30,8 @@ def Ndmi(input_band8, input_band11, output_folder=None, export_image=False,
     reclasificado[(ndmi > 0.00) & (ndmi <= 0.20)] = 3
     reclasificado[(ndmi > 0.20) & (ndmi <= 0.40)] = 2
     reclasificado[ndmi > 0.40] = 1
+    log_array_stats("NDMI", "continuous", ndmi)
+    log_array_stats("NDMI", "risk-class", reclasificado, nodata=0)
 
     fig1, ax1 = default_imshow(ndmi, 'NDMI')
     fig2, ax2 = default_imshow(reclasificado, 'NDMI Risk Map')
@@ -44,6 +50,7 @@ def Ndmi(input_band8, input_band11, output_folder=None, export_image=False,
     return ndmi, reclasificado
 
 
+@logged_step("NDMI", "calculate-risk-raster")
 def ndmi_risk(input_band8, input_band11, output_risk):
     """Non-interactive NDMI risk layer (fixed thresholds, as the original)."""
     with rasterio.open(input_band8) as b8_src:
@@ -59,6 +66,8 @@ def ndmi_risk(input_band8, input_band11, output_risk):
     r[(ndmi > 0.00) & (ndmi <= 0.20)] = 3
     r[(ndmi > 0.20) & (ndmi <= 0.40)] = 2
     r[ndmi > 0.40] = 1
+    log_array_stats("NDMI", "continuous", ndmi)
+    log_array_stats("NDMI", "risk-class", r, nodata=0)
     meta.update(driver="GTiff", dtype="int32", count=1, nodata=0)
     os.makedirs(os.path.dirname(str(output_risk)), exist_ok=True)
     with rasterio.open(output_risk, "w", **meta) as dst:

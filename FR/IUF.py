@@ -14,7 +14,19 @@ from rasterio.features import rasterize
 from rasterio.mask import mask
 from shapely.geometry.base import BaseGeometry
 from FR.aoi import reproject_geometry
+from FR.processing_log import log_array_stats, log_event, logged_step
 
+PUBLISHED_SETTLEMENT_DISTANCE_BOUNDS_M = (500, 1000, 1500, 2000)
+
+
+def classify_settlement_distance_risk(distance_m: np.ndarray) -> np.ndarray:
+    """Apply the published Galicia settlement-distance classes."""
+    result = np.ones(np.shape(distance_m), dtype="uint8")
+    for radius, risk in ((2000, 2), (1500, 3), (1000, 4), (500, 5)):
+        result[np.asarray(distance_m) <= radius] = risk
+    return result
+
+@logged_step("SETTLEMENT", "classify-settlement-distance")
 def wui(input_road, input_clc, file_name:str='IUF_Risk_Map',
         output_folder:Path=Path('data/OUTPUT'),
         reference_file=Path('REFERENCE')/'MDT'/'DEM_NationalScenario_2013.tif', 
@@ -28,9 +40,12 @@ def wui(input_road, input_clc, file_name:str='IUF_Risk_Map',
         urban_inner_buffer_m: float | None = None,
         use_reference_grid: bool | None = None)->None:
     
-    """_summary_ Args: input_road (_type_): _description_ input_clc (_type_): _description_ file_name (str, optional): _description_. Defaults to 'IUF_Risk_Map'. output_folder (Path, optional): _description_. Defaults to Path('OUTPUT'). reference_file (_type_, optional): _description_. Defaults to Path('REFERENCE')/'MDT'/'DEM_NationalScenario_2013.tif'. export_image (bool, optional): _description_. Defaults to False. show_plots (bool, optional): _description_. Defaults to False. aoi_geometry: Optional AOI geometry used to spatially limit vector processing. aoi_crs: CRS of ``aoi_geometry``. Defaults to EPSG:32629. risk_profile: ``regional`` keeps Galicia WUI buffers; ``finca`` uses the old parcel-scale buffers. road_buffer_m: Optional road search buffer. Defaults to 2000 regional or 200 finca. urban_outer_buffer_m: Optional urban mask buffer. Defaults to 400 regional or 40 finca. urban_inner_buffer_m: Retained for documenting the legacy finca 5 m inner buffer, though the original mask used only the outer buffer. use_reference_grid: Rasterize on the reference raster's native grid. Defaults to true for finca mode and false for regional mode."""
-    
-    print('Wildland-Urban Interfaces layer processing...')
+    """Create the anthropogenic settlement-distance risk layer.
+
+    Regional mode follows the published Galicia distance classes (500 m
+    increments through 2 km), using CLC artificial surfaces as the available
+    settlement proxy. Finca mode retains the original WUI procedure.
+    """
 
     profile = (risk_profile or "regional").strip().lower()
     if profile not in {"regional", "finca"}:
@@ -40,15 +55,39 @@ def wui(input_road, input_clc, file_name:str='IUF_Risk_Map',
     # Kept as an explicit setting because the old finca code documented 5 m, even though it used the outer mask for rasterization.
     urban_inner_buffer = urban_inner_buffer_m if urban_inner_buffer_m is not None else (5 if profile == "finca" else 50)
     native_grid = (profile == "finca") if use_reference_grid is None else bool(use_reference_grid)
+    log_event(
+        "SETTLEMENT",
+        "INPUT",
+        clc=input_clc,
+        roads=input_road if profile == "finca" else None,
+        reference=reference_file,
+        profile=profile,
+        source_role=(
+            "CLC-artificial-surface settlement proxy"
+            if profile == "regional"
+            else "legacy WUI"
+        ),
+    )
 
-    # Leer capas una sola vez
-    road = gpd.read_file(input_road).to_crs(epsg=32629)
+    road = (
+        gpd.read_file(input_road).to_crs(epsg=32629)
+        if profile == "finca"
+        else None
+    )
     clc = gpd.read_file(input_clc).to_crs(epsg=32629)
     if aoi_geometry is not None:
         projected_aoi = reproject_geometry(aoi_geometry, aoi_crs, "EPSG:32629")
         search_area = projected_aoi.buffer(road_buffer + urban_outer_buffer)
-        road = road[road.intersects(search_area)].copy()
+        if road is not None:
+            road = road[road.intersects(search_area)].copy()
         clc = clc[clc.intersects(search_area)].copy()
+    log_event(
+        "SETTLEMENT",
+        "VECTOR",
+        clc_features=len(clc),
+        road_features=len(road) if road is not None else None,
+        crs="EPSG:32629",
+    )
 
     with rasterio.open(reference_file) as src:
         if native_grid:
@@ -83,8 +122,70 @@ def wui(input_road, input_clc, file_name:str='IUF_Risk_Map',
 
     # Convertir Code_18 a numérico de una vez
     clc['Code_18'] = pd.to_numeric(clc['Code_18'], errors='coerce')
+
+    if profile == "regional":
+        from scipy.ndimage import distance_transform_edt
+
+        settlements = clc[
+            (clc["Code_18"] >= 100) & (clc["Code_18"] < 200)
+        ]
+        settlement_mask = rasterize(
+            ((geometry, 1) for geometry in settlements.geometry),
+            out_shape=(y_res, x_res),
+            transform=transform,
+            fill=0,
+            dtype=rasterio.uint8,
+            all_touched=True,
+        )
+        distance = np.full((y_res, x_res), np.inf)
+        settlement_risk = classify_settlement_distance_risk(distance)
+        if np.any(settlement_mask):
+            distance = distance_transform_edt(
+                settlement_mask == 0,
+                sampling=(abs(transform.e), abs(transform.a)),
+            )
+            settlement_risk = classify_settlement_distance_risk(distance)
+
+        out_meta = {
+            "driver": "GTiff",
+            "height": y_res,
+            "width": x_res,
+            "count": 1,
+            "dtype": rasterio.uint8,
+            "crs": crs_str,
+            "transform": transform,
+        }
+        log_event(
+            "SETTLEMENT",
+            "CLASSIFICATION",
+            settlement_features=len(settlements),
+            boundaries_m="500,1000,1500,2000",
+            source="CLC classes 100-199",
+        )
+        log_array_stats(
+            "SETTLEMENT", "distance-m", distance
+        )
+        log_array_stats(
+            "SETTLEMENT", "settlement-distance-risk", settlement_risk
+        )
+        fig1, _ax1 = default_imshow(
+            settlement_risk, "Settlement Distance Risk Map", {"label": "Risk"}
+        )
+        if show_plots:
+            plt.show()
+        if export_image:
+            save_file(
+                settlement_risk,
+                file_name,
+                output_folder,
+                out_meta,
+                extensions=["tif", "png"],
+                fig=fig1,
+                meta_intact=True,
+            )
+        return settlement_risk[np.newaxis, ...]
     
-    if road.empty or clc.empty:
+    if road is None or road.empty or clc.empty:
         return _save_empty_result()
 
     try:

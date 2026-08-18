@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 
 from FR.rutinas.setup import *
 from pathlib import Path
+from FR.processing_log import log_array_stats, log_event, logged_step
 
 ROTHERMEL_MAP = {
     1111: 4, 1112: 9, 
@@ -20,11 +21,10 @@ ROTHERMEL_MAP = {
     53: 3, 61: 0, 
     62: 5, 7: 0
 }
-# Codes 2/4/5/6/7 recalibrated against FIRMS fire history
 FINAL_MAP = {
-    1: 3, 2: 3, 3: 4,
-    4: 2, 5: 4, 6: 2,
-    7: 2, 8: 2, 9: 3,
+    1: 3, 2: 1, 3: 4,
+    4: 5, 5: 3, 6: 4,
+    7: 5, 8: 2, 9: 3,
     10: 4, 11: 4,
     12: 4, 13: 5,
     14: 1,
@@ -108,11 +108,13 @@ def _integer_codes(values: np.ndarray, nodata: float | None) -> set[int]:
     return set(int(code) for code in np.unique(integer_values))
 
 
+@logged_step("FUEL", "classify-fuel-model")
 def fmt(input_file:str|Path,output_folder=Path('data/OUTPUT') ,file_name:str='FMT',
         export_image:bool=False,show_plots:bool=True) -> np.ndarray:
     
     """Calculates Fuel Model Type (FMT) remapping with two classification levels. Remaps European FMT codes to Rothermel fuel model types and then to final risk categories using lookup tables. Args: input_file: Path to European FMT raster file output_folder: Output folder path for saving results. Defaults to 'OUTPUT' id_name: Identifier for output files. Defaults to 'FMT' export_image: Whether to save figure and GeoTIFF/PNG files. Defaults to False show_plots (bool, optional): _description_. Defaults to False. Returns: Remapped array classified into final FMT risk categories (int32) Raises: FileNotFoundError: If input_file does not exist"""
     input_file = Path(input_file)
+    log_event("FUEL", "INPUT", raster=input_file, output=output_folder)
 
     if not input_file.exists():
         raise FileNotFoundError(f"Input file not found: {input_file}")
@@ -144,6 +146,15 @@ def fmt(input_file:str|Path,output_folder=Path('data/OUTPUT') ,file_name:str='FM
         fmt_rothermel.astype("float32", copy=False),
         FINAL_MAP,
         "Clasificando riesgo FMT",
+    )
+    log_array_stats("FUEL", "source-codes", fmt_eu, nodata=nodata)
+    log_array_stats("FUEL", "risk-class", fmt_final, nodata=0)
+    log_event(
+        "FUEL",
+        "MAPPING",
+        mapped_pixels=mapped,
+        unmapped_pixels=unmapped,
+        nodata_pixels=nodata_pixels,
     )
 
     print(f"{mapped} pixels mapped in ROTHERMEL_MAP")

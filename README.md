@@ -109,7 +109,7 @@ atomic swap. Delete a layer's staging folder only to force a fresh download.
 | `hist` | `hist` | MODIS active-fire hotspots (SP archive + NRT, auto-stitched) | NASA FIRMS area API | points | `FIRMS_MAP_KEY` |
 | `hist-scenes` | `hist_scenes` | Sentinel-2 B8A/B12 pre/post-season pairs (dNBR) | Copernicus Data Space Process API | GeoTIFF blobs | `SH_CLIENT_ID` + `SH_CLIENT_SECRET` |
 | `clc` | `clcplus_2023` | CLC+ Backbone 2023 land cover | Copernicus Land Monitoring Service datarequest API — `land.copernicus.eu` | 10 m | `CLMS_SERVICE_KEY_JSON` |
-| `iuf` | `iuf` | CORINE CLC2018 vector (WUI/land-use input) | Copernicus Land Monitoring Service datarequest API | 1:100k vector | `CLMS_SERVICE_KEY_JSON` |
+| `iuf` | `iuf` | CORINE CLC2018 artificial surfaces (settlement-distance proxy) | Copernicus Land Monitoring Service datarequest API | 1:100k vector | `CLMS_SERVICE_KEY_JSON` |
 
 Copy `.env.example` to `.env` and fill the credentials in. After changing
 `.env`, run `make up` (recreates containers) — `make restart` does not reload
@@ -122,17 +122,17 @@ Run these in order on a fresh database (order matters only where noted):
 ```bash
 make borders                        # 1. Spain admin boundaries  (~1 min)
 make dtm                            # 2. IGN elevation 25 m      (~5 min)
-make twi                            # 3. TWI, computed from 2's staged tiles (15-40 min GRASS)
+make twi                            # 3. optional utility; not in the audited default score
 make mdt                            # 4. reference grid from step 2's tiles (~2 min)
 make fwi START=2026-03-02           # 5. weather, 60-day run-up before May 1 -> latest (large: ~330 MB/day)
 make sentinel START=2026-05-01      # 6. Sentinel-2 weekly mosaics, May 1 2026 -> latest image (~30 min)
-make lst START=2026-05-01           # 7. surface temperature, one raster per day May 1 2026 -> latest (~10 min)
+make lst START=2026-05-01           # 7. optional utility; not in the audited default score
 make infra                          # 8. OSM roads + railways    (~10 min)
 make fuels                          # 9. MFE fuel models         (~45 min, slow API)
 make hist START=2026-05-01          # 10. FIRMS fire hotspots, May 1 2026 -> today (needs step 1!)
 make hist-scenes PRE=2025-05-03 POST=2025-10-25   # 11. dNBR pair, last complete season (2025)
 make clc                            # 12. CLC+ Backbone 2023 land cover (Copernicus queue: minutes-hours)
-make iuf                            # 13. CORINE CLC2018 vector -> iuf, the WUI/land-use input (Copernicus queue)
+make iuf                            # 13. CORINE CLC2018 vector -> settlement-distance proxy (Copernicus queue)
 ```
 
 The explicit `START=` dates make the fetched range visible; the bare forms
@@ -197,15 +197,15 @@ Notes:
 
 | Class | Targets | Refresh | Why |
 |---|---|---|---|
-| **Dynamic** (daily) | `fwi` (Apr-Oct: the season plus the 60-day moisture run-up), `lst` | every day | new MeteoGalicia forecast each morning; Sentinel-3 passes daily. Drives the live map. |
-| **Semi-dynamic** (in fire season) | `sentinel` weekly; `hist` runs with the daily job | May-Oct | Sentinel-2 revisit is ~5 days (weekly NDVI/NDMI mosaics); FIRMS hotspots accumulate as fires happen |
-| **Static / quasi-static** | `borders` (never), `dtm`+`twi` (~2 years), `mdt` (never), `infra` (few times/year), `fuels` (new MFE edition, 5-10 years), `clc`+`iuf` (new CLC edition, ~2-6 years), `hist-scenes` (once, each November) | on publication | terrain, land cover and infrastructure change on multi-year timescales |
+| **Dynamic** (daily) | `fwi` (Apr-Oct: the season plus the 60-day moisture run-up) | every day | new MeteoGalicia forecast each morning drives the temporal model input |
+| **Semi-dynamic** (in fire season) | `sentinel` weekly; `hist` for the overlay | May-Oct | Sentinel-2 revisit is ~5 days (NDVI); FIRMS hotspots update the informational overlay |
+| **Static / quasi-static** | `borders`, `dtm`+optional `twi`, `mdt`, `infra`, `fuels`, `clc`+`iuf`, `hist-scenes` | on source publication | terrain, land cover and infrastructure change on multi-year timescales |
 
 Suggested cron for a server (all commands are argument-free thanks to the
 "latest available" defaults):
 
 ```cron
-15 8 * * *      cd /path/to/STORCITO && ./scripts/daily_update.sh     # daily: FWI through today, LST, fire hotspots
+15 8 * * *      cd /path/to/STORCITO && ./scripts/daily_update.sh     # daily: FWI, optional LST utility, fire overlay
 30 9 * * *      cd /path/to/STORCITO && ./scripts/nightly_process.sh  # daily: precompute the regional dynamic map
 ```
 
@@ -264,10 +264,10 @@ vector tables carry a `geom` (or `ogc_fid`) geometry column.
 | `fwi_files`, `fwi_slices` | blob/cache | n/a | MeteoGalicia WRF NetCDF files and per-day cached slices |
 | `fuels` | raster | 32629 | Rothermel fuel models 1-13, rasterized from MFE polygons |
 | `infra` | vector | 4326 | OSM roads + railways (Geofabrik) |
-| `iuf` | vector | 4326 | CLC/CORINE land-cover input for WUI/IUF |
+| `iuf` | vector | 4326 | CLC/CORINE artificial surfaces used as the settlement-distance proxy |
 | `clcplus_2023` | raster | 3035 | CLC+ Backbone 2023 land cover, 10 m |
 | `hist`, `hist_scenes` | vector/blob | 4326/n/a | FIRMS fire hotspots and pre/post Sentinel scene blobs |
-| `mdt` | raster | 32629 | 30 m reference grid resampled from the IGN MDT (WUI/infra rasterization) |
+| `mdt` | raster | 32629 | 30 m reference grid resampled from the IGN MDT (road/settlement rasterization) |
 | `twi` | raster | 32629 | Topographic Wetness Index, computed from `dtm` (GRASS) |
 | `lst`, `lst_ts` | raster | 4326 | Sentinel-3 SLSTR land surface temperature (Kelvin); `lst_ts` is the daily series the engine selects from by assessment date |
 | `spain_autonomous_communities` | vector | 4326 | Admin level 1 (incl. `acom_name='Galicia'`) |
@@ -323,6 +323,30 @@ Table names are validated against the live catalog and all access is read-only.
 (These endpoints require `psycopg2`, which is in `environment.yml`; rebuild the
 image if you are upgrading an older container.)
 
+### Scientific model profile
+
+The default `published_galicia_2020` profile reproduces the documented
+STORCITO AHP model from [*Mapping Forest Fire Risk—A Case Study in Galicia
+(Spain)*](https://doi.org/10.3390/rs12223705) (Remote Sensing 2020). It uses the paper's
+terrain, NDVI, fuel, road-distance, settlement-distance, and FWI classes and
+its published weights. The historical-fire coefficient is removed and the
+other top-level weights are renormalized because the current FIRMS/dNBR
+overlay is not the historical-fire-regime variable used by the study.
+The `2020` suffix identifies the published method version; it does not change
+the requested assessment date or force the engine to use 2020 observations.
+
+The CLC artificial-surface layer is disclosed as a proxy for cadastral
+settlements. The paper was evaluated in two roadside study areas, so this is
+an expert-weighted susceptibility index, not a validated Galicia-wide ignition
+probability. TWI, NDMI, and LST remain available data products but are not
+silently added to the default AHP equation because no fitted/validated weights
+for them are present in this repository.
+
+Processing logs use grep-friendly lifecycle lines such as
+`[FFRM][...][NDVI][START]`, `[STATS]`, `[DONE]`, or `[FAILED]`. Each major
+reconstruction, raster, FWI day, Sentinel selection, and AHP stage reports its
+inputs, elapsed time, sampled ranges/classes, source dates, and weights.
+
 For wildfire-platform compatibility, STORCITO also accepts the generic wildfire
 calculation payload at `/run-static-aoi-wildfire` and `/calliope/start`.
 
@@ -335,20 +359,18 @@ calculation payload at `/run-static-aoi-wildfire` and `/calliope/start`.
   day's coherent risk map. Static mode uses the submitted year,
   then evaluates that year's hottest eligible FWI day from May 1 through
   October 31.
-- The peak day is the highest AOI-mean FWI, not the day whose combined map
-  shows the largest high-risk area: day ranking follows the fire-weather
-  standard used by EFFIS and the official alert levels, while the map's
-  colours also blend that day's surface-temperature and vegetation layers.
-  A lower-ranked day can therefore look redder - see "Peak-day selection"
-  in CHANGELOG.md for the full rationale; per-day means are disclosed in
-  `daily_mean_fwi`.
-- Canadian FWI is calculated at 12:00 local standard time (12:00 CET or 13:00
+- The peak day is the highest AOI-mean continuous FWI, not the day whose
+  combined map has the largest classified high-risk area. Per-day means are
+  disclosed in `daily_mean_fwi`.
+- The [Canadian FWI System](https://natural-resources.canada.ca/forests-forestry/wildland-fires/canada-fire-weather-index-system)
+  is calculated at 12:00 local standard time (12:00 CET or 13:00
   CEST in Galicia) with assessment-to-assessment precipitation. Weather shown
-  for 16:00 is a separate operational snapshot and is not classified with the
-  standard EFFIS thresholds.
-- Every dynamic timeline frame uses FWI for that date and LST/Sentinel captures
-  on or before that date. LST and TWI gaps are handled by per-pixel weight
-  renormalization and reported in `data_coverage.tif`; core-layer gaps remain
+  for 16:00 is a separate operational snapshot.
+- Every dynamic frame uses FWI for that date and a B4/B8 Sentinel composite on
+  or before that date. Each composite pixel uses both bands from one capture
+  date. Missing NDVI weight is locally renormalized only when configured model
+  coverage remains at least `FFRM_MIN_WEIGHT_COVERAGE` (default 0.75), and the
+  actual coverage is exported as `data_coverage.tif`. Core-layer gaps remain
   nodata.
 - Historical fire is delivered as an informational overlay and is not included
   in the AHP risk score.
@@ -359,12 +381,17 @@ calculation payload at `/run-static-aoi-wildfire` and `/calliope/start`.
   dynamic AHP layer set. A static window must remain within one calendar year.
 - `resolution` is optional (10-1000 metres) and controls the delivered raster
   grid for both computed and precomputed results. Production Sentinel inputs
-  are 20 m; FWI and LST remain approximately kilometre-scale drivers, so a 20 m
+  are 20 m; FWI remains a coarse meteorological driver, so a 20 m
   output grid does not imply 20 m meteorological precision.
 - `parameters.risk_profile` may be `regional` or `finca`. `finca` keeps the
-  old parcel behavior: smaller infrastructure/WUI buffers, native DTM grid
-  rasterization, uploaded station FWI class bounds, and uploaded precomputed
-  NDVI support.
+  old parcel behavior: smaller proximity buffers, native DTM grid
+  rasterization, and uploaded precomputed NDVI/station support.
+- `parameters.fwi_classification` selects one explicit scale:
+  `published_galicia_2020` (default, reproduces the paper's 3/13/23/28 AHP
+  input classes), `galicia_irdi_2026` ([PLADIGA 2026](https://mediorural.xunta.gal/sites/default/files/temas/forestal/pladiga/2026/01_Memoria_Pladiga_2026_Cast_min.pdf)
+  12/24/38/50 operational classes), or `effis_5class` ([EFFIS](https://forest-fire.emergency.copernicus.eu/about-effis/technical-background/fire-danger-forecast)
+  11.2/21.3/38/50 with its two highest
+  classes combined so the AHP still receives values 1-5).
 - `parameters.user_inputs` may include signed/downloadable URLs for `dtm`,
   `ndvi`, and `station_data`. `ndvi` is a precomputed finca NDVI GeoTIFF;
   `station_data` may be Excel/CSV and is normalized before storage. Uploaded
@@ -400,6 +427,7 @@ Example request body:
     "context_buffer_m": 0,
     "calculation_mode": "static",
     "risk_profile": "finca",
+    "fwi_classification": "published_galicia_2020",
     "user_inputs": {
       "dtm": "https://example.invalid/dtm.tif",
       "ndvi": "https://example.invalid/ndvi_finca.tif",

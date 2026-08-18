@@ -11,20 +11,46 @@ from FR.rutinas.setup import (
     save_file,
 )
 from pathlib import Path
+from FR.processing_log import log_array_stats, log_event, logged_step
 
+
+NDVI_RISK_BREAKS = (0.27, 0.40, 0.54, 0.67)
+
+
+def classify_ndvi_risk(values: np.ndarray) -> np.ndarray:
+    """Apply the original expert-defined STORCITO NDVI susceptibility classes."""
+    ndvi_values = np.asarray(values)
+    valid = np.isfinite(ndvi_values)
+    b1, b2, b3, b4 = NDVI_RISK_BREAKS
+    return np.select(
+        [
+            valid & (ndvi_values <= b1),
+            valid & (ndvi_values > b1) & (ndvi_values <= b2),
+            valid & (ndvi_values > b2) & (ndvi_values <= b3),
+            valid & (ndvi_values > b3) & (ndvi_values <= b4),
+            valid & (ndvi_values > b4),
+        ],
+        [5, 4, 3, 2, 1],
+        default=0,
+    ).astype("int32")
+
+@logged_step("NDVI", "calculate-red-nir-index")
 def ndvi(b4:str|Path,b8:str|Path,output_folder:str='data/OUTPUT',export_image:bool=False)->tuple[np.ndarray,np.ndarray]:
     """Calculate NDVI (Normalized Difference Vegetation Index) from Sentinel-2 bands. Args: b4: Path to Band 4 (Red) raster file b8: Path to Band 8 (NIR) raster file output_folder: Output directory for exported files. Defaults to 'OUTPUT' export_image: Whether to save results as GeoTIFF/PNG. Defaults to False Returns: Tuple of (ndvi_array, reclassified_risk_array) where risk is scaled 1-5"""
 
     b4=Path(b4)
     b8=Path(b8)
+    log_event("NDVI", "INPUT", red=b4, nir=b8, output=output_folder)
 
     np.seterr(divide='ignore', invalid='ignore')
 
     with rasterio.open(b4) as src_b3:
-        band4 = src_b3.read(1).astype('float32')
+        band4 = src_b3.read(1, masked=True).filled(np.nan).astype('float32')
         meta_ref = src_b3.meta.copy()
     with rasterio.open(b8) as src_b8:
-        band8 = src_b8.read(1).astype('float32')
+        band8 = src_b8.read(1, masked=True).filled(np.nan).astype('float32')
+    log_array_stats("NDVI", "red-band", band4)
+    log_array_stats("NDVI", "nir-band", band8)
     
     try:
         mini_info=parse_filename(b4.name)
@@ -32,20 +58,23 @@ def ndvi(b4:str|Path,b8:str|Path,output_folder:str='data/OUTPUT',export_image:bo
     except ValueError:
         name_id="estatic"
 
-    ndvi = np.array( (band8 - band4) / (band8 + band4) )
+    valid_bands = (
+        np.isfinite(band4)
+        & np.isfinite(band8)
+        & (band4 > 0)
+        & (band8 > 0)
+    )
+    ndvi = np.full(band4.shape, np.nan, dtype="float32")
+    np.divide(
+        band8 - band4,
+        band8 + band4,
+        out=ndvi,
+        where=valid_bands & ((band8 + band4) != 0),
+    )
     
-    # Data-driven bins (FIRMS fire history): shrub 0.2-0.4 burns most, bare (<=0.2) and lush (>0.8) least.
-    condiciones = [
-        ndvi <= 0.2,
-        (ndvi > 0.2) & (ndvi <= 0.4),
-        (ndvi > 0.4) & (ndvi <= 0.6),
-        (ndvi > 0.6) & (ndvi <= 0.8),
-        ndvi > 0.8
-    ]
-
-    valores = [1, 5, 3, 4, 2]
-
-    reclasificado = np.select(condiciones, valores, default=0).astype('int32')
+    reclasificado = classify_ndvi_risk(ndvi)
+    log_array_stats("NDVI", "continuous", ndvi)
+    log_array_stats("NDVI", "risk-class", reclasificado, nodata=0)
     
     fig1,ax1=default_imshow(ndvi,'NDVI')
     fig2,ax2=default_imshow(reclasificado,'NDVI Risk Map')
@@ -61,14 +90,16 @@ def ndvi(b4:str|Path,b8:str|Path,output_folder:str='data/OUTPUT',export_image:bo
     return ndvi,reclasificado
 
 
+@logged_step("NDVI", "classify-precomputed-index")
 def ndvi_precomputed_finca(
     input_ndvi_tif: str | Path,
     output_folder: str | Path = "data/OUTPUT",
     export_image: bool = False,
     show_plots: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Reclassify a precomputed finca NDVI raster using the old finca bins."""
+    """Reclassify a precomputed NDVI raster using the expert-defined bins."""
     input_ndvi_tif = Path(input_ndvi_tif)
+    log_event("NDVI", "INPUT", precomputed=input_ndvi_tif, output=output_folder)
     with rasterio.open(input_ndvi_tif) as src:
         ndvi_array = src.read(1).astype("float32")
         meta_ref = src.meta.copy()
@@ -77,13 +108,9 @@ def ndvi_precomputed_finca(
     if nodata is not None:
         ndvi_array = np.where(ndvi_array == nodata, np.nan, ndvi_array)
 
-    reclassified = np.zeros_like(ndvi_array, dtype="int32")
-    reclassified[ndvi_array <= 0.27] = 5
-    reclassified[(ndvi_array > 0.27) & (ndvi_array <= 0.40)] = 4
-    reclassified[(ndvi_array > 0.40) & (ndvi_array <= 0.54)] = 3
-    reclassified[(ndvi_array > 0.54) & (ndvi_array <= 0.67)] = 2
-    reclassified[ndvi_array > 0.67] = 1
-    reclassified[np.isnan(ndvi_array)] = 0
+    reclassified = classify_ndvi_risk(ndvi_array)
+    log_array_stats("NDVI", "continuous", ndvi_array, nodata=nodata)
+    log_array_stats("NDVI", "risk-class", reclassified, nodata=0)
 
     fig1, ax1 = default_imshow(ndvi_array, "NDVI")
     fig2, ax2 = default_imshow(
@@ -145,18 +172,7 @@ def ndvi_folder(input_folder:str='data/INPUT',output_folder:str='data/OUTPUT',in
     ndvi =np.array([(info['B08'][i] - info['B04'][i]) / (info['B08'][i] + info['B04'][i]) 
            for i in indices])
 
-    # Data-driven bins (FIRMS fire history): shrub 0.2-0.4 burns most, bare (<=0.2) and lush (>0.8) least.
-    condiciones = [
-        ndvi <= 0.2,
-        (ndvi > 0.2) & (ndvi <= 0.4),
-        (ndvi > 0.4) & (ndvi <= 0.6),
-        (ndvi > 0.6) & (ndvi <= 0.8),
-        ndvi > 0.8
-    ]
-
-    valores = [1, 5, 3, 4, 2]
-
-    reclasificados = np.select(condiciones, valores, default=0).astype('int32')
+    reclasificados = classify_ndvi_risk(ndvi)
 
     if export_image:
         

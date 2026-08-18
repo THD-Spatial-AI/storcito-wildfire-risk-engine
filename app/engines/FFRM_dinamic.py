@@ -21,6 +21,7 @@ import FR.FWI as Fwi
 import FR.LST as Lst
 import FR.cropped as Cropped
 from app.engines.FFRM_estatic_aoi import ORIGINAL_SPECS, _combine_layers
+from FR.processing_log import log_event
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -72,7 +73,7 @@ os.makedirs(output_folder_cropped, exist_ok=True)
 run_mdt = _env_flag("FFRM_RUN_MDT", True)
 run_twi = _env_flag("FFRM_RUN_TWI", False)
 run_ndvi = _env_flag("FFRM_RUN_NDVI", True)
-run_ndmi = _env_flag("FFRM_RUN_NDMI", True)
+run_ndmi = _env_flag("FFRM_RUN_NDMI", False)
 run_fmt = _env_flag("FFRM_RUN_FMT", True)
 run_infra = _env_flag("FFRM_RUN_INFRA", True)
 run_wui = _env_flag("FFRM_RUN_WUI", True)
@@ -85,6 +86,23 @@ generate_fmt = _env_flag("FFRM_GENERATE_FMT", run_fmt)
 generate_infra = _env_flag("FFRM_GENERATE_INFRA", run_infra)
 generate_wui = _env_flag("FFRM_GENERATE_WUI", run_wui)
 
+log_event(
+    "ENGINE",
+    "CONFIG",
+    mode="dynamic",
+    base_dir=base_dir,
+    output_dir=output_base,
+    run_mdt=run_mdt,
+    run_ndvi=run_ndvi,
+    run_fmt=run_fmt,
+    run_roads=run_infra,
+    run_settlement=run_wui,
+    run_fwi=run_fwi,
+    run_twi=run_twi,
+    run_ndmi=run_ndmi,
+    run_lst=run_lst,
+)
+
 
 import time as _time
 _engine_t0 = _time.time()
@@ -95,6 +113,13 @@ def _step(msg: str) -> None:
     now = _time.time()
     print(f"\n[engine +{now - _engine_t0:6.0f}s] ===== {msg} "
           f"(previous step took {now - _engine_last[0]:.0f}s) =====", flush=True)
+    log_event(
+        "ENGINE",
+        "STEP",
+        name=msg,
+        elapsed_total_s=now - _engine_t0,
+        previous_step_s=now - _engine_last[0],
+    )
     _engine_last[0] = now
 
 
@@ -152,7 +177,7 @@ if generate_infra:
     )
 
 if generate_wui:
-    _step("wildland-urban interface risk layer")
+    _step("settlement-distance risk layer (CLC proxy)")
     Wui.wui(
         input_infra,
         input_clc,
@@ -172,6 +197,9 @@ if run_fwi:
         show_plots=False,
         target_date=os.environ.get("FFRM_FWI_TARGET_DATE") or None,
         start_date=os.environ.get("FFRM_FWI_START_DATE") or None,
+        classification_scheme=os.environ.get(
+            "FFRM_FWI_CLASSIFICATION", Fwi.FWI_DEFAULT_CLASSIFICATION
+        ),
     )
 
 if run_lst:

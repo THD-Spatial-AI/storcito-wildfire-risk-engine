@@ -7,9 +7,19 @@ from shapely.ops import unary_union
 from shapely.geometry import Polygon
 import geopandas as gpd
 from pathlib import Path
+from FR.processing_log import log_event, logged_step, processing_step
 
 
+@logged_step("CROP", "crop-generated-layers")
 def cropped(input_folder, output_folder, infra_layer, distance):
+    log_event(
+        "CROP",
+        "CONFIG",
+        input=input_folder,
+        output=output_folder,
+        mask=infra_layer,
+        buffer_m=distance,
+    )
     def create_buffered_mask(input_shapefile, buffer_distance, output_buffered_shapefile):
         """Create a buffered mask around the geometries in a shapefile. :param input_shapefile: Path to the input shapefile. :param buffer_distance: Distance of the buffer (in the units of the shapefile's CRS). :param output_buffered_shapefile: Path where the buffered shapefile will be saved."""
         # Read the shapefile using geopandas
@@ -44,6 +54,9 @@ def cropped(input_folder, output_folder, infra_layer, distance):
             try:
                 out_image, out_transform = mask(src, shapes, crop=True)
             except ValueError as e:
+                log_event(
+                    "CROP", "SKIPPED", input=input_tiff, reason=str(e)
+                )
                 print(f"  Error while cropping (incompatible CRS or without intersection): {e}")
                 print(f"    Skipping file...")
                 return
@@ -80,8 +93,15 @@ def cropped(input_folder, output_folder, infra_layer, distance):
                 output_name = path.stem + "_cropped" + path.suffix.lower()
                 output_path = os.path.join(output_folder, output_name)
 
-                print(f"Cropping: {input_path}")
-                crop_tiff_with_mask(input_path, output_path, buffered_mask_shapefile)
+                with processing_step(
+                    "CROP",
+                    "raster",
+                    input=input_path,
+                    output=output_path,
+                ):
+                    crop_tiff_with_mask(
+                        input_path, output_path, buffered_mask_shapefile
+                    )
 
         print(f"All files have been cropped and saved in the folder: {output_folder}")
 

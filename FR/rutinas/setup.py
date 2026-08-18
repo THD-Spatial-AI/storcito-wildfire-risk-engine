@@ -247,15 +247,27 @@ def save_file(array: npt.NDArray, id_name: str, output_folder: Path|str, meta: d
     meta_i = meta.copy()
     if not meta_intact:
         meta_i.update(driver='GTiff', dtype='float32', count=1)
+    if str(meta_i.get('driver', '')).lower() == 'gtiff':
+        output_dtype = np.dtype(meta_i.get('dtype', 'float32'))
+        meta_i.setdefault('compress', 'deflate')
+        meta_i.setdefault('predictor', 3 if output_dtype.kind == 'f' else 2)
+        meta_i.setdefault('tiled', True)
+        meta_i.setdefault('blockxsize', 256)
+        meta_i.setdefault('blockysize', 256)
+        meta_i.setdefault('bigtiff', 'IF_SAFER')
 
 
     file_name=f'{id_name}_({type_name})' if type_name else f'{id_name}'
 
-    for extension in extensions:
+    extension_list = [extensions] if isinstance(extensions, str) else extensions
+    for extension in extension_list:
         ext_folder = output_folder / f'{extension.upper()}s'
         ext_folder.mkdir(parents=True, exist_ok=True)
 
-    files_2_save = tuple([output_folder / f'{extension.upper()}s' /f'{file_name}.{extension}' for extension in extensions]) if isinstance(extensions,list) else tuple([output_folder / f'{extensions.upper()}s' /f'{file_name}.{extensions}'])
+    files_2_save = tuple(
+        output_folder / f'{extension.upper()}s' / f'{file_name}.{extension}'
+        for extension in extension_list
+    )
     
     for file in files_2_save:
 

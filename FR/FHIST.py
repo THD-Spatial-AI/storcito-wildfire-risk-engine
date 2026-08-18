@@ -17,14 +17,22 @@ from pathlib import Path
 from rasterio.warp import reproject, Resampling
 from rasterio.mask import mask
 from rasterio.io import MemoryFile
+from FR.processing_log import log_array_stats, log_event, logged_step
 
 BUFFER_SIZE=660
 BURNED_THRESHOLD=0.27
 
+@logged_step("FIRE_HISTORY", "derive-dnbr-overlay")
 def fire_history(input_folder:str|Path=Path('data/INPUT'), output_folder:str|Path = Path('data/OUTPUT'),export_image: bool=False,show_plots:bool=False) -> tuple[np.ndarray, np.ndarray]:
     """Analyze historical fire events using dNBR (differenced Normalized Burn Ratio). Compares pre-fire and post-fire Sentinel-2 imagery to detect burned areas, accumulates changes across multiple fire events, and reclassifies into risk levels. Args: input_folder: Directory containing pre/post fire Sentinel-2 TIFF files output_folder: Output directory for results. Defaults to 'OUTPUT' export_image: Whether to save results as GeoTIFF/PNG. Defaults to False show_plots: Whether to display matplotlib plots. Defaults to False Returns: Tuple of (cumulative_burn_sum, reclassified_risk_array) with risk scaled 1-5 Raises: ValueError: If historical data cannot be calculated or metadata is missing"""
     input_folder = Path(input_folder)
     output_folder = Path(output_folder)
+    log_event(
+        "FIRE_HISTORY",
+        "INPUT",
+        folder=input_folder,
+        output=output_folder,
+    )
 
     reference_folder = input_folder / 'Historico_incendios'
     sort_time_comparative(input_folder)
@@ -73,6 +81,13 @@ def fire_history(input_folder:str|Path=Path('data/INPUT'), output_folder:str|Pat
             "Fire-history scenes require one PRE and POST B8A/B12 pair per year; "
             f"incomplete years: {incomplete or 'all'}."
         )
+    log_event(
+        "FIRE_HISTORY",
+        "SCENES",
+        years=",".join(str(year) for year in complete_years),
+        pre_files=len(prev_files),
+        post_files=len(post_files),
+    )
 
     def _calculate_nbr(nir: np.ndarray, swir: np.ndarray) -> np.ndarray:
         """Calculate Normalized Burn Ratio (NBR) from NIR and SWIR bands. Args: nir: Near-infrared band array (B8A) swir: Short-wave infrared band array (B12) Returns: NBR array with values in range [-1, 1]"""
@@ -159,6 +174,9 @@ def fire_history(input_folder:str|Path=Path('data/INPUT'), output_folder:str|Pat
         post_b12 = post_by_year[year]["B12"]
         
         out_image, out_transform, meta = calcular_dnbr(pre_b8, pre_b12, post_b8, post_b12)
+        log_array_stats(
+            "FIRE_HISTORY", f"burned-mask-{year}", out_image[0]
+        )
         
         if suma_total is None:
             # Primera imagen - usar como referencia
@@ -203,6 +221,9 @@ def fire_history(input_folder:str|Path=Path('data/INPUT'), output_folder:str|Pat
         bins = [0, interval, 2*interval, 3*interval, 4*interval]
         reclas = np.digitize(suma_total, bins=bins).astype('int32')
 
+    log_array_stats("FIRE_HISTORY", "cumulative-burn-count", suma_total)
+    log_array_stats("FIRE_HISTORY", "overlay-risk-class", reclas, nodata=0)
+
 
     time_range = f"{complete_years[0]}-{complete_years[-1]}"
 
@@ -243,4 +264,3 @@ if __name__ == "__main__":
     results = pstats.Stats(profile)
     results.sort_stats(pstats.SortKey.TIME)
     results.print_stats(20)
-

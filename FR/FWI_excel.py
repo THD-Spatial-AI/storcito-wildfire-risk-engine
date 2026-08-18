@@ -4,18 +4,22 @@ import numpy as np
 import pandas as pd
 import rasterio
 import matplotlib.pyplot as plt
+from FR.processing_log import log_event, logged_step
 
 import FR.rutinas.FWI_Equations as Fwi
 from FR.FWI import (
     FWI_CLASS_BOUNDS,
+    FWI_DEFAULT_CLASSIFICATION,
     FWI_RUNUP_DAYS,
     FWI_STANDARD_TIMEZONE,
     fwi_init_codes,
     fwi_standard_clock_hour,
+    resolve_fwi_classification,
     rh_to_percent,
 )
 
-FINCA_FWI_CLASS_BOUNDS = (3.0, 13.0, 23.0, 28.0)
+# Backward-compatible name for the bounds used by the published model.
+FINCA_FWI_CLASS_BOUNDS = FWI_CLASS_BOUNDS
 
 
 def convert_station_file_to_csv(input_path, output_csv):
@@ -57,15 +61,22 @@ def _to_numeric_series(series):
     return pd.to_numeric(s, errors="coerce")
 
 
-def _classify_fwi(fwi_value, class_bounds=FWI_CLASS_BOUNDS):
+def _classify_fwi(
+    fwi_value,
+    class_bounds=FWI_CLASS_BOUNDS,
+    *,
+    upper_inclusive: bool = True,
+):
     if pd.isna(fwi_value):
         return np.nan
     for cls, bound in enumerate(class_bounds, start=1):
-        if fwi_value < bound:
+        matches = fwi_value <= bound if upper_inclusive else fwi_value < bound
+        if matches:
             return cls
     return 5
 
 
+@logged_step("FWI_STATION", "calculate-canadian-fwi")
 def f_w_index_excel(
     input_excel,
     reference_raster,
@@ -77,11 +88,36 @@ def f_w_index_excel(
     show_plots=True,
     save=True,
     class_bounds=None,
+    classification_scheme: str = FWI_DEFAULT_CLASSIFICATION,
 ):
-    """FWI from a weather-station Excel/CSV file. Args: input_excel: Path to the station Excel/CSV file. reference_raster: Raster used as spatial reference (extent/CRS/profile). output_fwi_raster: Output path for the continuous FWI .tif. output_folder: Base output directory. CSV/PNG go to ``<output_folder>/FWI`` and rasters to ``<output_folder>/re``. Defaults to 'OUTPUT'. target_hour: Optional explicit local clock hour. By default, uses noon local standard time (12:00 CET / 13:00 CEST in Europe/Madrid). start_date: Optional first scoring date. target_date: Optional last scoring date. show_plots: Whether to display the FWI class map. Defaults to True. save: Whether to write CSV/TIF/PNG outputs. Defaults to True. class_bounds: Optional four upper bounds for classes 1-4. Finca mode passes the original finca bounds (3, 13, 23, 28)."""
+    """Calculate FWI from a weather-station Excel/CSV file.
 
-    print("FWI - calculation from the weather-station Excel file...")
-    class_bounds = tuple(class_bounds or FWI_CLASS_BOUNDS)
+    The default classification reproduces the published Galicia STORCITO
+    model. ``classification_scheme`` can instead select the current Galicia
+    IRDI or the documented five-class EFFIS compression. ``class_bounds`` is
+    retained only for explicit custom integrations.
+    """
+
+    classification_key, classification = resolve_fwi_classification(
+        classification_scheme
+    )
+    if class_bounds is None:
+        class_bounds = tuple(classification["bounds"])
+        upper_inclusive = bool(classification["upper_inclusive"])
+    else:
+        class_bounds = tuple(class_bounds)
+        upper_inclusive = True
+        classification_key = "custom"
+    log_event(
+        "FWI_STATION",
+        "INPUT",
+        file=input_excel,
+        reference=reference_raster,
+        score_start=start_date,
+        score_end=target_date,
+        classification=classification_key,
+        class_bounds=",".join(str(value) for value in class_bounds),
+    )
     if isinstance(start_date, str):
         start_date = date.fromisoformat(start_date)
     if isinstance(target_date, str):
@@ -216,6 +252,14 @@ def f_w_index_excel(
 
     if daily.empty:
         raise ValueError("Not enough valid data to compute the daily FWI.")
+    log_event(
+        "FWI_STATION",
+        "OBSERVATIONS",
+        rows=len(data),
+        daily_observations=len(daily),
+        first_date=daily.iloc[0]["date"],
+        last_date=daily.iloc[-1]["date"],
+    )
     daily["rh"] = rh_to_percent(daily["rh"].to_numpy(dtype=float))
     physical = (
         ("temperature", daily["temp_c"], -60.0, 60.0),
@@ -278,7 +322,11 @@ def f_w_index_excel(
         isi = float(np.asarray(isi_arr).squeeze())
         bui = float(np.asarray(bui_arr).squeeze())
         fwi_val = float(np.asarray(fwi_arr).squeeze())
-        fwi_class = _classify_fwi(fwi_val, class_bounds)
+        fwi_class = _classify_fwi(
+            fwi_val,
+            class_bounds,
+            upper_inclusive=upper_inclusive,
+        )
 
         ffmc_list.append(f)
         dmc_list.append(p)
@@ -287,6 +335,21 @@ def f_w_index_excel(
         bui_list.append(bui)
         fwi_list.append(fwi_val)
         class_list.append(fwi_class)
+
+        log_event(
+            "FWI_STATION",
+            "DAY",
+            date=row["date"],
+            temp_c=temp,
+            rh_pct=rh,
+            wind_kmh=wind,
+            rain_mm=rain,
+            ffmc=f,
+            dmc=p,
+            dc=d,
+            fwi=fwi_val,
+            risk_class=fwi_class,
+        )
 
         f0, p0, d0 = f, p, d
 
@@ -319,18 +382,30 @@ def f_w_index_excel(
         scoring = scoring[scoring["date"] <= target_date]
     if scoring.empty:
         raise ValueError("Station data has no valid FWI row in the requested date range.")
-    last_row = scoring.loc[scoring["FWI"].idxmax()]
-    last_fwi = float(last_row["FWI"])
-    last_class = int(last_row["FWI_class"])
-    last_date = str(last_row["date"])
+    peak_row = scoring.loc[scoring["FWI"].idxmax()]
+    peak_fwi = float(peak_row["FWI"])
+    peak_class = int(peak_row["FWI_class"])
+    peak_date = str(peak_row["date"])
+    log_event(
+        "FWI_STATION",
+        "PEAK",
+        date=peak_date,
+        fwi=peak_fwi,
+        risk_class=peak_class,
+        scoring_days=len(scoring),
+    )
 
     result = {
         "daily_df": daily,
-        "fwi_value": last_fwi,
-        "fwi_class": last_class,
-        "last_date": last_date,
+        "fwi_value": peak_fwi,
+        "fwi_class": peak_class,
+        "peak_date": peak_date,
+        "last_date": peak_date,
         "standard_observation": target_hour is None,
         "assessment_timezone": FWI_STANDARD_TIMEZONE,
+        "classification_scheme": classification_key,
+        "class_bounds": list(class_bounds),
+        "class_upper_bounds_inclusive": upper_inclusive,
     }
     if reference_raster is None:
         if save:
@@ -342,7 +417,7 @@ def f_w_index_excel(
         profile = ref.profile
         profile.update(dtype="float32", count=1)
 
-        fwi_array = np.full((ref.height, ref.width), last_fwi, dtype="float32")
+        fwi_array = np.full((ref.height, ref.width), peak_fwi, dtype="float32")
 
         # Continuous FWI.tif in the 're' folder
         if save:
@@ -357,7 +432,7 @@ def f_w_index_excel(
         risk_tif = os.path.join(rasters_dir, f"{base}_risk_map.tif")
 
         class_array = np.full(
-            (ref.height, ref.width), last_class, dtype="int32"
+            (ref.height, ref.width), peak_class, dtype="int32"
         )
 
         if save:
@@ -386,7 +461,13 @@ def f_w_index_excel(
 
             plt.close()
 
-    print("FWI (from Excel) completed.")
+    log_event(
+        "FWI_STATION",
+        "OUTPUT",
+        continuous_raster=output_fwi_raster,
+        risk_raster=risk_tif,
+        classification=classification_key,
+    )
     return result
 
 

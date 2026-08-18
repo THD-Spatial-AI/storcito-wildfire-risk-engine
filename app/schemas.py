@@ -14,6 +14,10 @@ class StaticAOIRequest(BaseModel):
     buffer_m: float = Field(default=3000, gt=0, le=100_000)
     context_buffer_m: float = Field(default=3000, ge=0, le=100_000)
     risk_profile: str = Field(default="regional", pattern="^(regional|finca)$")
+    fwi_classification: str = Field(
+        default="published_galicia_2020",
+        pattern="^(published_galicia_2020|galicia_irdi_2026|effis_5class)$",
+    )
 
 
 class WildfireCalculationRequest(BaseModel):

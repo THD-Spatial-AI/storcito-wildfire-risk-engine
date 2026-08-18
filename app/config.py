@@ -17,7 +17,7 @@ MODEL_TZ = ZoneInfo("Europe/Madrid")
 # Backward-compatible name for callers imported before the Galicia timezone was made explicit. Its value is intentionally Europe/Madrid.
 BERLIN_TZ = MODEL_TZ
 
-MODEL_VERSION = os.environ.get("STORCITO_MODEL_VERSION", "2026-07-12.1").strip()
+MODEL_VERSION = os.environ.get("STORCITO_MODEL_VERSION", "2026-08-18.1").strip()
 
 # Engine registry: script, result file and run-flag overrides per engine.
 ENGINE_SCRIPTS = {
@@ -30,8 +30,7 @@ ENGINE_SCRIPTS = {
     "dynamic": {
         "script": ENGINE_DIR / "FFRM_dinamic.py",
         "result": "forest_fire_risk_map_dinamico.tif",
-        # TWI / LST are now reconstructed from the `twi` / `lst` tables.
-        "run_flags": {"FFRM_RUN_TWI": "1", "FFRM_RUN_LST": "1"},
+        "run_flags": {},
     },
 }
 

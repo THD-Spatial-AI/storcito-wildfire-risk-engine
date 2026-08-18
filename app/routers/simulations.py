@@ -49,6 +49,7 @@ def run_static_aoi_request(payload: StaticAOIRequest, request: Request):
             buffer_m=payload.buffer_m,
             context_buffer_m=payload.context_buffer_m,
             risk_profile=payload.risk_profile,
+            fwi_classification=payload.fwi_classification,
         )
         validate_risk_outputs(outputs)
         result: dict[str, Any] = {
@@ -72,6 +73,7 @@ def run_static_aoi_request(payload: StaticAOIRequest, request: Request):
                 "longitude": payload.longitude,
                 "latitude": payload.latitude,
                 "risk_profile": payload.risk_profile,
+                "fwi_classification": payload.fwi_classification,
             },
         )
         if db_info is not None:

@@ -2,6 +2,7 @@ import os
 import rasterio
 import numpy as np
 import matplotlib.pyplot as plt
+from FR.processing_log import log_array_stats, log_event, logged_step
 
 
 def _env_breaks(name):
@@ -30,6 +31,7 @@ def _coerce_breaks(value):
     return tuple(float(part) for part in parts)
 
 
+@logged_step("TWI", "classify-topographic-wetness")
 def Twi(input_twi, output_twi=None, output_twi_risk=None, show_plots=True):
     print('Running TWI layer...')
 
@@ -69,6 +71,13 @@ def Twi(input_twi, output_twi=None, output_twi_risk=None, show_plots=True):
     print('Calculating TWI percentiles and risk...')
     fixed = _env_breaks("FFRM_TWI_BREAKS")
     p20, p40, p60, p80 = fixed if fixed else np.percentile(twi[valid], [20, 40, 60, 80])
+    log_event(
+        "TWI",
+        "BREAKS",
+        input=input_twi,
+        values=",".join(f"{value:.4f}" for value in (p20, p40, p60, p80)),
+        source="configured" if fixed else "local-percentiles",
+    )
 
     # Low TWI is dry terrain (higher fire susceptibility); high TWI is wetter.
     reclasificado = np.zeros(twi.shape, dtype=np.uint8)
@@ -77,6 +86,8 @@ def Twi(input_twi, output_twi=None, output_twi_risk=None, show_plots=True):
     reclasificado[(twi > p40) & (twi <= p60)] = 3
     reclasificado[(twi > p60) & (twi <= p80)] = 2
     reclasificado[(twi > p80) & valid] = 1
+    log_array_stats("TWI", "continuous", twi)
+    log_array_stats("TWI", "risk-class", reclasificado, nodata=0)
 
     if save_outputs:
         print('Saving TIFF files...')
@@ -138,6 +149,7 @@ def Twi(input_twi, output_twi=None, output_twi_risk=None, show_plots=True):
     print('TWI Layer completed')
 
 
+@logged_step("TWI", "classify-risk-raster")
 def twi_risk(input_twi, output_risk, *, breaks=None):
     """Non-interactive TWI risk layer (percentile classes 1-5, as the original)."""
     with rasterio.open(input_twi) as src:
@@ -154,6 +166,15 @@ def twi_risk(input_twi, output_risk, *, breaks=None):
     r[(twi > p40) & (twi <= p60)] = 3
     r[(twi > p60) & (twi <= p80)] = 2
     r[(twi > p80) & valid] = 1
+    log_event(
+        "TWI",
+        "BREAKS",
+        input=input_twi,
+        values=",".join(f"{value:.4f}" for value in (p20, p40, p60, p80)),
+        source="configured" if fixed else "local-percentiles",
+    )
+    log_array_stats("TWI", "continuous", twi)
+    log_array_stats("TWI", "risk-class", r, nodata=0)
     meta.update(driver="GTiff", dtype="int32", count=1, nodata=0)
     os.makedirs(os.path.dirname(str(output_risk)), exist_ok=True)
     with rasterio.open(output_risk, "w", **meta) as dst:
