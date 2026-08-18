@@ -53,7 +53,7 @@ _CALLBACK_EXCLUDED_DIRS = frozenset(
     {"base", "daily_work", "db_input", "diagnostics", "inputs"}
 )
 _CALLBACK_EXCLUDED_FILES = frozenset({"layers/reference_mdt.tif"})
-_DEFAULT_CALLBACK_MAX_BYTES = 490 * 1024 * 1024
+_DEFAULT_CALLBACK_MAX_BYTES = 2 * 1024 * 1024 * 1024
 
 
 def public_base_url(request: Request | None) -> str:
@@ -206,7 +206,7 @@ def post_result_callback(callback_url: str, zip_path: Path, session_id: str | No
         zip_path.name,
         archive_bytes,
     )
-    timeout = httpx.Timeout(connect=15.0, read=600.0, write=600.0, pool=15.0)
+    timeout = httpx.Timeout(connect=30.0, read=3600.0, write=3600.0, pool=30.0)
     with zip_path.open("rb") as fh:
         files = {"file": (zip_path.name, fh, "application/zip")}
         data: dict[str, str] = {}
