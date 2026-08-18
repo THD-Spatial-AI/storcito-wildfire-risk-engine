@@ -49,6 +49,13 @@ from app.services.user_inputs import (
 )
 
 
+_CALLBACK_EXCLUDED_DIRS = frozenset(
+    {"base", "daily_work", "db_input", "diagnostics", "inputs"}
+)
+_CALLBACK_EXCLUDED_FILES = frozenset({"layers/reference_mdt.tif"})
+_DEFAULT_CALLBACK_MAX_BYTES = 490 * 1024 * 1024
+
+
 def public_base_url(request: Request | None) -> str:
     env_url = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
     if env_url:
@@ -91,16 +98,74 @@ def augment_with_urls(
 
 
 def zip_job_outputs(job_dir: Path) -> Path:
-    """Bundle all final result files into a single zip the wildfire callback can ingest."""
+    """Bundle deliverable result files into a callback archive."""
     zip_path = job_dir / f"{job_dir.name}.zip"
     if zip_path.exists():
         zip_path.unlink()
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+    file_count = 0
+    source_bytes = 0
+    with zipfile.ZipFile(
+        zip_path,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=6,
+        allowZip64=True,
+    ) as zf:
         for file in sorted(job_dir.rglob("*")):
             if not file.is_file() or file == zip_path:
                 continue
-            zf.write(file, file.relative_to(job_dir).as_posix())
+            relative = file.relative_to(job_dir)
+            archive_name = relative.as_posix()
+            if relative.parts[0] in _CALLBACK_EXCLUDED_DIRS:
+                continue
+            if archive_name in _CALLBACK_EXCLUDED_FILES:
+                continue
+            zf.write(file, archive_name)
+            file_count += 1
+            source_bytes += file.stat().st_size
+    if file_count == 0:
+        zip_path.unlink(missing_ok=True)
+        raise RuntimeError(f"No deliverable result files found in {job_dir}")
+    logger.info(
+        "Callback archive ready job=%s files=%d source_bytes=%d archive_bytes=%d",
+        job_dir.name,
+        file_count,
+        source_bytes,
+        zip_path.stat().st_size,
+    )
     return zip_path
+
+
+def _callback_max_bytes() -> int:
+    raw = os.getenv(
+        "STORCITO_CALLBACK_MAX_BYTES", str(_DEFAULT_CALLBACK_MAX_BYTES)
+    ).strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"STORCITO_CALLBACK_MAX_BYTES must be an integer, got {raw!r}"
+        ) from exc
+    if value <= 0:
+        raise ValueError("STORCITO_CALLBACK_MAX_BYTES must be greater than zero")
+    return value
+
+
+def _callback_error_detail(exc: Exception) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"result callback returned HTTP {exc.response.status_code}"
+    if isinstance(exc, httpx.RequestError):
+        return f"result callback request failed ({type(exc).__name__})"
+    return str(exc)
+
+
+def _raise_callback_delivery_error(job_dir: Path, exc: Exception) -> None:
+    detail = _callback_error_detail(exc)
+    logger.error("Result callback failed job=%s error=%s", job_dir.name, detail)
+    raise HTTPException(
+        status_code=502,
+        detail=f"Calculation completed but result delivery failed: {detail}",
+    ) from exc
 
 
 def _prune_delivered_job_dir(job_dir: Path, zip_path: Path) -> None:
@@ -124,6 +189,23 @@ def _prune_delivered_job_dir(job_dir: Path, zip_path: Path) -> None:
 
 def post_result_callback(callback_url: str, zip_path: Path, session_id: str | None) -> dict[str, Any]:
     """POST the result zip to the wildfire callback (multipart/form-data, field 'file')."""
+    archive_bytes = zip_path.stat().st_size
+    max_bytes = _callback_max_bytes()
+    if archive_bytes > max_bytes:
+        message = (
+            f"result archive is {archive_bytes} bytes; callback limit is "
+            f"{max_bytes} bytes"
+        )
+        (zip_path.parent / "callback.log").write_text(
+            f"status=not_sent\nbody={message}\n"
+        )
+        raise RuntimeError(message)
+
+    logger.info(
+        "Sending result callback archive=%s bytes=%d",
+        zip_path.name,
+        archive_bytes,
+    )
     timeout = httpx.Timeout(connect=15.0, read=600.0, write=600.0, pool=15.0)
     with zip_path.open("rb") as fh:
         files = {"file": (zip_path.name, fh, "application/zip")}
@@ -141,6 +223,11 @@ def post_result_callback(callback_url: str, zip_path: Path, session_id: str | No
         f"status={info['status_code']}\nbody={info['body']}\n"
     )
     response.raise_for_status()
+    logger.info(
+        "Result callback accepted archive=%s status=%d",
+        zip_path.name,
+        response.status_code,
+    )
     return info
 
 
@@ -458,7 +545,6 @@ def _finish_wildfire_response(outputs, payload, request, calculation_mode,
         )
 
     callback_info: dict[str, Any] | None = None
-    callback_error: str | None = None
     if payload.callback_url:
         job_dir_str = outputs.get("job_dir")
         if job_dir_str:
@@ -477,7 +563,7 @@ def _finish_wildfire_response(outputs, payload, request, calculation_mode,
                 )
                 _prune_delivered_job_dir(Path(job_dir_str), zip_path)
             except Exception as exc:
-                callback_error = str(exc)
+                _raise_callback_delivery_error(Path(job_dir_str), exc)
 
     response: dict[str, Any] = {
         "status": "success",
@@ -491,8 +577,6 @@ def _finish_wildfire_response(outputs, payload, request, calculation_mode,
     }
     if callback_info is not None:
         response["callback"] = callback_info
-    if callback_error is not None:
-        response["callback_error"] = callback_error
     if db_info is not None:
         response["db_store"] = db_info
     if db_error is not None:
@@ -922,7 +1006,7 @@ def run_engine_job(
             response["callback"] = post_result_callback(
                 payload.callback_url, zip_path, payload.session_id
             )
-        except Exception as exc:  # noqa: BLE001 - report callback failure, keep result
-            response["callback_error"] = str(exc)
+        except Exception as exc:
+            _raise_callback_delivery_error(output_dir, exc)
 
     return response
