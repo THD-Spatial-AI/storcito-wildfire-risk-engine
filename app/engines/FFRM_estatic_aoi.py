@@ -27,6 +27,7 @@ import FR.NDMI as Ndmi
 import FR.TWI as Twi
 import FR.LST as Lst
 import FR.infra as Infra
+import FR.landcover_mask as LandcoverMask
 from FR.ahp import calculate_weights, consistency_ratio, normalize_matrix
 from FR.aoi import (
     DEFAULT_PROJECTED_CRS,
@@ -241,6 +242,7 @@ def _combine_layers(
     spec: dict,
     active_topics: set[str],
     export_only: dict[str, Path] | None = None,
+    domain_mask_path: Path | None = None,
 ) -> dict[str, Path]:
     """Combine layers while recording and renormalizing optional data gaps."""
     active_topics = set(active_topics) & set(spec["top_order"])
@@ -259,6 +261,31 @@ def _combine_layers(
         ref_data = ref.read(1, out_dtype="float32")
         master_mask = ref_data > 0
     del ref_data
+
+    analysis_domain_mask = master_mask.copy()
+    domain_excluded_count = 0
+    if domain_mask_path is not None:
+        if not Path(domain_mask_path).is_file():
+            raise FileNotFoundError(
+                f"Wildfire analysis-domain mask is unavailable: {domain_mask_path}"
+            )
+        domain_data = _align_raster_with_resampling(
+            Path(domain_mask_path), reference_path
+        )
+        analysis_domain_mask &= np.isfinite(domain_data) & (domain_data > 0)
+        domain_excluded_count = int(
+            np.count_nonzero(master_mask & ~analysis_domain_mask)
+        )
+        log_event(
+            "AHP",
+            "DOMAIN_MASK",
+            source=domain_mask_path,
+            terrain_pixels=int(np.count_nonzero(master_mask)),
+            excluded_pixels=domain_excluded_count,
+            eligible_pixels=int(np.count_nonzero(analysis_domain_mask)),
+            policy="post-AHP configured non-fuel exclusion",
+        )
+        del domain_data
 
     def _load(key: str, path: Path | None) -> tuple[np.ndarray, np.ndarray]:
         if path is None or not Path(path).is_file():
@@ -372,9 +399,10 @@ def _combine_layers(
         fr_map += topic_arrays[topic] * np.float32(weight)
         coverage_map += topic_coverage[topic] * np.float32(weight)
         final_valid_mask &= topic_masks[topic]
+    final_valid_mask &= analysis_domain_mask
     final_valid_mask &= coverage_map >= np.float32(minimum_weight_coverage)
     fr_map[~final_valid_mask] = 0
-    coverage_map[~master_mask] = 0
+    coverage_map[~analysis_domain_mask] = 0
     del topic_arrays, topic_masks, topic_coverage
 
     continuous_map_path = _write_array(final_map_path.with_name("mapa_final.tif"), fr_map, reference_path, "float32")
@@ -438,6 +466,17 @@ def _combine_layers(
                     "model-weight coverage threshold"
                 ),
                 "minimum_configured_weight_coverage": minimum_weight_coverage,
+                "analysis_domain_mask": (
+                    str(domain_mask_path) if domain_mask_path is not None else None
+                ),
+                "analysis_domain_policy": (
+                    "Post-AHP exclusion of configured CORINE non-fuel surfaces; "
+                    "road and settlement predictors remain active on adjacent "
+                    "eligible vegetation."
+                    if domain_mask_path is not None
+                    else None
+                ),
+                "analysis_domain_excluded_pixels": domain_excluded_count,
                 "valid_output_fraction": (valid_count / master_count) if master_count else 0.0,
                 "mean_configured_weight_coverage": (
                     float(np.mean(valid_coverage)) if valid_coverage.size else 0.0
@@ -447,7 +486,7 @@ def _combine_layers(
         )
     )
 
-    return {
+    results = {
         "continuous_map": continuous_map_path,
         "data_coverage": coverage_map_path,
         "final_map": final_map_path,
@@ -455,6 +494,9 @@ def _combine_layers(
         "ahp_metadata": metadata_path,
         **{f"layer_{key}": path for key, path in exported_layers.items()},
     }
+    if domain_mask_path is not None:
+        results["analysis_domain_mask"] = Path(domain_mask_path)
+    return results
 
 
 OPTIONAL_LAYER_TO_TOP_LEVEL = {
@@ -787,6 +829,13 @@ def run_static_aoi_for_geometry(
             layers_dir / "reference_mdt.tif",
             output_aoi,
         )
+        clcplus_source = input_dir / "LANDCOVER" / "CLCPLUS_2023.tif"
+        analysis_domain_mask = LandcoverMask.build_wildfire_domain_mask(
+            input_dir / "IUF" / "CLC_galicia.shp",
+            output_reference,
+            layers_dir / "wildfire_analysis_mask.tif",
+            clcplus_path=clcplus_source if clcplus_source.is_file() else None,
+        )
 
         fwi_result: Fwi.FWIRunResult | None = None
         station_result: dict | None = None
@@ -936,6 +985,7 @@ def run_static_aoi_for_geometry(
                 spec=spec,
                 active_topics=set(active_top_levels),
                 export_only=export_only if is_selected else None,
+                domain_mask_path=analysis_domain_mask,
             )
 
             if mode == "dynamic":
@@ -1103,6 +1153,34 @@ def run_static_aoi_for_geometry(
                 "Experimental wildfire susceptibility/risk index; AHP matrix consistency "
                 "is not evidence of out-of-sample predictive accuracy."
             ),
+            "wildfire_analysis_domain": {
+                "mask": str(analysis_domain_mask),
+                "primary_source": (
+                    "CLC+ Backbone 2023 raster (10 m)"
+                    if clcplus_source.is_file()
+                    else None
+                ),
+                "primary_excluded_codes": sorted(
+                    LandcoverMask.NON_BURNABLE_CLCPLUS_CODES
+                ),
+                "fallback_source": "CORINE Land Cover 2018 Code_18",
+                "fallback_excluded_codes": sorted(
+                    LandcoverMask.non_burnable_clc_codes()
+                ),
+                "application": "post-AHP mask on continuous and classified maps",
+                "interpretation": (
+                    "CLC+ pixels identify sealed/non-fuel surfaces directly. "
+                    "The CLC2018 fallback excludes only conservative, dominant "
+                    "non-fuel polygons; road and settlement proximity still "
+                    "influence eligible vegetation."
+                ),
+                "limitation": (
+                    "Where the 10 m CLC+ raster is unavailable, CLC2018 is a "
+                    "1:100,000, 25 ha minimum-mapping-unit fallback. It cannot "
+                    "identify individual roofs or roads; mixed classes including "
+                    "112 and 122 deliberately remain eligible."
+                ),
+            },
         }
         if request_metadata:
             metadata.update(request_metadata)

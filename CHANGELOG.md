@@ -38,6 +38,16 @@ Notable changes of this engine relative to the original UVIGO codebase
   of uncompressed raster files on the receiving backend.
 - Model version `2026-08-18.1` invalidates older precomputed maps and static
   caches. Recompute them before serving the new profile.
+- Model version `2026-08-18.2` adds a post-AHP wildfire-domain mask. It uses
+  CLC+ Backbone 2023 sealed/water classes at the analysis resolution and falls
+  back to explicit CLC2018 non-burnable classes, while retaining anthropogenic
+  influence on adjacent vegetation. Version `.1` precomputations must be
+  regenerated before serving `.2`.
+- Model version `2026-08-18.3` makes the coarse CLC2018 fallback conservative:
+  mixed urban, road, airport, dump, construction, and dune polygons remain
+  eligible. This follows the CLC nomenclature and the Galicia study's use of
+  individual cadastral building and road clipping rather than whole mixed
+  land-cover polygons. Version `.2` precomputations must be regenerated.
 
 ## 2026-07 — Source-data pipeline and API restructuring
 

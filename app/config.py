@@ -17,7 +17,7 @@ MODEL_TZ = ZoneInfo("Europe/Madrid")
 # Backward-compatible name for callers imported before the Galicia timezone was made explicit. Its value is intentionally Europe/Madrid.
 BERLIN_TZ = MODEL_TZ
 
-MODEL_VERSION = os.environ.get("STORCITO_MODEL_VERSION", "2026-08-18.1").strip()
+MODEL_VERSION = os.environ.get("STORCITO_MODEL_VERSION", "2026-08-18.3").strip()
 
 # Engine registry: script, result file and run-flag overrides per engine.
 ENGINE_SCRIPTS = {

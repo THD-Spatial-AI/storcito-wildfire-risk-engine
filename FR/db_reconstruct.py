@@ -25,6 +25,18 @@ def _pg_connect():
     )
 
 
+def _relation_exists(table: str, *, schema: str = "public") -> bool:
+    """Return whether an optional Postgres relation is available."""
+
+    connection = _pg_connect()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT to_regclass(%s)", (f"{schema}.{table}",))
+            return cursor.fetchone()[0] is not None
+    finally:
+        connection.close()
+
+
 # --------------------------------------------------------------------------- Connection strings (built from the PG* environment variables) ---------------------------------------------------------------------------
 def _pg_params() -> dict[str, str]:
     return {
@@ -95,8 +107,13 @@ def export_raster_table(
     clip_geom_crs: str = "EPSG:4326",
     target_srs: str | None = None,
     resampling: str = "near",
+    target_resolution_m: float | None = None,
 ) -> Path:
-    """Export a PostGIS raster table to a GeoTIFF, optionally clipped/reprojected. When ``clip_geom`` is given it is used as a gdalwarp cutline (GDAL reprojects it to the raster CRS), so the geometry may be supplied in any CRS (default WGS84). When ``target_srs`` is given the output is reprojected to that CRS; otherwise it keeps the source raster's CRS."""
+    """Export a PostGIS raster table to a clipped/reprojected GeoTIFF.
+
+    ``target_resolution_m`` is applied in the target CRS and is intended only
+    for projected metric outputs.
+    """
     dest_tif = Path(dest_tif)
     dest_tif.parent.mkdir(parents=True, exist_ok=True)
     src = _gdal_raster_dsn(table)
@@ -109,6 +126,8 @@ def export_raster_table(
         ]
         if target_srs is not None:
             cmd += ["-t_srs", target_srs]
+        if target_resolution_m is not None:
+            cmd += ["-tr", str(target_resolution_m), str(target_resolution_m)]
         cmd += [src, str(dest_tif)]
         _run(cmd)
         return dest_tif
@@ -123,6 +142,8 @@ def export_raster_table(
         ]
         if target_srs is not None:
             cmd += ["-t_srs", target_srs]
+        if target_resolution_m is not None:
+            cmd += ["-tr", str(target_resolution_m), str(target_resolution_m)]
         cmd += [src, str(dest_tif)]
         _run(cmd)
     finally:
@@ -1178,6 +1199,7 @@ def reconstruct_inputs(
     include_history: bool = True,
     include_terrain: bool = True,
     include_satellite: bool = True,
+    include_landcover: bool = True,
     sentinel_bands: Iterable[str] | None = None,
     include_lst: bool | None = None,
     clip_geom: BaseGeometry | None = None,
@@ -1200,6 +1222,7 @@ def reconstruct_inputs(
         include_history=include_history,
         include_terrain=include_terrain,
         include_satellite=include_satellite,
+        include_landcover=include_landcover,
         include_lst=include_lst,
         destination=dest_input_dir,
     )
@@ -1229,6 +1252,18 @@ def reconstruct_inputs(
         for item in _ENGINE_PLANS[engine]
         if item[1] not in temporal_tables and (include_terrain or item[1] != "twi")
     ]
+    if include_landcover:
+        if _relation_exists("clcplus_2023"):
+            _plan.append(
+                (_RASTER, "clcplus_2023", "LANDCOVER/CLCPLUS_2023.tif")
+            )
+        else:
+            log_event(
+                "RECONSTRUCT",
+                "OPTIONAL_UNAVAILABLE",
+                layer="clcplus_2023",
+                fallback="CORINE CLC2018 vector",
+            )
     for _n, (kind, table, rel) in enumerate(_plan, start=1):
         print(f"[reconstruct] {_n:>2}/{len(_plan)} exporting {table} -> {rel}", flush=True)
         dest = dest_input_dir / rel
@@ -1242,10 +1277,18 @@ def reconstruct_inputs(
             destination=rel,
         ):
             if kind == _RASTER:
-                resampling = "near" if table in {"fuels"} else "bilinear"
+                if table == "clcplus_2023":
+                    resampling = "mode"
+                elif table == "fuels":
+                    resampling = "near"
+                else:
+                    resampling = "bilinear"
                 export_raster_table(table, dest, clip_geom=clip_geom,
                                     clip_geom_crs=clip_geom_crs, target_srs=ENGINE_RASTER_SRS,
-                                    resampling=resampling)
+                                    resampling=resampling,
+                                    target_resolution_m=(
+                                        25.0 if table == "clcplus_2023" else None
+                                    ))
             else:
                 export_vector_table(table, dest, clip_geom=clip_geom, clip_geom_crs=clip_geom_crs,
                                     t_srs=ENGINE_VECTOR_SRS, select_sql=_VECTOR_SELECT_SQL.get(table))

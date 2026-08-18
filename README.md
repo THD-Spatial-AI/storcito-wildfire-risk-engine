@@ -67,6 +67,8 @@ The AOI workflow writes a dedicated job folder under `data/OUTPUT/aoi/` with:
 - AOI-limited intermediate layer TIFFs
 - `forest_fire_risk_map.tif`
 - `forest_fire_risk_map.png`
+- `layers/wildfire_analysis_mask.tif` (1 = eligible land; configured
+  non-fuel land-cover surfaces are 0/nodata)
 
 API endpoints:
 
@@ -341,6 +343,30 @@ an expert-weighted susceptibility index, not a validated Galicia-wide ignition
 probability. TWI, NDMI, and LST remain available data products but are not
 silently added to the default AHP equation because no fitted/validated weights
 for them are present in this repository.
+
+Non-fuel surfaces are excluded after the AHP calculation, so the published
+weights are unchanged. The preferred mask uses the 10 m CLC+ Backbone 2023
+classes for sealed surfaces, water, snow/ice, and coastal water.
+[Its official product manual defines those categorical pixel values.](https://library.land.copernicus.eu/products/CLCplus_Backbone_2023_PUM_v1.html)
+CLC2018 polygons provide a fallback where that raster is unavailable.
+The default fallback is deliberately conservative: `111, 123, 131, 332, 335,
+422, 423, 511, 512, 521, 522, 523`. Mixed polygons such as discontinuous urban
+fabric (`112`), industrial land (`121`), roads and associated greenery (`122`),
+airports (`124`), dumps (`132`), construction (`133`), and dunes (`331`) stay
+eligible. Their official definitions include gardens, grass, trees, unsealed
+ground, waste, or other potentially burnable material. See the
+[official CLC nomenclature](https://land.copernicus.eu/en/products/corine-land-cover)
+and the [Galicia study](https://doi.org/10.3390/rs12223705), which clipped
+individual cadastral buildings and roads rather than whole mixed land-cover
+polygons.
+
+CLC2018 has a 25 ha minimum mapping unit and cannot identify individual roofs
+or road surfaces. Consequently the fallback is an analysis-domain
+approximation, not a building mask; CLC+, cadastral/building footprints, GHSL,
+or another high-resolution surface product is required for that. The exact
+codes and source coverage are logged and embedded in
+`wildfire_analysis_mask.tif`. Fallback codes may be overridden with
+`FFRM_NON_BURNABLE_CLC_CODES`.
 
 Processing logs use grep-friendly lifecycle lines such as
 `[FFRM][...][NDVI][START]`, `[STATS]`, `[DONE]`, or `[FAILED]`. Each major
