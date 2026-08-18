@@ -72,9 +72,20 @@ def _align_raster_with_resampling(source_path: Path, reference_path: Path) -> np
 def _write_array(path: Path, array: np.ndarray, reference_path: Path, dtype: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     with rasterio.open(reference_path) as ref:
-        profile = ref.profile
+        profile = ref.profile.copy()
     # The engine marks invalid pixels as 0 (masked/no-data areas); declare that instead of inheriting the reference's nodata (e.g. -9999) which is never actually written.
-    profile.update(dtype=dtype, count=1, nodata=0)
+    profile.update(
+        driver="GTiff",
+        dtype=dtype,
+        count=1,
+        nodata=0,
+        compress="deflate",
+        predictor=3 if np.dtype(dtype).kind == "f" else 2,
+        tiled=True,
+        blockxsize=256,
+        blockysize=256,
+        bigtiff="IF_SAFER",
+    )
     with rasterio.open(path, "w", **profile) as dst:
         dst.write(array.astype(dtype, copy=False), 1)
     return path
