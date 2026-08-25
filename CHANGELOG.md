@@ -52,6 +52,13 @@ Notable changes of this engine relative to the original UVIGO codebase
   exporting from PostGIS, whose imported raster bands do not retain that
   metadata. This prevents NoData pixels participating in categorical mode
   resampling. Version `.3` precomputations must be regenerated.
+- Model version `2026-08-25.1` adds two classes below the published NDVI
+  breaks: NDVI <= 0 maps to 0 (nodata) and 0 < NDVI <= 0.1 to class 1, where
+  previously everything <= 0.27 scored class 5. Water, bare rock and
+  unvegetated soil no longer carry maximum vegetation susceptibility. This
+  departs from the published Galicia 2020 NDVI classes that the default
+  profile otherwise reproduces, and is not part of doi:10.3390/rs12223705.
+  Version `.4` precomputations must be regenerated.
 
 ## 2026-07 — Source-data pipeline and API restructuring
 

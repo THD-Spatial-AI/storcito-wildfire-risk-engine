@@ -920,6 +920,7 @@ def run_static_aoi_for_geometry(
 
         daily_work = job_dir / "daily_work"
         diagnostics_dir = job_dir / "diagnostics"
+        keep_diagnostics = os.environ.get("STORCITO_KEEP_DIAGNOSTICS", "0") == "1"
         daily_risk_dates: list[str] = []
         daily_source_dates: dict[str, dict[str, str]] = {}
         daily_source_details: dict[str, dict[str, object]] = {}
@@ -990,15 +991,16 @@ def run_static_aoi_for_geometry(
 
             if mode == "dynamic":
                 shutil.copyfile(day_outputs["final_map"], layers_dir / f"risk_{day_key}.tif")
-                diagnostics_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(
-                    day_outputs["continuous_map"],
-                    diagnostics_dir / f"risk_continuous_{day_key}.tif",
-                )
-                shutil.copyfile(
-                    day_outputs["data_coverage"],
-                    diagnostics_dir / f"data_coverage_{day_key}.tif",
-                )
+                if keep_diagnostics:
+                    diagnostics_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(
+                        day_outputs["continuous_map"],
+                        diagnostics_dir / f"risk_continuous_{day_key}.tif",
+                    )
+                    shutil.copyfile(
+                        day_outputs["data_coverage"],
+                        diagnostics_dir / f"data_coverage_{day_key}.tif",
+                    )
                 daily_risk_dates.append(day_key)
 
             source_dates = dict(temporal_reconstruction.get("layer_dates", {}))
