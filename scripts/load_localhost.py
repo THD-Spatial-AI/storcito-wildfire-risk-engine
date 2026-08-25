@@ -1099,6 +1099,28 @@ def validate_fwi_file(path: Path, fdate: date) -> float:
     return peak
 
 
+def prune_verified_fwi_dir(cur, directory: Path, cutoff: date) -> int:
+    """Delete every ``*.nc`` in ``directory`` dated before ``cutoff`` whose bytes are still intact in ``fwi_files``. Scans the directory itself rather than the current run's load window, so files staged by earlier fetches are reachable. Unparseable names are left alone; the DB check is per file, so a partial or missing row keeps the file on disk."""
+    pruned = 0
+    for path in sorted(directory.glob("*.nc")):
+        match = FWI_DATE_RE.search(path.name)
+        if match is None:
+            continue
+        fdate = datetime.strptime(match.group(1), "%Y%m%d").date()
+        if fdate >= cutoff:
+            continue
+        cur.execute(
+            "SELECT 1 FROM fwi_files WHERE filename=%s AND nbytes=%s "
+            "AND length(data)=nbytes",
+            (path.name, path.stat().st_size),
+        )
+        if cur.fetchone():
+            path.unlink()
+            path.with_suffix(path.suffix + ".request.json").unlink(missing_ok=True)
+            pruned += 1
+    return pruned
+
+
 def cmd_load_fwi_files(args: argparse.Namespace) -> int:
     candidates = sorted(args.dir.glob("*.nc"))
     if not candidates:
@@ -1119,6 +1141,10 @@ def cmd_load_fwi_files(args: argparse.Namespace) -> int:
         files.append((path, fdate, validate_fwi_file(path, fdate)))
     if not files:
         raise LoadError("no valid FWI files in the requested date range")
+
+    # Disposable, regenerable mirror of the same filenames: FR/db_reconstruct.py
+    # refills it from fwi_files on demand and hardlinks entries into job dirs.
+    cache_dir = args.dir.parent.parent / "_fwi_cache"
 
     conn = connect_db()
     try:
@@ -1155,34 +1181,28 @@ def cmd_load_fwi_files(args: argparse.Namespace) -> int:
                 cur.execute("SELECT to_regclass('public.fwi_slices')")
                 if cur.fetchone()[0] is not None and fdate is not None:
                     cur.execute("DELETE FROM fwi_slices WHERE fdate = %s", (fdate,))
-                cache_file = args.dir.parent.parent / "_fwi_cache" / path.name
-                cache_file.unlink(missing_ok=True)
+                (cache_dir / path.name).unlink(missing_ok=True)
                 log(f"fwi_files <- {path.name} date={fdate} bytes={size} peak_temp={peak}")
             conn.commit()
             if skipped:
                 log(f"skipped {skipped} staged file(s) outside {start}..{end}")
             if args.prune_days is not None:
-                from datetime import date as _date, timedelta as _td
-
-                cutoff = _date.today() - _td(days=args.prune_days)
-                pruned = 0
+                # Prune every staged file, not just this run's --start/--end
+                # window: the daily job loads a 3-day window, so scoping the
+                # prune to `files` meant nothing was ever old enough to reach
+                # the cutoff and --prune-days never deleted anything.
+                cutoff = date.today() - timedelta(days=args.prune_days)
                 with conn.cursor() as pcur:
-                    for path, _file_date, _peak in files:
-                        m = FWI_DATE_RE.search(path.name)
-                        fdate = datetime.strptime(m.group(1), "%Y%m%d").date() if m else None
-                        if fdate is None or fdate >= cutoff:
-                            continue
-                        pcur.execute(
-                            "SELECT 1 FROM fwi_files WHERE filename=%s AND nbytes=%s "
-                            "AND length(data)=nbytes",
-                            (path.name, path.stat().st_size),
-                        )
-                        if pcur.fetchone():
-                            path.unlink()
-                            path.with_suffix(path.suffix + ".request.json").unlink(missing_ok=True)
-                            pruned += 1
+                    pruned = prune_verified_fwi_dir(pcur, args.dir, cutoff)
+                    cached = (
+                        prune_verified_fwi_dir(pcur, cache_dir, cutoff)
+                        if cache_dir.is_dir()
+                        else 0
+                    )
                 if pruned:
                     log(f"pruned {pruned} staged file(s) older than {cutoff} (verified in DB)")
+                if cached:
+                    log(f"pruned {cached} cached file(s) older than {cutoff} (verified in DB)")
     finally:
         conn.close()
     return 0

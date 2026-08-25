@@ -207,11 +207,20 @@ Suggested cron for a server (all commands are argument-free thanks to the
 "latest available" defaults):
 
 ```cron
+0 6 * * *       cd /path/to/STORCITO && ./scripts/prune_output_retention.sh  # daily: expire old job/AOI workspaces
 15 8 * * *      cd /path/to/STORCITO && ./scripts/daily_update.sh     # daily: FWI, optional LST utility, fire overlay
 30 9 * * *      cd /path/to/STORCITO && ./scripts/nightly_process.sh  # daily: precompute the regional dynamic map
 ```
 
 `daily_update.sh` also refreshes Sentinel-2 each Monday during May-October.
+
+`prune_output_retention.sh` expires `data/OUTPUT/jobs` after
+`JOB_RETENTION_DAYS` (default 1) and `data/OUTPUT/aoi` after
+`AOI_RETENTION_DAYS` (default 7). It runs first in the day and deliberately
+depends on nothing but the filesystem - no Postgres, no containers - so
+cleanup still happens when the stack is down, which is when orphaned
+workspaces pile up fastest. Preview with `--dry-run`; logs to
+`data/OUTPUT/logs/retention_<date>.log`.
 
 ### Precomputed regional results
 
