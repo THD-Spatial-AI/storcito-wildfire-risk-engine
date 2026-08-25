@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import tempfile
@@ -874,6 +875,159 @@ def highest_temperature_fwi_dates_db() -> list[date]:
         return sorted(r[0] for r in cur.fetchall())
 
 
+_HIST_PERIMETER_BUFFER_M = 660.0
+
+_HIST_SCENE_PAD_PX = 8
+
+
+def _hist_vector_clip(clip_geom: BaseGeometry, clip_geom_crs: str) -> BaseGeometry:
+    """Grow the AOI by FR.FHIST's perimeter buffer, in a metric CRS. Buffering WGS84 degrees would be anisotropic and wrong by a factor of ~1.35 at Galicia's latitude, so the geometry is projected to ENGINE_VECTOR_SRS, buffered in metres, and returned in WGS84 for the cutline."""
+    from rasterio.warp import transform_geom
+    from shapely.geometry import mapping as _mapping, shape as _shape
+
+    metric = _shape(transform_geom(clip_geom_crs, ENGINE_VECTOR_SRS, _mapping(clip_geom)))
+    haloed = metric.buffer(_HIST_PERIMETER_BUFFER_M)
+    return _shape(transform_geom(ENGINE_VECTOR_SRS, "EPSG:4326", _mapping(haloed)))
+
+
+def _hist_target_grid(reference, clip_geom: BaseGeometry, clip_geom_crs: str) -> dict:
+    """One grid for a year's scene quartet, snapped to ``reference``'s pixels. Snapping to the reference means an aligned source can be window-read with no resampling, and every band of the year lands on a byte-identical grid -- which FR.FHIST requires (it raises on mismatched PRE/POST B8A/B12 grids)."""
+    from rasterio.warp import transform_bounds
+    from rasterio.windows import Window
+
+    left, bottom, right, top = transform_bounds(
+        clip_geom_crs, reference.crs, *clip_geom.bounds, densify_pts=21
+    )
+    window = reference.window(left, bottom, right, top)
+    col_off = math.floor(window.col_off) - _HIST_SCENE_PAD_PX
+    row_off = math.floor(window.row_off) - _HIST_SCENE_PAD_PX
+    col_end = math.ceil(window.col_off + window.width) + _HIST_SCENE_PAD_PX
+    row_end = math.ceil(window.row_off + window.height) + _HIST_SCENE_PAD_PX
+
+    col_off, row_off = max(0, col_off), max(0, row_off)
+    col_end = min(reference.width, col_end)
+    row_end = min(reference.height, row_end)
+    if col_end <= col_off or row_end <= row_off:
+        raise RuntimeError(
+            "Fire-history scenes do not overlap the requested AOI "
+            f"(scene bounds {tuple(round(v, 3) for v in reference.bounds)} in "
+            f"{reference.crs}, AOI bounds {tuple(round(v, 3) for v in (left, bottom, right, top))}). "
+            "Reseed hist-scenes covering this area or disable the history overlay."
+        )
+
+    window = Window(col_off, row_off, col_end - col_off, row_end - row_off)
+    return {
+        "crs": reference.crs,
+        "transform": reference.window_transform(window),
+        "width": int(window.width),
+        "height": int(window.height),
+    }
+
+
+def _grids_aligned(source, grid) -> bool:
+    """Whether ``source`` shares the grid's CRS, pixel size and pixel phase."""
+    if source.crs != grid["crs"]:
+        return False
+    a, b = source.transform, grid["transform"]
+    if not (math.isclose(a.a, b.a, rel_tol=1e-9) and math.isclose(a.e, b.e, rel_tol=1e-9)):
+        return False
+    offset_x, offset_y = (b.c - a.c) / a.a, (b.f - a.f) / a.e
+    return (
+        math.isclose(offset_x, round(offset_x), abs_tol=1e-3)
+        and math.isclose(offset_y, round(offset_y), abs_tol=1e-3)
+    )
+
+
+def _read_on_grid(source, grid):
+    """Read band 1 of ``source`` onto ``grid``: window read when aligned, reproject otherwise."""
+    import numpy as np
+    import rasterio
+    from rasterio.warp import Resampling, reproject
+    from rasterio.windows import Window
+
+    nodata = source.nodata
+    fill = 0 if nodata is None else nodata
+    if _grids_aligned(source, grid):
+        origin_x, origin_y = grid["transform"].c, grid["transform"].f
+        col_off = round((origin_x - source.transform.c) / source.transform.a)
+        row_off = round((origin_y - source.transform.f) / source.transform.e)
+        # Force the grid's own extent: boundless fills anything the source does
+        # not cover, so differing source extents still yield one common grid.
+        window = Window(col_off, row_off, grid["width"], grid["height"])
+        return source.read(1, window=window, boundless=True, fill_value=fill)
+
+    destination = np.full((grid["height"], grid["width"]), fill, dtype=source.dtypes[0])
+    reproject(
+        source=rasterio.band(source, 1),
+        destination=destination,
+        src_transform=source.transform,
+        src_crs=source.crs,
+        src_nodata=nodata,
+        dst_transform=grid["transform"],
+        dst_crs=grid["crs"],
+        dst_nodata=nodata,
+        resampling=Resampling.nearest,
+    )
+    return destination
+
+
+def _write_hist_quartet(
+    entries: list[tuple[str, str, bytes]],
+    dest_hist_dir: Path,
+    clip_geom: BaseGeometry | None,
+    clip_geom_crs: str,
+) -> list[str]:
+    """Materialise one year's PRE/POST B8A/B12 scenes, cropped to the AOI. With no ``clip_geom`` the stored bytes are written verbatim, as before. Otherwise every scene of the year is placed on one shared grid so FR.FHIST's grid-equality check passes."""
+    from contextlib import ExitStack
+
+    import rasterio
+    from rasterio.io import MemoryFile
+
+    written: list[str] = []
+    if clip_geom is None:
+        for phase, filename, blob in entries:
+            destination = dest_hist_dir / phase
+            destination.mkdir(parents=True, exist_ok=True)
+            (destination / filename).write_bytes(blob)
+            written.append(str(destination / filename))
+        return written
+
+    with ExitStack() as stack:
+        opened = []
+        for phase, filename, blob in entries:
+            memfile = stack.enter_context(MemoryFile(blob))
+            opened.append((phase, filename, stack.enter_context(memfile.open())))
+
+        grid = _hist_target_grid(opened[0][2], clip_geom, clip_geom_crs)
+        for phase, filename, source in opened:
+            data = _read_on_grid(source, grid)
+            profile = source.profile.copy()
+            profile.update(
+                driver="GTiff",
+                count=1,
+                dtype=source.dtypes[0],
+                crs=grid["crs"],
+                transform=grid["transform"],
+                width=grid["width"],
+                height=grid["height"],
+                compress="deflate",
+                tiled=True,
+                blockxsize=256,
+                blockysize=256,
+                bigtiff="IF_SAFER",
+            )
+            if source.nodata is None:
+                profile.pop("nodata", None)
+            destination = dest_hist_dir / phase
+            destination.mkdir(parents=True, exist_ok=True)
+            out = destination / filename
+            with rasterio.open(out, "w", **profile) as dst:
+                dst.write(data, 1)
+                dst.update_tags(**source.tags())
+            written.append(str(out))
+    return written
+
+
 def reconstruct_hist(
     dest_hist_dir: str | Path,
     *,
@@ -881,7 +1035,7 @@ def reconstruct_hist(
     clip_geom_crs: str = "EPSG:4326",
     target_date=None,
 ) -> dict[str, object]:
-    """Rebuild the HIST/ folder that FR.FHIST.fire_history reads, entirely from DB. Two parts: * Historico_incendios/hist_<year>.shp -- exported from the `hist` PostGIS table, split back into one shapefile per year. * PRE_FIRE/ and POST_FIRE/ Sentinel-2 scenes -- written back byte-exact from the `hist_scenes` blob table (their filenames encode date+band, which FR.FHIST parses, so they are stored as blobs rather than as rasters)."""
+    """Rebuild the HIST/ folder that FR.FHIST.fire_history reads, entirely from DB. Two parts: * Historico_incendios/hist_<year>.shp -- exported from the `hist` PostGIS table, split back into one shapefile per year, clipped to the AOI plus FR.FHIST's 660 m perimeter halo. * PRE_FIRE/ and POST_FIRE/ Sentinel-2 scenes -- read from the `hist_scenes` blob table (their filenames encode date+band, which FR.FHIST parses, so they are stored as blobs rather than as rasters). Without ``clip_geom`` the stored bytes are written verbatim; with one, each year's PRE/POST B8A/B12 quartet is cropped onto a single shared grid, which is what keeps a small-AOI request from materialising several GB of whole-region imagery."""
     dest_hist_dir = Path(dest_hist_dir)
     years_dir = dest_hist_dir / "Historico_incendios"
     years_dir.mkdir(parents=True, exist_ok=True)
@@ -921,23 +1075,34 @@ def reconstruct_hist(
                 f"hotspots for those years (available: {years}). Seed them with "
                 + " and ".join(f"`make hist START={y}-05-01 END={y}-10-31`" for y in missing)
             )
+        by_year: dict[str, list[tuple[str, str, bytes]]] = {}
         for phase, filename in rows:
             if filename[:4] not in complete:
                 continue
-            phase_dir = dest_hist_dir / phase
-            phase_dir.mkdir(parents=True, exist_ok=True)
-            out = phase_dir / filename
             cur.execute(
                 "SELECT data FROM hist_scenes WHERE phase = %s AND filename = %s",
                 (phase, filename),
             )
-            out.write_bytes(bytes(cur.fetchone()[0]))
-            copied_scenes.append(str(out))
+            by_year.setdefault(filename[:4], []).append(
+                (phase, filename, bytes(cur.fetchone()[0]))
+            )
 
+    for year in sorted(by_year):
+        copied_scenes.extend(
+            _write_hist_quartet(
+                sorted(by_year[year]), dest_hist_dir, clip_geom, clip_geom_crs
+            )
+        )
+
+    vector_clip = (
+        _hist_vector_clip(clip_geom, clip_geom_crs) if clip_geom is not None else None
+    )
     for year in years:
         dest = years_dir / f"hist_{year}.shp"
         export_vector_table(
             "hist", dest, t_srs=ENGINE_VECTOR_SRS,
+            clip_geom=vector_clip,
+            clip_geom_crs="EPSG:4326",
             select_sql=(
                 f"SELECT * FROM hist WHERE year = {year}"
                 + (f" AND acq_date <= '{target_date}'" if target_date is not None else "")
