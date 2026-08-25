@@ -13,24 +13,25 @@ from FR.rutinas.setup import (
 from pathlib import Path
 from FR.processing_log import log_array_stats, log_event, logged_step
 
-
-NDVI_RISK_BREAKS = (0.27, 0.40, 0.54, 0.67)
+NDVI_RISK_BREAKS = (0, 0.1, 0.27, 0.40, 0.54, 0.67)
 
 
 def classify_ndvi_risk(values: np.ndarray) -> np.ndarray:
     """Apply the original expert-defined STORCITO NDVI susceptibility classes."""
     ndvi_values = np.asarray(values)
     valid = np.isfinite(ndvi_values)
-    b1, b2, b3, b4 = NDVI_RISK_BREAKS
+    b1, b2, b3, b4, b5, b6= NDVI_RISK_BREAKS
     return np.select(
         [
             valid & (ndvi_values <= b1),
             valid & (ndvi_values > b1) & (ndvi_values <= b2),
             valid & (ndvi_values > b2) & (ndvi_values <= b3),
             valid & (ndvi_values > b3) & (ndvi_values <= b4),
-            valid & (ndvi_values > b4),
+            valid & (ndvi_values > b4) & (ndvi_values <= b5),
+            valid & (ndvi_values > b5) & (ndvi_values <= b6),
+            valid & (ndvi_values > b6),
         ],
-        [5, 4, 3, 2, 1],
+        [0,1,5, 4, 3, 2, 1],
         default=0,
     ).astype("int32")
 
