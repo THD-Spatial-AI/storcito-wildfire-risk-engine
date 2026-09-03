@@ -125,6 +125,21 @@ def _standard_fwi_hour_index_for_date(fdate) -> int:
     return (fwi_standard_utc_hour(fdate) - 1) % 24
 
 
+def _fwi_day_schedule(days, end_day):
+    """Archive days, then forecast days from the newest file's +24 h steps, as FR.FWI.f_w_index does."""
+    import FR.FWI as FwiModule
+
+    schedule = [(row[0], row[0], row[1], 0) for row in days]
+    if not schedule:
+        return schedule
+    newest_day, _source, newest_name, _offset = schedule[-1]
+    day = newest_day
+    while day < end_day and (day - newest_day).days < FwiModule.FWI_FORECAST_DAYS:
+        day += timedelta(days=1)
+        schedule.append((day, newest_day, newest_name, (day - newest_day).days))
+    return schedule
+
+
 def _fwi_history_window(
     target_date: date, score_start_date: date | None = None
 ) -> tuple[date, date]:
@@ -137,16 +152,24 @@ def _fwi_history_window(
     return score_start_date - timedelta(days=FWI_RUNUP_DAYS), target_date
 
 
-def _fwi_slice(cur, fdate, hour_index: int | None) -> dict[str, Any] | None:
-    """Per-day NetCDF extract, cached in fwi_slices to avoid re-reading the big blobs."""
+def _fwi_slice(
+    cur,
+    fdate,
+    hour_index: int | None,
+    *,
+    source_fdate=None,
+    step_offset: int = 0,
+) -> dict[str, Any] | None:
+    """Per-day NetCDF extract, cached in fwi_slices to avoid re-reading the big blobs. ``step_offset`` scores ``fdate`` from ``source_fdate``'s file at +24 h per day; ``hour_index`` stays within-day."""
     import io
 
     import numpy as np
     import netCDF4 as nc
     import FR.FWI as FwiModule
 
+    source_fdate = source_fdate or fdate
     if hour_index is None:
-        hour_index = _standard_fwi_hour_index_for_date(fdate)
+        hour_index = _standard_fwi_hour_index_for_date(source_fdate)
     cache_version = os.environ.get("STORCITO_MODEL_VERSION", "dev") + ":fwi-slice-v4"
     cur.execute(
         """CREATE TABLE IF NOT EXISTS fwi_slices ( fdate date NOT NULL, hour_index int NOT NULL, data bytea NOT NULL, cache_version text, PRIMARY KEY (fdate, hour_index) ); ALTER TABLE fwi_slices ADD COLUMN IF NOT EXISTS cache_version text"""
@@ -156,7 +179,7 @@ def _fwi_slice(cur, fdate, hour_index: int | None) -> dict[str, Any] | None:
         "AND cache_version = %s",
         (fdate, hour_index, cache_version),
     )
-    row = cur.fetchone()
+    row = cur.fetchone() if step_offset == 0 else None
     if row is not None:
         loaded = np.load(io.BytesIO(bytes(row[0])), allow_pickle=False)
         payload = {key: loaded[key] for key in loaded.files}
@@ -166,7 +189,7 @@ def _fwi_slice(cur, fdate, hour_index: int | None) -> dict[str, Any] | None:
     cur.execute(
         "SELECT id, filename, nbytes FROM fwi_files "
         "WHERE fdate = %s ORDER BY id DESC LIMIT 1",
-        (fdate,),
+        (source_fdate,),
     )
     source = cur.fetchone()
     if source is None:
@@ -200,28 +223,37 @@ def _fwi_slice(cur, fdate, hour_index: int | None) -> dict[str, Any] | None:
     try:
         with nc.Dataset(source_path) as dataset:
             n_hours = int(dataset["time"].shape[0])
-            if hour_index < 0 or hour_index >= n_hours:
-                raise ValueError(f"hour_index must be between 0 and {n_hours - 1} for {fdate}.")
-            day_hours = min(n_hours, 24)
+            day_start = 24 * step_offset
+            observation_index = day_start + hour_index
+            if hour_index < 0 or observation_index >= n_hours:
+                raise ValueError(
+                    f"FWI file for {source_fdate} lacks the +{step_offset * 24}h "
+                    f"forecast step needed for {fdate}"
+                )
+            day_hours = min(n_hours - day_start, 24)
 
             def values(name: str, index=None):
                 raw = dataset[name][:] if index is None else dataset[name][index]
                 return np.ma.filled(raw, np.nan).astype(np.float32)
 
             precipitation = FwiModule.normalize_fwi_precipitation(
-                values("prec", slice(0, day_hours)),
+                values("prec", slice(day_start, day_start + day_hours)),
                 context=f"for {fdate}",
             )
             payload = {
                 "lon": values("lon"),
                 "lat": values("lat"),
-                "temp": values("temp", hour_index),
-                "rh": values("rh", hour_index),
-                "mod": values("mod", hour_index),
-                "dir": values("dir", hour_index),
+                "temp": values("temp", observation_index),
+                "rh": values("rh", observation_index),
+                "mod": values("mod", observation_index),
+                "dir": values("dir", observation_index),
                 "prec_day": precipitation,
-                "month": np.int32(nc.num2date(dataset["time"][0], dataset["time"].units).month),
-                "time_str": np.str_(str(nc.num2date(dataset["time"][hour_index], dataset["time"].units))),
+                "month": np.int32(
+                    nc.num2date(dataset["time"][day_start], dataset["time"].units).month
+                ),
+                "time_str": np.str_(
+                    str(nc.num2date(dataset["time"][observation_index], dataset["time"].units))
+                ),
                 "hour_index": np.int32(hour_index),
             }
             checks = (
@@ -238,14 +270,15 @@ def _fwi_slice(cur, fdate, hour_index: int | None) -> dict[str, Any] | None:
     finally:
         if tmp_name is not None:
             os.unlink(tmp_name)
-    buf = io.BytesIO()
-    np.savez_compressed(buf, **payload)
-    cur.execute(
-        "INSERT INTO fwi_slices (fdate, hour_index, data, cache_version) VALUES (%s, %s, %s, %s) "
-        "ON CONFLICT (fdate, hour_index) DO UPDATE SET data=EXCLUDED.data, "
-        "cache_version=EXCLUDED.cache_version",
-        (fdate, hour_index, buf.getvalue(), cache_version),
-    )
+    if step_offset == 0:
+        buf = io.BytesIO()
+        np.savez_compressed(buf, **payload)
+        cur.execute(
+            "INSERT INTO fwi_slices (fdate, hour_index, data, cache_version) VALUES (%s, %s, %s, %s) "
+            "ON CONFLICT (fdate, hour_index) DO UPDATE SET data=EXCLUDED.data, "
+            "cache_version=EXCLUDED.cache_version",
+            (fdate, hour_index, buf.getvalue(), cache_version),
+        )
     return payload
 
 
@@ -282,19 +315,22 @@ def sample_fwi_area_from_db(
             (history_end, history_start),
         )
         days = cur.fetchall()
+        schedule = _fwi_day_schedule(days, history_end)
         expected = {
             history_start + timedelta(days=i)
             for i in range((history_end - history_start).days + 1)
         }
-        available = {row[0] for row in days}
+        available = {entry[0] for entry in schedule}
         missing = sorted(expected - available)
         if missing:
             raise ValueError(
                 "FWI run-up is incomplete; missing dates: "
                 + ", ".join(day.isoformat() for day in missing)
             )
-        for fdate, filename in days:
-            slice_data = _fwi_slice(cur, fdate, hour_index)
+        for fdate, source_fdate, filename, step_offset in schedule:
+            slice_data = _fwi_slice(
+                cur, fdate, hour_index, source_fdate=source_fdate, step_offset=step_offset
+            )
             if slice_data is None:
                 continue
             rows_seen += 1
@@ -423,18 +459,21 @@ def sample_fwi_point_from_db(
     with _pg_connect() as conn, conn.cursor() as cur:
         cur.execute(query, params)
         days = cur.fetchall()
+        schedule = _fwi_day_schedule(days, target_date)
         if include_runup:
             expected_start = target_date - timedelta(days=FwiModule.FWI_RUNUP_DAYS)
             expected = {expected_start + timedelta(days=i) for i in range(FwiModule.FWI_RUNUP_DAYS + 1)}
-            available = {row[0] for row in days}
+            available = {entry[0] for entry in schedule}
             missing = sorted(expected - available)
             if missing:
                 raise ValueError(
                     "FWI run-up is incomplete; missing dates: "
                     + ", ".join(day.isoformat() for day in missing)
                 )
-        for fdate, filename in days:
-            slice_data = _fwi_slice(cur, fdate, hour_index)
+        for fdate, source_fdate, filename, step_offset in schedule:
+            slice_data = _fwi_slice(
+                cur, fdate, hour_index, source_fdate=source_fdate, step_offset=step_offset
+            )
             if slice_data is None:
                 continue
             rows_seen += 1
