@@ -125,19 +125,77 @@ def _standard_fwi_hour_index_for_date(fdate) -> int:
     return (fwi_standard_utc_hour(fdate) - 1) % 24
 
 
-def _fwi_day_schedule(days, end_day):
-    """Archive days, then forecast days from the newest file's +24 h steps, as FR.FWI.f_w_index does."""
+def _resolve_fwi_day(fdate, archive_files, newest_archive):
+    """Resolve one day to an exact archive row, a forecast step, or ``None``."""
     import FR.FWI as FwiModule
 
-    schedule = [(row[0], row[0], row[1], 0) for row in days]
-    if not schedule:
-        return schedule
-    newest_day, _source, newest_name, _offset = schedule[-1]
-    day = newest_day
-    while day < end_day and (day - newest_day).days < FwiModule.FWI_FORECAST_DAYS:
+    if fdate in archive_files:
+        return fdate, archive_files[fdate], 0
+    if newest_archive is None:
+        return None
+    newest_day, newest_name = newest_archive
+    offset = (fdate - newest_day).days
+    if 0 < offset <= FwiModule.FWI_FORECAST_DAYS:
+        return newest_day, newest_name, offset
+    return None
+
+
+def _fwi_day_schedule(days, start_day, end_day, newest_archive):
+    """Resolve a range against exact rows and the global newest forecast run.
+
+    Only days beyond the global archive boundary may use forecast steps. This
+    keeps historical gaps as gaps instead of silently treating them as forecasts.
+    """
+    archive_files = {row[0]: row[1] for row in days}
+    schedule = []
+    day = start_day
+    while day <= end_day:
+        resolved = _resolve_fwi_day(day, archive_files, newest_archive)
+        if resolved is not None:
+            schedule.append((day, *resolved))
         day += timedelta(days=1)
-        schedule.append((day, newest_day, newest_name, (day - newest_day).days))
     return schedule
+
+
+def _fwi_schedule_from_db(cur, start_day, end_day):
+    """Return a schedule and the unbounded global newest archive row."""
+    cur.execute(
+        "SELECT DISTINCT ON (fdate) fdate, filename FROM fwi_files "
+        "WHERE fdate IS NOT NULL AND fdate <= %s AND fdate >= %s "
+        "ORDER BY fdate, id DESC",
+        (end_day, start_day),
+    )
+    days = cur.fetchall()
+    cur.execute(
+        "SELECT fdate, filename FROM fwi_files WHERE fdate IS NOT NULL "
+        "ORDER BY fdate DESC, id DESC LIMIT 1"
+    )
+    newest_archive = cur.fetchone()
+    return _fwi_day_schedule(days, start_day, end_day, newest_archive), newest_archive
+
+
+def _missing_fwi_days(expected, schedule, newest_archive):
+    """Find gaps, requiring actual rows on every day within the archive."""
+    newest_day = newest_archive[0] if newest_archive else None
+    archive_days = {entry[0] for entry in schedule if entry[3] == 0}
+    forecast_days = {entry[0] for entry in schedule if entry[3] > 0}
+    missing = []
+    for day in expected:
+        if newest_day is None or day <= newest_day:
+            if day not in archive_days:
+                missing.append(day)
+        elif day not in forecast_days:
+            missing.append(day)
+    return sorted(missing)
+
+
+def _fwi_forecast_metadata(source_fdate, step_offset: int) -> dict[str, Any]:
+    """Return explicit provenance for observation- and forecast-derived values."""
+    return {
+        "is_forecast": step_offset > 0,
+        "forecast_source_date": source_fdate.isoformat() if step_offset > 0 else None,
+        "forecast_offset_h": step_offset * 24,
+    }
 
 
 def _fwi_history_window(
@@ -160,7 +218,12 @@ def _fwi_slice(
     source_fdate=None,
     step_offset: int = 0,
 ) -> dict[str, Any] | None:
-    """Per-day NetCDF extract, cached in fwi_slices to avoid re-reading the big blobs. ``step_offset`` scores ``fdate`` from ``source_fdate``'s file at +24 h per day; ``hour_index`` stays within-day."""
+    """Extract one day from a NetCDF file, using forecast steps when requested.
+
+    ``step_offset`` scores ``fdate`` from ``source_fdate`` at +24 hours per day.
+    On forecast dates, ``hour_index`` is relative to that day and must be in
+    ``0..23``. Exact archive rows retain the legacy absolute ``0..95`` diagnostic.
+    """
     import io
 
     import numpy as np
@@ -169,7 +232,11 @@ def _fwi_slice(
 
     source_fdate = source_fdate or fdate
     if hour_index is None:
-        hour_index = _standard_fwi_hour_index_for_date(source_fdate)
+        hour_index = _standard_fwi_hour_index_for_date(fdate)
+    if hour_index < 0:
+        raise ValueError("hour_index must not be negative.")
+    if step_offset > 0 and hour_index >= 24:
+        raise ValueError("hour_index must be between 0 and 23 for a forecast date.")
     cache_version = os.environ.get("STORCITO_MODEL_VERSION", "dev") + ":fwi-slice-v4"
     cur.execute(
         """CREATE TABLE IF NOT EXISTS fwi_slices ( fdate date NOT NULL, hour_index int NOT NULL, data bytea NOT NULL, cache_version text, PRIMARY KEY (fdate, hour_index) ); ALTER TABLE fwi_slices ADD COLUMN IF NOT EXISTS cache_version text"""
@@ -225,7 +292,11 @@ def _fwi_slice(
             n_hours = int(dataset["time"].shape[0])
             day_start = 24 * step_offset
             observation_index = day_start + hour_index
-            if hour_index < 0 or observation_index >= n_hours:
+            if observation_index >= n_hours:
+                if step_offset == 0:
+                    raise ValueError(
+                        f"hour_index must be between 0 and {n_hours - 1} for {fdate}."
+                    )
                 raise ValueError(
                     f"FWI file for {source_fdate} lacks the +{step_offset * 24}h "
                     f"forecast step needed for {fdate}"
@@ -308,20 +379,14 @@ def sample_fwi_area_from_db(
     standard_observation = hour_index is None
 
     with _pg_connect() as conn, conn.cursor() as cur:
-        cur.execute(
-            "SELECT DISTINCT ON (fdate) fdate, filename FROM fwi_files "
-            "WHERE fdate IS NOT NULL AND fdate <= %s AND fdate >= %s "
-            "ORDER BY fdate, id DESC",
-            (history_end, history_start),
+        schedule, newest_archive = _fwi_schedule_from_db(
+            cur, history_start, history_end
         )
-        days = cur.fetchall()
-        schedule = _fwi_day_schedule(days, history_end)
         expected = {
             history_start + timedelta(days=i)
             for i in range((history_end - history_start).days + 1)
         }
-        available = {entry[0] for entry in schedule}
-        missing = sorted(expected - available)
+        missing = _missing_fwi_days(expected, schedule, newest_archive)
         if missing:
             raise ValueError(
                 "FWI run-up is incomplete; missing dates: "
@@ -406,6 +471,7 @@ def sample_fwi_area_from_db(
                     "source": "database:fwi_slices",
                     "standard_fwi_observation": standard_observation,
                     "classification_thresholds_applicable": standard_observation,
+                    **_fwi_forecast_metadata(source_fdate, step_offset),
                 }
                 break
 
@@ -432,19 +498,11 @@ def sample_fwi_point_from_db(
     import FR.FWI as FwiModule
     from FR.db_reconstruct import _pg_connect
 
-    if include_runup:
-        query = (
-            "SELECT DISTINCT ON (fdate) fdate, filename FROM fwi_files "
-            "WHERE fdate IS NOT NULL AND fdate <= %s AND fdate >= %s "
-            "ORDER BY fdate, id DESC"
-        )
-        params = (target_date, target_date - timedelta(days=FwiModule.FWI_RUNUP_DAYS))
-    else:
-        query = (
-            "SELECT DISTINCT ON (fdate) fdate, filename FROM fwi_files "
-            "WHERE fdate = %s ORDER BY fdate, id DESC"
-        )
-        params = (target_date,)
+    history_start = (
+        target_date - timedelta(days=FwiModule.FWI_RUNUP_DAYS)
+        if include_runup
+        else target_date
+    )
 
     init_f, init_p, init_d = FwiModule.fwi_init_codes()
     f0 = np.array([init_f], dtype=float)
@@ -457,14 +515,15 @@ def sample_fwi_point_from_db(
     standard_observation = hour_index is None
 
     with _pg_connect() as conn, conn.cursor() as cur:
-        cur.execute(query, params)
-        days = cur.fetchall()
-        schedule = _fwi_day_schedule(days, target_date)
+        schedule, newest_archive = _fwi_schedule_from_db(
+            cur, history_start, target_date
+        )
         if include_runup:
-            expected_start = target_date - timedelta(days=FwiModule.FWI_RUNUP_DAYS)
-            expected = {expected_start + timedelta(days=i) for i in range(FwiModule.FWI_RUNUP_DAYS + 1)}
-            available = {entry[0] for entry in schedule}
-            missing = sorted(expected - available)
+            expected = {
+                history_start + timedelta(days=i)
+                for i in range(FwiModule.FWI_RUNUP_DAYS + 1)
+            }
+            missing = _missing_fwi_days(expected, schedule, newest_archive)
             if missing:
                 raise ValueError(
                     "FWI run-up is incomplete; missing dates: "
@@ -559,6 +618,7 @@ def sample_fwi_point_from_db(
                     "source": "database:fwi_slices",
                     "standard_fwi_observation": standard_observation,
                     "classification_thresholds_applicable": standard_observation,
+                    **_fwi_forecast_metadata(source_fdate, step_offset),
                 }
                 break
 
@@ -586,20 +646,41 @@ def sample_operational_weather_area_from_db(
         target_date, local_hour, tz=FwiModule.FWI_STANDARD_TIMEZONE
     )
     with _pg_connect() as conn, conn.cursor() as cur:
-        current = _fwi_slice(cur, target_date, hour_index)
-        previous = _fwi_slice(cur, target_date - timedelta(days=1), hour_index)
+        previous_date = target_date - timedelta(days=1)
+        schedule, _newest_archive = _fwi_schedule_from_db(
+            cur, previous_date, target_date
+        )
+        entries = {entry[0]: entry for entry in schedule}
+        current_entry = entries.get(target_date)
+        previous_entry = entries.get(previous_date)
+        if current_entry is None:
+            raise ValueError(f"FWI weather date {target_date.isoformat()} is not available")
+        if previous_entry is None:
+            raise ValueError(
+                f"Previous-day precipitation is unavailable for {target_date.isoformat()}"
+            )
+        _, current_source, filename, current_offset = current_entry
+        _, previous_source, _previous_filename, previous_offset = previous_entry
+        current = _fwi_slice(
+            cur,
+            target_date,
+            hour_index,
+            source_fdate=current_source,
+            step_offset=current_offset,
+        )
+        previous = _fwi_slice(
+            cur,
+            previous_date,
+            hour_index,
+            source_fdate=previous_source,
+            step_offset=previous_offset,
+        )
         if current is None:
             raise ValueError(f"FWI weather date {target_date.isoformat()} is not available")
         if previous is None:
             raise ValueError(
                 f"Previous-day precipitation is unavailable for {target_date.isoformat()}"
             )
-        cur.execute(
-            "SELECT filename FROM fwi_files WHERE fdate=%s ORDER BY id DESC LIMIT 1",
-            (target_date,),
-        )
-        row = cur.fetchone()
-        filename = row[0] if row else None
 
     grid_y, grid_x, area_info = _fwi_area_grid_indices(
         np.asarray(current["lon"], dtype=float),
@@ -642,6 +723,7 @@ def sample_operational_weather_area_from_db(
         "precipitation_mm": _nanmean_float(precipitation),
         "source": "database:fwi_slices",
         "included_in_standard_fwi_equations": False,
+        **_fwi_forecast_metadata(current_source, current_offset),
     }
 
 
