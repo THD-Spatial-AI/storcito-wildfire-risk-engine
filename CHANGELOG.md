@@ -3,6 +3,54 @@
 Notable changes of this engine relative to the original UVIGO codebase
 (https://github.com/Mat-GL-02/STORCITO), plus operational notes.
 
+## 2026-09-07 — Dynamic AHP and vegetation-contact WUI (model 2026-09-07.3)
+
+- Restored all upstream dynamic AHP matrices: top-level terrain/vegetation/
+  human influence/weather, terrain including TWI, roads/WUI, and FWI/LST.
+  Vegetation retains the restored Fuel/NDVI/NDMI matrix.
+- Dynamic defaults now generate TWI and LST. All active predictors are required;
+  absent data do not silently transfer their weights to other predictors.
+- Regional WUI scores selected vegetation classes inside a 400 m artificial-
+  surface envelope after 2 km road-based CLC preselection. Outside the WUI is a
+  valid zero contribution. Finca buffers remain 200 m / 40 m. The shared WUI
+  layer also changes static outputs; static AHP weights remain unchanged.
+- Keep negative-exponent FFMC, other FWI corrections, seasonal initialization,
+  current NDVI thresholds, NoData safeguards, non-fuel masking and provenance.
+  Regional road bands remain 250/500/750/1000/1250 m on the current raster grid.
+- Dynamic output identifies its scheme as `storcito-dynamic-ahp`; retained
+  operational safeguards mean it is not a bitwise upstream reproduction.
+- Set `STORCITO_MODEL_VERSION=2026-09-07.3`, recreate API services and regenerate
+  maps. Ensure TWI and fresh LST inputs are available before dynamic runs.
+- The final label `.3` was explicitly requested after preliminary `.4`/`.5`
+  labels. Invalidate/regenerate any earlier road-only `.3` results and caches;
+  the reused version string cannot distinguish those calculations.
+
+## 2026-09-07 — Dynamic vegetation matrix (model 2026-09-07.4)
+
+- Restored the upstream STORCITO vegetation comparison matrix in Fuel/NDVI/NDMI
+  order, yielding approximately 64.8%/23.0%/12.2% within the vegetation topic.
+- Enabled NDMI in the dynamic default, including coherent B4/B8/B11 reconstruction
+  for AOI runs and NDMI generation in the whole-region entry point.
+- Require both vegetation indices; missing pixels are masked and unavailable
+  indices produce an insufficient-data error without weight redistribution.
+  NDMI now preserves source NoData and invalid ratios in both entry points.
+- NDVI thresholds, static vegetation, other topic weights, and road rules stay
+  unchanged. The overall model remains an adaptation, not a full upstream replica.
+- Deploy with `STORCITO_MODEL_VERSION=2026-09-07.4`, recreate API services,
+  and regenerate assessments. Dynamic runs now also need valid Sentinel B11.
+
+## 2026-09-07 — Original road rules (model 2026-09-07.3)
+
+- Restored regional road-distance bands at 250/500/750/1000/1250 m with
+  scores 5/4/3/2/1 and zero road contribution beyond 1250 m.
+- Restored CLC polygon preselection by intersection with a 2 km road buffer
+  before regional settlement scoring. Whole polygons are selected, not clipped.
+- Settlement-distance scoring remains 500/1000/1500/2000 m; this is not a
+  restoration of the full original vegetation-class WUI model. Finca defaults,
+  NDVI thresholds/requirements, FWI, and AHP weights are unchanged.
+- Deploy with `STORCITO_MODEL_VERSION=2026-09-07.3`, recreate API services,
+  and regenerate affected assessments. Existing outputs remain unchanged.
+
 ## 2026-09-07 — Required NDVI (model 2026-09-07.2)
 
 - Sentinel tile downloads retry transient HTTP errors, timeouts, and interrupted

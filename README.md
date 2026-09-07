@@ -339,26 +339,58 @@ image if you are upgrading an older container.)
 
 ### Scientific model profile
 
-The default `published_galicia_2020` profile reproduces the documented
-STORCITO AHP model from [*Mapping Forest Fire Risk—A Case Study in Galicia
-(Spain)*](https://doi.org/10.3390/rs12223705) (Remote Sensing 2020). It uses the paper's
-terrain, fuel, road-distance, settlement-distance, and FWI classes and
-its published weights. NDVI retains the project's low-end adjustments:
+Model `2026-09-07.3` now uses the following dynamic AHP comparison matrices from
+upstream STORCITO revision `0f71113a04426bbd6d4e3dae7e21ead8877f7cde`,
+with the output scheme named `storcito-dynamic-ahp`. Weights are computed by
+column normalization and row means, not from rounded percentages:
+
+| Component | Weights (approximately) |
+| --- | --- |
+| Top-level | Vegetation 45.64%, terrain 9.44%, human influence 14.61%, weather 30.32% |
+| Vegetation | Fuel 64.8%, NDVI 23.0%, NDMI 12.2% |
+| Terrain | Elevation 44.95%, slope 25.96%, aspect 17.07%, TWI 12.02% |
+| Human influence | Roads 66.67%, WUI 33.33% |
+| Weather | FWI 75%, LST 25% |
+
+Subcomponent percentages are within-topic weights. All predictors of active
+topics are required: missing pixels remain NoData, and missing TWI/LST/NDVI/NDMI
+inputs cannot silently redistribute their weights. Database reconstruction
+requests coherent Sentinel B4/B8/B11 imagery (B8/B11 if NDVI is user-supplied),
+TWI for terrain, and fresh LST for weather. Existing percentile classification
+and region-wide breakpoint support for TWI/LST are retained.
+
+Static mode remains the fuel-only vegetation adaptation of the documented
+[Galicia 2020 model](https://doi.org/10.3390/rs12223705), with its existing
+weights after omission of the historical-fire term. Its weights are unchanged;
+the shared regional WUI method below does change static outputs.
+`FFRM_WEIGHT_SCHEME=published_galicia_2020` remains a compatibility selector;
+the actual dynamic model is identified by its output scheme and model version.
+The `.3` label was reused at the deployment owner's request. If any earlier
+road-only `.3` results or caches exist, invalidate/regenerate them before serving
+this revision: a version-label check alone cannot distinguish those outputs.
+Regional roads use the original STORCITO 250/500/750/1000/1250 m bands,
+with scores 5/4/3/2/1 and zero road contribution beyond 1250 m.
+NDVI retains the project's low-end adjustments:
 values <=0 are nodata and 0 < NDVI <=0.1 receives class 1; the remaining
-intervals use the published thresholds. The historical-fire coefficient is removed and the
-other top-level weights are renormalized because the current FIRMS/dNBR
-overlay is not the historical-fire-regime variable used by the study.
-The `2020` suffix identifies the published method version; it does not change
-the requested assessment date or force the engine to use 2020 observations.
+intervals use the published thresholds. The fixed-season FWI initialization,
+negative-exponent FFMC and other numerical corrections, timestamp-based noon
+observation and precipitation window, provenance and non-fuel mask are retained.
+Historical fire remains an informational overlay rather than a scored predictor.
 
-The CLC artificial-surface layer is disclosed as a proxy for cadastral
-settlements. The paper was evaluated in two roadside study areas, so this is
-an expert-weighted susceptibility index, not a validated Galicia-wide ignition
-probability. TWI, NDMI, and LST remain available data products but are not
-silently added to the default AHP equation because no fitted/validated weights
-for them are present in this repository.
+Regional WUI selects whole CLC polygons intersecting a 2 km road buffer, then
+scores vegetation classes within a 400 m envelope around selected artificial
+surfaces (CLC 100–199). Scores are: 311 → 2, 312 → 5, 313 → 4, 321 → 2,
+322/323/324 → 3, 333 → 2, and agricultural classes 200–299 → 1.
+Outside the eligible interface, zero is a valid WUI contribution. The documented
+50 m inner buffer is not subtracted, matching upstream behavior. Finca retains
+its 200 m road and 40 m urban buffers. Artificial surfaces remain a development
+proxy, not individual building footprints.
+This is an expert-weighted susceptibility index, not a validated Galicia-wide
+ignition probability. Restored matrices do not establish predictive accuracy;
+retained input, classification and numerical safeguards mean outputs are not a
+bitwise reproduction of upstream STORCITO.
 
-Non-fuel surfaces are excluded after the AHP calculation, so the published
+Non-fuel surfaces are excluded after the AHP calculation, so the configured
 weights are unchanged. The preferred mask uses the 10 m CLC+ Backbone 2023
 classes for sealed surfaces, water, snow/ice, and coastal water.
 [Its official product manual defines those categorical pixel values.](https://library.land.copernicus.eu/products/CLCplus_Backbone_2023_PUM_v1.html)
@@ -406,15 +438,16 @@ calculation payload at `/run-static-aoi-wildfire` and `/calliope/start`.
   is calculated at 12:00 local standard time (12:00 CET or 13:00
   CEST in Galicia) with assessment-to-assessment precipitation. Weather shown
   for 16:00 is a separate operational snapshot.
-- Every dynamic frame uses FWI for that date and a B4/B8 Sentinel composite on
-  or before that date. Each composite pixel uses both bands from one capture
-  date. NDVI is required when the dynamic vegetation component is active:
-  missing NDVI risk pixels remain NoData, without spatial gap interpolation or
-  redistribution of their weight to fuel. If the NDVI raster is missing or has
+- Every dynamic frame uses FWI for that date and a B4/B8/B11 Sentinel composite on
+  or before that date (B8/B11 when NDVI is user-supplied). Each composite pixel
+  uses the requested bands from one capture date. NDVI and NDMI are required
+  when the dynamic vegetation component is active: missing index risk pixels
+  remain NoData, without spatial gap interpolation or redistribution of their
+  weights. If either index raster is missing or has
   no valid risk pixels in the analysis area, the AOI API returns an insufficient
   data error (HTTP 422). NDVI thresholds are unchanged. Configured model-weight
   coverage is exported as `data_coverage.tif`; the additional
-  `FFRM_MIN_WEIGHT_COVERAGE` check (default 0.75) cannot relax this NDVI requirement.
+  `FFRM_MIN_WEIGHT_COVERAGE` check (default 0.75) cannot relax these index requirements.
 - Historical fire is delivered as an informational overlay and is not included
   in the AHP risk score.
 - If `buffer_distance` is greater than zero, it expands the supplied GeoJSON AOI.

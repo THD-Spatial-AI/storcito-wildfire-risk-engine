@@ -14,14 +14,15 @@ def Ndmi(input_band8, input_band11, output_folder=None, export_image=False,
     )
 
     with rasterio.open(input_band8) as b8_src:
-        nir_band = b8_src.read(1).astype('float32')
+        nir_band = b8_src.read(1, masked=True).astype('float32').filled(np.nan)
         meta_ref = b8_src.meta.copy()
 
     with rasterio.open(input_band11) as b11_src:
-        swir_band = b11_src.read(1).astype('float32')
+        swir_band = b11_src.read(1, masked=True).astype('float32').filled(np.nan)
 
-    np.seterr(divide='ignore', invalid='ignore')
-    ndmi = (nir_band - swir_band) / (nir_band + swir_band)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ndmi = (nir_band - swir_band) / (nir_band + swir_band)
+    ndmi[~np.isfinite(ndmi)] = np.nan
 
     # Reclasification: assign values 1-5 for risk levels
     reclasificado = np.zeros_like(ndmi, dtype='int32')
@@ -54,12 +55,13 @@ def Ndmi(input_band8, input_band11, output_folder=None, export_image=False,
 def ndmi_risk(input_band8, input_band11, output_risk):
     """Non-interactive NDMI risk layer (fixed thresholds, as the original)."""
     with rasterio.open(input_band8) as b8_src:
-        nir = b8_src.read(1).astype("float32")
+        nir = b8_src.read(1, masked=True).astype("float32").filled(np.nan)
         meta = b8_src.meta.copy()
     with rasterio.open(input_band11) as b11_src:
-        swir = b11_src.read(1).astype("float32")
-    np.seterr(divide="ignore", invalid="ignore")
-    ndmi = (nir - swir) / (nir + swir)
+        swir = b11_src.read(1, masked=True).astype("float32").filled(np.nan)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ndmi = (nir - swir) / (nir + swir)
+    ndmi[~np.isfinite(ndmi)] = np.nan
     r = np.zeros_like(ndmi, dtype="int32")
     r[ndmi <= -0.20] = 5
     r[(ndmi > -0.20) & (ndmi <= 0.00)] = 4

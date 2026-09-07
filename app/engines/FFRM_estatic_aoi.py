@@ -144,7 +144,28 @@ _PUBLISHED_TOP_WEIGHTS_NO_HISTORY = {
 }
 _PUBLISHED_TOPO_WEIGHTS = {"mdt": 0.164, "slope": 0.297, "aspect": 0.539}
 _PUBLISHED_AI_WEIGHTS = {"infra": 0.750, "wui": 0.250}
-_PUBLISHED_VEGETATION_WEIGHTS = {"ftm": 0.750, "ndvi": 0.250}
+# Upstream dynamic vegetation comparison, ordered as fuel, NDVI, NDMI.
+# Column normalization followed by row means gives approximately 64.8/23/12.2%.
+_DYNAMIC_VEGETATION_MATRIX = (
+    (1, 3, 5),
+    (1 / 3, 1, 2),
+    (1 / 5, 1 / 2, 1),
+)
+_DYNAMIC_TERRAIN_MATRIX = (
+    (1, 2, 3, 3),
+    (1 / 2, 1, 2, 2),
+    (1 / 3, 1 / 2, 1, 2),
+    (1 / 3, 1 / 2, 1 / 2, 1),
+)
+_DYNAMIC_HUMAN_INFLUENCE_MATRIX = ((1, 2), (1 / 2, 1))
+_DYNAMIC_WEATHER_MATRIX = ((1, 3), (1 / 3, 1))
+# Upstream order: terrain, vegetation, human influence, weather.
+_DYNAMIC_TOP_MATRIX = (
+    (1, 1 / 4, 1 / 2, 1 / 3),
+    (4, 1, 3, 2),
+    (2, 1 / 3, 1, 1 / 3),
+    (3, 1 / 2, 3, 1),
+)
 
 # Keep the public name for compatibility with the whole-region entry points.
 ORIGINAL_SPECS: dict[str, dict] = {
@@ -161,8 +182,8 @@ ORIGINAL_SPECS: dict[str, dict] = {
         "interp_keys": set(),
         "scientific_basis": "doi:10.3390/rs12223705; historical-fire term omitted",
         "layer_roles": {
-            "infra": "road distance",
-            "wui": "settlement distance (CLC artificial-surface proxy)",
+            "infra": "road distance (original STORCITO 250 m regional bands)",
+            "wui": "vegetation-contact WUI (CLC classes; regional 2 km road preselection, 400 m urban buffer)",
         },
         "limitations": (
             "Static mode lacks the published NDVI predictor; CLC artificial "
@@ -171,26 +192,30 @@ ORIGINAL_SPECS: dict[str, dict] = {
         ),
     },
     "dynamic": {
-        "name": "published-galicia-2020-no-history",
+        "name": "storcito-dynamic-ahp",
         "topics": {
-            "veg": (["ftm", "ndvi"], _PUBLISHED_VEGETATION_WEIGHTS),
-            "topo": (["mdt", "slope", "aspect"], _PUBLISHED_TOPO_WEIGHTS),
-            "ai": (["infra", "wui"], _PUBLISHED_AI_WEIGHTS),
-            "meteo": (["meteo"], None),
+            "veg": (["ftm", "ndvi", "ndmi"], _DYNAMIC_VEGETATION_MATRIX),
+            "topo": (["mdt", "slope", "aspect", "twi"], _DYNAMIC_TERRAIN_MATRIX),
+            "ai": (["infra", "wui"], _DYNAMIC_HUMAN_INFLUENCE_MATRIX),
+            "meteo": (["meteo", "lst"], _DYNAMIC_WEATHER_MATRIX),
         },
-        "top_order": ["veg", "topo", "ai", "meteo"],
-        "top_weights": _PUBLISHED_TOP_WEIGHTS_NO_HISTORY,
+        "top_order": ["topo", "veg", "ai", "meteo"],
+        "top_matrix": _DYNAMIC_TOP_MATRIX,
         "interp_keys": set(),
-        "scientific_basis": "doi:10.3390/rs12223705; historical-fire term omitted",
+        "scientific_basis": (
+            "Dynamic AHP matrices from Mat-GL-02/STORCITO "
+            "0f71113a04426bbd6d4e3dae7e21ead8877f7cde"
+        ),
         "layer_roles": {
-            "infra": "road distance",
-            "wui": "settlement distance (CLC artificial-surface proxy)",
+            "infra": "road distance (original STORCITO 250 m regional bands)",
+            "wui": "vegetation-contact WUI (CLC classes; regional 2 km road preselection, 400 m urban buffer)",
         },
         "limitations": (
-            "Expert AHP developed for two Galicia roadside study areas; CLC "
-            "artificial surfaces proxy the cadastral settlement layer; the "
-            "historical-fire term is omitted; whole-region predictive validation "
-            "is not established."
+            "Upstream dynamic AHP matrices with retained FWI corrections, NDVI "
+            "low-value adjustments, required-data checks and non-fuel masking. "
+            "CLC artificial surfaces proxy development; historical fire is an "
+            "informational overlay. Not a bitwise upstream reproduction; "
+            "whole-region predictive validation is not established."
         ),
     },
 }
@@ -245,10 +270,11 @@ def _combine_layers(
     export_only: dict[str, Path] | None = None,
     domain_mask_path: Path | None = None,
 ) -> dict[str, Path]:
-    """Combine layers while recording and renormalizing optional data gaps."""
+    """Combine active topics with fixed subweights and required-predictor masks."""
     active_topics = set(active_topics) & set(spec["top_order"])
-    # NDVI is a required predictor: never transfer its weight to fuel.
-    optional_gap_keys = {"lst", "twi", "ndmi"}
+    # Vegetation indices are required: never redistribute their missing weights.
+    required_indices = {"ndvi", "ndmi"}
+    optional_gap_keys: set[str] = set()
     minimum_weight_coverage = _minimum_weight_coverage()
     log_event(
         "AHP",
@@ -297,6 +323,17 @@ def _combine_layers(
                     "Load valid Sentinel B4/B8 imagery within the permitted date "
                     "window or supply a valid NDVI raster."
                 )
+            if key == "ndmi":
+                raise LookupError(
+                    "Insufficient data: NDMI is required for dynamic vegetation risk. "
+                    "Load valid Sentinel B8/B11 imagery within the permitted date window."
+                )
+            if key in {"lst", "twi"}:
+                raise LookupError(
+                    f"Insufficient data: {key.upper()} is required by the active "
+                    "dynamic model component. Load a valid risk input; its weight "
+                    "will not be redistributed."
+                )
             if key in optional_gap_keys:
                 return (
                     np.zeros(master_mask.shape, dtype=np.float32),
@@ -311,7 +348,7 @@ def _combine_layers(
         else:
             data[data <= 0] = np.nan
             valid_mask = np.isfinite(data)
-        if key in spec["interp_keys"] and key != "ndvi":
+        if key in spec["interp_keys"] and key not in required_indices:
             data = fillnodata(
                 data, mask=valid_mask, max_search_distance=25.0, smoothing_iterations=0
             ).astype(np.float32, copy=False)
@@ -319,10 +356,10 @@ def _combine_layers(
         np.nan_to_num(data, copy=False, nan=0.0)
         data[~master_mask] = 0
         valid_mask &= master_mask
-        if key == "ndvi" and not np.any(valid_mask & analysis_domain_mask):
+        if key in required_indices | {"lst", "twi"} and not np.any(valid_mask & analysis_domain_mask):
             raise LookupError(
-                "Insufficient data: NDVI has no valid risk pixels in the analysis "
-                "area. Missing NDVI is not replaced or redistributed to fuel."
+                f"Insufficient data: {key.upper()} has no valid risk pixels in the analysis "
+                f"area. Missing {key.upper()} is not replaced or redistributed to fuel."
             )
         return data, valid_mask
 
@@ -390,7 +427,7 @@ def _combine_layers(
         idx = [spec["top_order"].index(t) for t in order]
         m = np.array(spec["top_matrix"], dtype=np.float32)[np.ix_(idx, idx)]
         final_weights = calculate_weights(normalize_matrix(m)).astype(np.float32)
-        cr = consistency_ratio(m, final_weights)
+        cr = consistency_ratio(m, final_weights) if len(order) > 1 else 0.0
     else:
         raw = np.array([spec["top_weights"][t] for t in order], dtype=np.float32)
         final_weights = raw / raw.sum()
@@ -474,8 +511,8 @@ def _combine_layers(
                 "required_layers": sorted(required_layer_keys),
                 "optional_gap_layers": sorted(optional_gap_keys & model_layer_keys),
                 "nodata_policy": (
-                    "renormalize configured optional-layer gaps locally, require "
-                    "all core layers, and mask pixels below the configured "
+                    "require every predictor in active topics without missing-weight "
+                    "redistribution, and mask pixels below the configured "
                     "model-weight coverage threshold"
                 ),
                 "minimum_configured_weight_coverage": minimum_weight_coverage,
@@ -720,7 +757,10 @@ def run_static_aoi_for_geometry(
     if mode not in {"static", "dynamic"}:
         mode = "static"
     spec = _resolve_spec(mode)
-    spec_keys = {k for keys, _ in spec["topics"].values() for k in keys}
+    spec_keys = {
+        key for topic, (keys, _) in spec["topics"].items()
+        if topic in active_top_levels for key in keys
+    }
     print(f"[FFRM] combination: {spec['name']} (mode={mode}, profile={profile})", flush=True)
 
     if isinstance(target_date, str):
@@ -807,7 +847,10 @@ def run_static_aoi_for_geometry(
 
         Mdt.mdt(cropped_dtm, output_folder=base_output_dir, export_image=True, show_plots=False)
         if "twi" in spec_keys and "topo" in active_top_levels:
-            cropped_twi = crop_raster_to_geometry(input_dir / "TWI" / "TWI.tif", inputs_dir / "TWI.tif", processing_aoi)
+            twi_source = input_dir / "TWI" / "TWI.tif"
+            if not twi_source.is_file():
+                raise LookupError("Insufficient data: TWI is required for dynamic terrain risk. Load a valid TWI raster.")
+            cropped_twi = crop_raster_to_geometry(twi_source, inputs_dir / "TWI.tif", processing_aoi)
             Twi.twi_risk(
                 cropped_twi,
                 base_output_dir / "TIFs" / "TWI_Risk_Map.tif",

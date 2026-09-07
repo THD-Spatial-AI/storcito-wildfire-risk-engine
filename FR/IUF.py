@@ -10,13 +10,26 @@ from FR.rutinas.setup import *
 from pathlib import Path
 from rasterio.io import MemoryFile
 from rasterio.transform import from_bounds
-from rasterio.features import rasterize
+from rasterio.features import rasterize, geometry_mask
 from rasterio.mask import mask
 from shapely.geometry.base import BaseGeometry
 from FR.aoi import reproject_geometry
 from FR.processing_log import log_array_stats, log_event, logged_step
 
 PUBLISHED_SETTLEMENT_DISTANCE_BOUNDS_M = (500, 1000, 1500, 2000)
+
+
+def _road_preselected_clc(clc: gpd.GeoDataFrame, roads: gpd.GeoDataFrame,
+                          buffer_m: float) -> gpd.GeoDataFrame:
+    """Original regional selection: keep whole CLC polygons touching a road buffer.
+
+    Both inputs must be in the projected metre-based engine CRS. This selects
+    polygons; it does not clip their geometry to the road buffer.
+    """
+    if clc.empty or roads.empty:
+        return clc.iloc[:0].copy()
+    road_zone = roads.buffer(buffer_m).union_all()
+    return clc[clc.intersects(road_zone)].copy()
 
 
 def classify_settlement_distance_risk(distance_m: np.ndarray) -> np.ndarray:
@@ -40,11 +53,11 @@ def wui(input_road, input_clc, file_name:str='IUF_Risk_Map',
         urban_inner_buffer_m: float | None = None,
         use_reference_grid: bool | None = None)->None:
     
-    """Create the anthropogenic settlement-distance risk layer.
+    """Score vegetation in contact with CLC artificial-surface buffers.
 
-    Regional mode follows the published Galicia distance classes (500 m
-    increments through 2 km), using CLC artificial surfaces as the available
-    settlement proxy. Finca mode retains the original WUI procedure.
+    Regional mode uses the upstream 2 km road preselection and 400 m urban
+    envelope. Finca retains its 200 m road / 40 m urban defaults. Scores are
+    assigned by vegetation class, not distance from settlements.
     """
 
     profile = (risk_profile or "regional").strip().lower()
@@ -59,26 +72,22 @@ def wui(input_road, input_clc, file_name:str='IUF_Risk_Map',
         "SETTLEMENT",
         "INPUT",
         clc=input_clc,
-        roads=input_road if profile == "finca" else None,
+        roads=input_road,
         reference=reference_file,
         profile=profile,
         source_role=(
-            "CLC-artificial-surface settlement proxy"
+            "CLC vegetation-contact WUI"
             if profile == "regional"
             else "legacy WUI"
         ),
     )
 
-    road = (
-        gpd.read_file(input_road).to_crs(epsg=32629)
-        if profile == "finca"
-        else None
-    )
+    road = gpd.read_file(input_road).to_crs(epsg=32629)
     clc = gpd.read_file(input_clc).to_crs(epsg=32629)
     if aoi_geometry is not None:
         projected_aoi = reproject_geometry(aoi_geometry, aoi_crs, "EPSG:32629")
         search_area = projected_aoi.buffer(road_buffer + urban_outer_buffer)
-        if road is not None:
+        if profile == "finca":
             road = road[road.intersects(search_area)].copy()
         clc = clc[clc.intersects(search_area)].copy()
     log_event(
@@ -123,79 +132,24 @@ def wui(input_road, input_clc, file_name:str='IUF_Risk_Map',
     # Convertir Code_18 a numérico de una vez
     clc['Code_18'] = pd.to_numeric(clc['Code_18'], errors='coerce')
 
-    if profile == "regional":
-        from scipy.ndimage import distance_transform_edt
-
-        settlements = clc[
-            (clc["Code_18"] >= 100) & (clc["Code_18"] < 200)
-        ]
-        settlement_mask = rasterize(
-            ((geometry, 1) for geometry in settlements.geometry),
-            out_shape=(y_res, x_res),
-            transform=transform,
-            fill=0,
-            dtype=rasterio.uint8,
-            all_touched=True,
-        )
-        distance = np.full((y_res, x_res), np.inf)
-        settlement_risk = classify_settlement_distance_risk(distance)
-        if np.any(settlement_mask):
-            distance = distance_transform_edt(
-                settlement_mask == 0,
-                sampling=(abs(transform.e), abs(transform.a)),
-            )
-            settlement_risk = classify_settlement_distance_risk(distance)
-
-        out_meta = {
-            "driver": "GTiff",
-            "height": y_res,
-            "width": x_res,
-            "count": 1,
-            "dtype": rasterio.uint8,
-            "crs": crs_str,
-            "transform": transform,
-        }
-        log_event(
-            "SETTLEMENT",
-            "CLASSIFICATION",
-            settlement_features=len(settlements),
-            boundaries_m="500,1000,1500,2000",
-            source="CLC classes 100-199",
-        )
-        log_array_stats(
-            "SETTLEMENT", "distance-m", distance
-        )
-        log_array_stats(
-            "SETTLEMENT", "settlement-distance-risk", settlement_risk
-        )
-        fig1, _ax1 = default_imshow(
-            settlement_risk, "Settlement Distance Risk Map", {"label": "Risk"}
-        )
-        if show_plots:
-            plt.show()
-        if export_image:
-            save_file(
-                settlement_risk,
-                file_name,
-                output_folder,
-                out_meta,
-                extensions=["tif", "png"],
-                fig=fig1,
-                meta_intact=True,
-            )
-        return settlement_risk[np.newaxis, ...]
-    
     if road is None or road.empty or clc.empty:
         return _save_empty_result()
 
-    try:
-        left_idx, _ = road.sindex.query(
-            clc.geometry, predicate="dwithin", distance=road_buffer
+    if profile == "regional":
+        poligonos = _road_preselected_clc(clc, road, road_buffer)
+        log_event(
+            "SETTLEMENT", "ROAD_PRESELECTION", road_buffer_m=road_buffer,
+            clc_before=len(clc), clc_after=len(poligonos),
+            policy="whole-polygons-intersecting-road-buffer",
         )
-        poligonos = clc.iloc[sorted(set(left_idx))].copy()
-    except (TypeError, ValueError):  # older shapely/GEOS without dwithin
-        road_buffer_geom = road.buffer(road_buffer).union_all()
-        poligonos = clc[clc.intersects(road_buffer_geom)].copy()
+    else:
+        try:
+            left_idx, _ = road.sindex.query(
+                clc.geometry, predicate="dwithin", distance=road_buffer
+            )
+            poligonos = clc.iloc[sorted(set(left_idx))].copy()
+        except (TypeError, ValueError):  # older shapely/GEOS without dwithin
+            poligonos = _road_preselected_clc(clc, road, road_buffer)
     print("Intersecting polygons found (phase I):", len(poligonos))
     
     if len(poligonos) == 0:
@@ -208,7 +162,8 @@ def wui(input_road, input_clc, file_name:str='IUF_Risk_Map',
     if len(pol1) == 0:
         return _save_empty_result()
     
-    # Crear máscara IUF en memoria. The legacy finca script documented an inner 5 m buffer but used only the outer 40 m mask; keep that exact behavior.
+    # Both upstream profiles used only the outer envelope, without subtracting
+    # the documented inner buffer (regional 50 m / finca 5 m).
   
     bf_outer = pol1.buffer(urban_outer_buffer).union_all()
     _bf_inner = pol1.buffer(urban_inner_buffer).union_all()
@@ -245,6 +200,29 @@ def wui(input_road, input_clc, file_name:str='IUF_Risk_Map',
     # Rasterizar directamente en memoria
     geom_vals = ((g, v) for g, v in zip(pol2_sel.geometry, pol2_sel['risk']))
     raster_data = rasterize(geom_vals, out_shape=(y_res, x_res), transform=transform, fill=0, dtype=rasterio.uint8)
+    log_event(
+        "SETTLEMENT", "CLASSIFICATION", urban_buffer_m=urban_outer_buffer,
+        artificial_features=len(pol1), vegetation_features=len(pol2_sel),
+        source="CLC vegetation classes within artificial-surface envelope",
+        outside_risk=0,
+    )
+
+    if profile == "regional":
+        # Keep the reference grid even when the envelope falls outside it.
+        # Zero means no WUI contribution, not a missing predictor.
+        inside = geometry_mask([IUF_mask_geom], out_shape=(y_res, x_res),
+                               transform=transform, invert=True)
+        raster_data[~inside] = 0
+        log_array_stats("SETTLEMENT", "vegetation-contact-risk", raster_data)
+        out_meta = dict(driver="GTiff", height=y_res, width=x_res, count=1,
+                        dtype=rasterio.uint8, crs=crs_str, transform=transform)
+        fig1, _ = default_imshow(raster_data, "WUI Risk Map", {"label": "Risk"})
+        if export_image:
+            save_file(raster_data, file_name, output_folder, out_meta,
+                      extensions=["tif", "png"], fig=fig1, meta_intact=True)
+        if show_plots:
+            plt.show()
+        return raster_data[np.newaxis, ...]
     
     # Aplicar máscara (crop) - crear raster enmascarado
     mask_geoms = [IUF_mask_geom]

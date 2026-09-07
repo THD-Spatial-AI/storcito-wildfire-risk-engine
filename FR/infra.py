@@ -18,11 +18,12 @@ from FR.aoi import reproject_geometry
 from FR.processing_log import log_array_stats, log_event, logged_step
 
 PUBLISHED_ROAD_DISTANCE_BOUNDS_M = (300, 600, 900, 1200)
+REGIONAL_ROAD_DISTANCE_BOUNDS_M = (250, 500, 750, 1000, 1250)
 
 
 def classify_road_distance_risk(
     distance_m: np.ndarray,
-    radii: list[int] | tuple[int, ...] = PUBLISHED_ROAD_DISTANCE_BOUNDS_M,
+    radii: list[int] | tuple[int, ...] = REGIONAL_ROAD_DISTANCE_BOUNDS_M,
 ) -> np.ndarray:
     """Map road distance to descending risk classes."""
     if not radii or len(radii) > 5 or list(radii) != sorted(radii):
@@ -65,8 +66,8 @@ def infrastructure(input_infra: str|Path,
                    use_reference_grid: bool | None = None) -> npt.NDArray:
     """Classify distance to roads on the reference grid.
 
-    Regional mode reproduces the published Galicia classes: class 5 through
-    300 m, classes 4/3/2 through 600/900/1200 m, and class 1 beyond 1200 m.
+    Regional mode uses the original STORCITO 250 m bands through 1250 m,
+    with scores 5/4/3/2/1 and a zero road contribution beyond 1250 m.
     Finca mode retains the legacy parcel-scale buffers.
     """
     
@@ -83,7 +84,7 @@ def infrastructure(input_infra: str|Path,
         or (
             [25, 50, 75, 100, 125]
             if profile == "finca"
-            else list(PUBLISHED_ROAD_DISTANCE_BOUNDS_M)
+            else list(REGIONAL_ROAD_DISTANCE_BOUNDS_M)
         )
     )
     if not radii or len(radii) > 5 or radii != sorted(radii):

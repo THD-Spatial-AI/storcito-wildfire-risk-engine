@@ -72,14 +72,14 @@ os.makedirs(output_folder_cropped, exist_ok=True)
 
 # --------------------------- 1.3. EXECUTION CONTROL --------------------------- Defaults overridable via FFRM_RUN_* env vars.
 run_mdt = _env_flag("FFRM_RUN_MDT", True)
-run_twi = _env_flag("FFRM_RUN_TWI", False)
+run_twi = _env_flag("FFRM_RUN_TWI", True)
 run_ndvi = _env_flag("FFRM_RUN_NDVI", True)
-run_ndmi = _env_flag("FFRM_RUN_NDMI", False)
+run_ndmi = _env_flag("FFRM_RUN_NDMI", True)
 run_fmt = _env_flag("FFRM_RUN_FMT", True)
 run_infra = _env_flag("FFRM_RUN_INFRA", True)
 run_wui = _env_flag("FFRM_RUN_WUI", True)
 run_fwi = _env_flag("FFRM_RUN_FWI", True)
-run_lst = _env_flag("FFRM_RUN_LST", False)
+run_lst = _env_flag("FFRM_RUN_LST", True)
 
 generate_mdt = _env_flag("FFRM_GENERATE_MDT", run_mdt)
 generate_twi = _env_flag("FFRM_GENERATE_TWI", run_twi)
