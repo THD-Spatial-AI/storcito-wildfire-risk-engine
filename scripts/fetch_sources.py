@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import http.client
 import io
 import json
 import math
@@ -21,6 +22,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from datetime import date, datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
@@ -409,18 +411,61 @@ def request_bytes(
     headers: dict[str, str] | None = None,
     data: bytes | None = None,
     timeout: int = 600,
+    max_attempts: int = 1,
 ) -> bytes:
+    """Read a complete response; retries are opt-in for replay-safe requests."""
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
     req = urllib.request.Request(url, data=data, headers=with_user_agent(headers), method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read()
-    except urllib.error.HTTPError as exc:
-        body = redact(exc.read().decode("utf-8", errors="replace"))
-        raise FetchError(f"HTTP {exc.code} for {redact_url(url)}: {body[:1000]}") from exc
-    except urllib.error.URLError as exc:
-        raise FetchError(
-            f"request failed for {redact_url(url)}: {redact(exc.reason)}"
-        ) from exc
+    for attempt in range(1, max_attempts + 1):
+        retry_after = 0.0
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                # Partial responses are discarded, never staged as valid tiles.
+                return resp.read()
+        except urllib.error.HTTPError as exc:
+            cause = exc
+            retryable = exc.code in {408, 429, 500, 502, 503, 504}
+            header = exc.headers.get("Retry-After") if exc.headers else None
+            if header:
+                try:
+                    retry_after = float(header)
+                except ValueError:
+                    try:
+                        retry_after = (
+                            parsedate_to_datetime(header) - datetime.now(timezone.utc)
+                        ).total_seconds()
+                    except (TypeError, ValueError, OverflowError):
+                        retry_after = 0.0
+                if not math.isfinite(retry_after):
+                    retry_after = 0.0
+            try:
+                body = redact(exc.read(1024).decode("utf-8", errors="replace"))
+            except (http.client.HTTPException, OSError):
+                body = "error response was interrupted"
+            finally:
+                exc.close()
+            message = f"HTTP {exc.code} for {redact_url(url)}: {body[:1000]}"
+        except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
+            cause = exc
+            retryable = True
+            reason = getattr(exc, "reason", exc)
+            message = (
+                f"request failed for {redact_url(url)}: "
+                f"{type(exc).__name__}: {redact(reason)}"
+            )
+        if not retryable or attempt == max_attempts:
+            raise FetchError(f"{message} (attempt {attempt}/{max_attempts})") from cause
+        if retry_after > 60:
+            # Do not retry earlier than the service permits or sleep unboundedly.
+            raise FetchError(
+                f"{message}; Retry-After={retry_after:.0f}s exceeds automatic "
+                "retry limit; resume the fetch later"
+            ) from cause
+        delay = max(min(5 * 2 ** min(attempt - 1, 4), 60), retry_after)
+        log(f"retry {attempt + 1}/{max_attempts} in {delay:g}s: {message}")
+        time.sleep(delay)
+    raise AssertionError("request retry loop did not execute")
 
 
 def request_json(
@@ -854,6 +899,7 @@ def sentinel_process_request(
             },
             data=json.dumps(body).encode("utf-8"),
             timeout=900,
+            max_attempts=5,
         )
         archive.write_bytes(raw)
         safe_extract_tar(archive, stage)

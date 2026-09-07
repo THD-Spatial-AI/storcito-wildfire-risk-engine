@@ -5,6 +5,10 @@ Notable changes of this engine relative to the original UVIGO codebase
 
 ## 2026-09-07 — Required NDVI (model 2026-09-07.2)
 
+- Sentinel tile downloads retry transient HTTP errors, timeouts, and interrupted
+  responses up to five attempts with backoff. Exhausted retries are reported as
+  tile failures; incomplete windows remain unmarked and the fetch exits nonzero.
+  Valid cached tiles remain reusable. Other API calls are not automatically replayed.
 - Dynamic vegetation risk requires valid NDVI at each output pixel. Missing
   NDVI is NoData, never zero-filled, spatially interpolated, or reweighted to
   fuel. Completely unavailable NDVI produces an insufficient-data error.
