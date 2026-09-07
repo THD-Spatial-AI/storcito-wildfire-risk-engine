@@ -314,6 +314,35 @@ def _validated_raster_grid(
     return info, bbox, grid
 
 
+def _sentinel_bounds_cover_galicia(bounds: list[list[float]]) -> bool:
+    """Check the union of tile rectangles, not just its outer envelope.
+
+    Empty/cloud-masked pixels are allowed; missing source tiles are not.
+    Sweep each longitude strip and check that its latitude intervals connect.
+    """
+    west, south, east, north = GALICIA_SOURCE_BBOX
+    tolerance = 1e-9  # Geographic grid round-off, not a missing-pixel allowance.
+    edges = sorted({west, east} | {
+        max(west, min(east, x)) for bbox in bounds for x in (bbox[0], bbox[2])
+    })
+    for left, right in zip(edges, edges[1:]):
+        if right - left <= tolerance:
+            continue
+        midpoint = (left + right) / 2
+        intervals = sorted(
+            (bbox[1], bbox[3]) for bbox in bounds
+            if bbox[0] - tolerance <= midpoint <= bbox[2] + tolerance
+        )
+        covered_to = south
+        for bottom, top in intervals:
+            if bottom > covered_to + tolerance:
+                break
+            covered_to = max(covered_to, top)
+        if covered_to < north - tolerance:
+            return False
+    return True
+
+
 def sentinel_window_files(directory: Path) -> dict[str, list[Path]]:
     """Discover and structurally validate staged Sentinel-2 band rasters.
 
@@ -350,14 +379,8 @@ def sentinel_window_files(directory: Path) -> dict[str, list[Path]]:
     expected_tiles = next(iter(tile_sets.values()))
     if any(keys != expected_tiles for keys in tile_sets.values()):
         raise LoadError(f"Sentinel bands do not contain the same tile set in {directory}")
-    union_bbox = [
-        min(item[0] for item in bounds),
-        min(item[1] for item in bounds),
-        max(item[2] for item in bounds),
-        max(item[3] for item in bounds),
-    ]
-    if not _bbox_covers_galicia(union_bbox):
-        raise LoadError(f"Sentinel raster set does not cover Galicia: {directory}")
+    if not _sentinel_bounds_cover_galicia(bounds):
+        raise LoadError(f"Sentinel raster set has gaps in Galicia coverage: {directory}")
     return files
 
 

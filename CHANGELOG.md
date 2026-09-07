@@ -3,6 +3,18 @@
 Notable changes of this engine relative to the original UVIGO codebase
 (https://github.com/Mat-GL-02/STORCITO), plus operational notes.
 
+## 2026-09-07 — Required NDVI (model 2026-09-07.2)
+
+- Dynamic vegetation risk requires valid NDVI at each output pixel. Missing
+  NDVI is NoData, never zero-filled, spatially interpolated, or reweighted to
+  fuel. Completely unavailable NDVI produces an insufficient-data error.
+- NDVI thresholds, configured AHP weights, seasonal FWI, and existing terrain
+  and land-cover safeguards are unchanged. Static fuel-only mode is unchanged.
+- Deployment: set `STORCITO_MODEL_VERSION=2026-09-07.2` in production, recreate
+  the API services, and regenerate affected maps. Old outputs are not modified
+  or relabeled. Missing imagery must still be backfilled before those dynamic
+  assessments can succeed.
+
 ## 2026-09-07 — Fire-risk calculation fixes
 
 - Model version `2026-09-07.1` uses a fixed March 1 moisture-code initialization,
@@ -17,6 +29,12 @@ Notable changes of this engine relative to the original UVIGO codebase
   retained exact 100% relative humidity.
 - Added regression tests for seasonal FWI history, terrain nodata, non-fuel
   masking, and the existing NDVI classification.
+- New AOI artifacts and database results record the executing model version;
+  database storage also retains source dates and skipped-layer provenance.
+  Existing unversioned results are not retroactively relabeled.
+- Sentinel ingestion now checks the union of source tile footprints and rejects
+  interior coverage gaps, even when the outer extent covers Galicia. This does
+  not reject legitimate cloud-masked pixels or change NDVI freshness rules.
 - Migration: seed continuous weather from the day before March 1 (February 28
   in 2026), set `STORCITO_MODEL_VERSION=2026-09-07.1`, recreate the services, and
   regenerate precomputed maps. Previous results use different model semantics.

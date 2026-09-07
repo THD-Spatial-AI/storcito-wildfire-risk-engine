@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 
 from app.engines.FFRM_estatic_aoi import run_static_aoi
+from app.config import MODEL_VERSION
 
 from app.schemas import StaticAOIRequest, WildfireCalculationRequest
 from app.services.jobs import (
@@ -68,6 +69,7 @@ def run_static_aoi_request(payload: StaticAOIRequest, request: Request):
                 "engine": "static_aoi",
                 "calculation_mode": "static",
                 "request_type": "point",
+                "model_version": MODEL_VERSION,
                 "target_date": outputs["target_date"],
                 "requested_date": outputs["requested_date"],
                 "longitude": payload.longitude,

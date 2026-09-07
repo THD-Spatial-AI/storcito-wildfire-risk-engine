@@ -408,10 +408,13 @@ calculation payload at `/run-static-aoi-wildfire` and `/calliope/start`.
   for 16:00 is a separate operational snapshot.
 - Every dynamic frame uses FWI for that date and a B4/B8 Sentinel composite on
   or before that date. Each composite pixel uses both bands from one capture
-  date. Missing NDVI weight is locally renormalized only when configured model
-  coverage remains at least `FFRM_MIN_WEIGHT_COVERAGE` (default 0.75), and the
-  actual coverage is exported as `data_coverage.tif`. Core-layer gaps remain
-  nodata.
+  date. NDVI is required when the dynamic vegetation component is active:
+  missing NDVI risk pixels remain NoData, without spatial gap interpolation or
+  redistribution of their weight to fuel. If the NDVI raster is missing or has
+  no valid risk pixels in the analysis area, the AOI API returns an insufficient
+  data error (HTTP 422). NDVI thresholds are unchanged. Configured model-weight
+  coverage is exported as `data_coverage.tif`; the additional
+  `FFRM_MIN_WEIGHT_COVERAGE` check (default 0.75) cannot relax this NDVI requirement.
 - Historical fire is delivered as an informational overlay and is not included
   in the AHP risk score.
 - If `buffer_distance` is greater than zero, it expands the supplied GeoJSON AOI.

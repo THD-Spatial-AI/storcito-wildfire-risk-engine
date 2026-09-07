@@ -46,6 +46,7 @@ from FR.processing_log import (
     reset_log_context,
 )
 import FR.db_reconstruct as DbReconstruct
+from app.config import MODEL_VERSION
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(os.environ.get("STORCITO_DATA_DIR", BASE_DIR / "data")).resolve()
@@ -246,7 +247,8 @@ def _combine_layers(
 ) -> dict[str, Path]:
     """Combine layers while recording and renormalizing optional data gaps."""
     active_topics = set(active_topics) & set(spec["top_order"])
-    optional_gap_keys = {"lst", "twi", "ndvi", "ndmi"}
+    # NDVI is a required predictor: never transfer its weight to fuel.
+    optional_gap_keys = {"lst", "twi", "ndmi"}
     minimum_weight_coverage = _minimum_weight_coverage()
     log_event(
         "AHP",
@@ -289,6 +291,12 @@ def _combine_layers(
 
     def _load(key: str, path: Path | None) -> tuple[np.ndarray, np.ndarray]:
         if path is None or not Path(path).is_file():
+            if key == "ndvi":
+                raise LookupError(
+                    "Insufficient data: NDVI is required for dynamic vegetation risk. "
+                    "Load valid Sentinel B4/B8 imagery within the permitted date "
+                    "window or supply a valid NDVI raster."
+                )
             if key in optional_gap_keys:
                 return (
                     np.zeros(master_mask.shape, dtype=np.float32),
@@ -303,7 +311,7 @@ def _combine_layers(
         else:
             data[data <= 0] = np.nan
             valid_mask = np.isfinite(data)
-        if key in spec["interp_keys"]:
+        if key in spec["interp_keys"] and key != "ndvi":
             data = fillnodata(
                 data, mask=valid_mask, max_search_distance=25.0, smoothing_iterations=0
             ).astype(np.float32, copy=False)
@@ -311,6 +319,11 @@ def _combine_layers(
         np.nan_to_num(data, copy=False, nan=0.0)
         data[~master_mask] = 0
         valid_mask &= master_mask
+        if key == "ndvi" and not np.any(valid_mask & analysis_domain_mask):
+            raise LookupError(
+                "Insufficient data: NDVI has no valid risk pixels in the analysis "
+                "area. Missing NDVI is not replaced or redistributed to fuel."
+            )
         return data, valid_mask
 
     exported_layers: dict[str, Path] = {}
@@ -1188,6 +1201,8 @@ def run_static_aoi_for_geometry(
             metadata.update(request_metadata)
             metadata["selected_assessment_date"] = selected_day.isoformat()
             metadata["peak_date"] = selected_day.isoformat()
+        # Record the executing model, never a version supplied by the request.
+        metadata["model_version"] = MODEL_VERSION
         request_path = job_dir / "request.json"
         request_path.write_text(json.dumps(metadata, indent=2))
         outputs["request"] = request_path

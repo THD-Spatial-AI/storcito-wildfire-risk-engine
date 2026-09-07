@@ -245,6 +245,20 @@ def store_results_to_db(
     try:
         from FR.db_store import store_result_maps
 
+        metadata = dict(metadata)
+        # Preserve provenance from the generated artifact, including when storing
+        # an older job. Never infer its version from the currently running API.
+        request_path = outputs.get("request")
+        if request_path and Path(request_path).is_file():
+            provenance = json.loads(Path(request_path).read_text())
+            for key in (
+                "model_version", "fwi_classification", "weight_scheme",
+                "source_layer_dates", "source_layer_date_details",
+                "daily_source_layer_dates", "daily_skipped_layers",
+                "fwi_assessment", "model_interpretation",
+            ):
+                if key in provenance:
+                    metadata[key] = provenance[key]
         aoi_geojson = json.dumps(mapping(aoi_wgs84)) if aoi_wgs84 is not None else None
         info = store_result_maps(outputs, metadata=metadata, aoi_geojson=aoi_geojson)
         return info, None
@@ -539,6 +553,7 @@ def _finish_wildfire_response(outputs, payload, request, calculation_mode,
                 "engine": "static_aoi",
                 "calculation_mode": calculation_mode,
                 "request_type": "wildfire_payload",
+                "model_version": MODEL_VERSION,
                 "target_date": risk_date.isoformat(),
                 "range_end_date": target_date.isoformat(),
                 "country": payload.country,
