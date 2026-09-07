@@ -20,6 +20,7 @@ import FR.TWI as Twi
 import FR.FWI as Fwi
 import FR.LST as Lst
 import FR.cropped as Cropped
+import FR.landcover_mask as LandcoverMask
 from app.engines.FFRM_estatic_aoi import ORIGINAL_SPECS, _combine_layers
 from FR.processing_log import log_event
 
@@ -258,6 +259,12 @@ if run_fwi:
     active_topics.add("meteo")
 
 fr_final = Path(output_base) / "forest_fire_risk_map_dinamico.tif"
+clcplus_source = Path(base_dir) / "INPUT" / "LANDCOVER" / "CLCPLUS_2023.tif"
+domain_mask = LandcoverMask.build_wildfire_domain_mask(
+    input_clc, Path(raw_layer_paths["mdt"]),
+    Path(output_base) / "layers" / "wildfire_analysis_mask.tif",
+    clcplus_path=clcplus_source if clcplus_source.is_file() else None,
+)
 outputs = _combine_layers(
     raw_layer_paths,
     Path(raw_layer_paths["mdt"]),
@@ -266,6 +273,7 @@ outputs = _combine_layers(
     Path(output_base) / "forest_fire_risk_map_dinamico.png",
     spec=ORIGINAL_SPECS["dynamic"],
     active_topics=active_topics,
+    domain_mask_path=domain_mask,
 )
 dynamic_continuous = Path(output_base) / "mapa_final_dinamico.tif"
 shutil.copyfile(outputs["continuous_map"], dynamic_continuous)

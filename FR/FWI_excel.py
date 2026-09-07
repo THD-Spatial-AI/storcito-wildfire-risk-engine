@@ -10,7 +10,8 @@ import FR.rutinas.FWI_Equations as Fwi
 from FR.FWI import (
     FWI_CLASS_BOUNDS,
     FWI_DEFAULT_CLASSIFICATION,
-    FWI_RUNUP_DAYS,
+    fwi_state_start,
+    fwi_history_start,
     FWI_STANDARD_TIMEZONE,
     fwi_init_codes,
     fwi_standard_clock_hour,
@@ -252,6 +253,8 @@ def f_w_index_excel(
 
     if daily.empty:
         raise ValueError("Not enough valid data to compute the daily FWI.")
+    if target_date is None:
+        target_date = daily.iloc[-1]["date"]
     log_event(
         "FWI_STATION",
         "OBSERVATIONS",
@@ -273,7 +276,7 @@ def f_w_index_excel(
 
     if target_date is not None:
         score_start = start_date or target_date
-        runup_start = score_start - timedelta(days=FWI_RUNUP_DAYS)
+        runup_start = fwi_history_start(score_start)
         daily = daily[(daily["date"] >= runup_start) & (daily["date"] <= target_date)].copy()
         expected = {
             runup_start + timedelta(days=offset)
@@ -286,6 +289,8 @@ def f_w_index_excel(
                 + ", ".join(day.isoformat() for day in missing[:10])
                 + ("..." if len(missing) > 10 else "")
             )
+        # The preceding observation establishes a complete first rain window.
+        daily = daily[daily["date"] >= fwi_state_start(score_start)].copy()
 
     # ----------------------------- 5. FWI calculation -----------------------------
     f0, p0, d0 = fwi_init_codes()
@@ -293,6 +298,8 @@ def f_w_index_excel(
     isi_list, bui_list, fwi_list, class_list = [], [], [], []
 
     for _, row in daily.iterrows():
+        if row["date"] == fwi_state_start(row["date"]):
+            f0, p0, d0 = fwi_init_codes()
         temp = float(row["temp_c"])
         rh = float(row["rh"])
         wind = float(row["wind_ms"]) * 3.6  # m/s -> km/h
@@ -406,6 +413,11 @@ def f_w_index_excel(
         "classification_scheme": classification_key,
         "class_bounds": list(class_bounds),
         "class_upper_bounds_inclusive": upper_inclusive,
+        "moisture_code_initialization": {
+            "method": "fixed annual March 1 codes with prior-day rainfall context",
+            "state_start_date": fwi_state_start(start_date or target_date).isoformat(),
+            "limitation": "Fixed startup codes; observed startup and overwinter drought are not modelled.",
+        },
     }
     if reference_raster is None:
         if save:

@@ -126,7 +126,7 @@ make borders                        # 1. Spain admin boundaries  (~1 min)
 make dtm                            # 2. IGN elevation 25 m      (~5 min)
 make twi                            # 3. optional utility; not in the audited default score
 make mdt                            # 4. reference grid from step 2's tiles (~2 min)
-make fwi START=2026-03-02           # 5. weather, 60-day run-up before May 1 -> latest (large: ~330 MB/day)
+make fwi START=2026-02-28           # 5. weather, rain context + fixed March 1 initialization -> latest (~330 MB/day)
 make sentinel START=2026-05-01      # 6. Sentinel-2 weekly mosaics, May 1 2026 -> latest image (~30 min)
 make lst START=2026-05-01           # 7. optional utility; not in the audited default score
 make infra                          # 8. OSM roads + railways    (~10 min)
@@ -141,8 +141,11 @@ The explicit `START=` dates make the fetched range visible; the bare forms
 (`make sentinel`, `make hist`) fetch exactly the same "current season so far"
 range by default. Adjust the year in `START=` to backfill another season
 (e.g. `make sentinel START=2025-05-01` for all of 2025). FWI assessments
-require every date in the preceding 60-day moisture-code run-up; seed that
-run-up as shown rather than starting on the first assessment day.
+require every date from the day before March 1 through the assessment date.
+The preceding day supplies rainfall context; March 1 initializes moisture codes
+once per season. Seed from February 29 in leap years. January/February
+assessments continue the preceding March's season. A request window never
+changes the initialization date used for a particular assessment.
 
 Constraints: `hist` clips against the Galicia polygon from `borders` (1 before
 10); `twi` and `mdt` build from the tiles staged by `dtm` (2 before 3 and 4). Everything
@@ -199,7 +202,7 @@ Notes:
 
 | Class | Targets | Refresh | Why |
 |---|---|---|---|
-| **Dynamic** (daily) | `fwi` (Apr-Oct: the season plus the 60-day moisture run-up) | every day | new MeteoGalicia forecast each morning drives the temporal model input |
+| **Dynamic** (daily) | `fwi` (from the day before March 1 through the season) | every day | new MeteoGalicia forecast each morning drives the temporal model input |
 | **Semi-dynamic** (in fire season) | `sentinel` weekly; `hist` for the overlay | May-Oct | Sentinel-2 revisit is ~5 days (NDVI); FIRMS hotspots update the informational overlay |
 | **Static / quasi-static** | `borders`, `dtm`+optional `twi`, `mdt`, `infra`, `fuels`, `clc`+`iuf`, `hist-scenes` | on source publication | terrain, land cover and infrastructure change on multi-year timescales |
 
@@ -339,8 +342,10 @@ image if you are upgrading an older container.)
 The default `published_galicia_2020` profile reproduces the documented
 STORCITO AHP model from [*Mapping Forest Fire Risk—A Case Study in Galicia
 (Spain)*](https://doi.org/10.3390/rs12223705) (Remote Sensing 2020). It uses the paper's
-terrain, NDVI, fuel, road-distance, settlement-distance, and FWI classes and
-its published weights. The historical-fire coefficient is removed and the
+terrain, fuel, road-distance, settlement-distance, and FWI classes and
+its published weights. NDVI retains the project's low-end adjustments:
+values <=0 are nodata and 0 < NDVI <=0.1 receives class 1; the remaining
+intervals use the published thresholds. The historical-fire coefficient is removed and the
 other top-level weights are renormalized because the current FIRMS/dNBR
 overlay is not the historical-fire-regime variable used by the study.
 The `2020` suffix identifies the published method version; it does not change

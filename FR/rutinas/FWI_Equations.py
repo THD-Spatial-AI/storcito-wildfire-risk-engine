@@ -8,7 +8,7 @@ FFMC_COEFFICIENT = 250.0 * 59.5 / 101.0
 def ffmc(temp, hum, wind, rain, f0) -> np.ndarray:
     """Calculate the Fine Fuel Moisture Code (FFMC). The FFMC represents the moisture content of fine fuels (up to 16mm thick) that respond rapidly to changes in relative humidity and temperature. Ranges from 0 to 101. Args: temp: Air temperature in °C, hum: Relative humidity in percentage (0-100), wind: Wind speed at 10m height in km/h, rain: Precipitation in mm, f0: Previous FFMC value. Returns: np.ndarray: Calculated FFMC value (scale 0-101). References: Van Wagner, C.E. (1987). Development and Structure of the Canadian Forest Fire Weather Index System. Canadian Forest Service Publication 35."""
 
-    hum = np.clip(hum, 0.0, 99.9999)
+    hum = np.clip(hum, 0.0, 100.0)
 
     # Create copies to avoid modifying originals
     mo = FFMC_COEFFICIENT * ((101.0 - f0) / (59.5 + f0))
@@ -78,7 +78,7 @@ def dmc(temp, hum, rain, p0, month) -> np.ndarray:
     Le_factors = [6.5, 7.5, 9.0, 12.8, 13.9, 13.9, 12.4, 10.9, 9.4, 8.0, 7.0, 6.0]
     le = Le_factors[int(month) - 1]  # Assume single month for entire map
     
-    hum = np.clip(hum, 0.0, 99.9999)
+    hum = np.clip(hum, 0.0, 100.0)
 
     # Ensure minimum temperature for calculation
     t_calc = np.maximum(temp, -1.1)
@@ -107,7 +107,8 @@ def dmc(temp, hum, rain, p0, month) -> np.ndarray:
     if np.any(rain_mask):
         mr[rain_mask] = mo[rain_mask] + (1000.0 * re[rain_mask]) / (48.77 + b[rain_mask] * re[rain_mask])
         
-    pr = 244.72 - 43.43 * np.log(np.maximum(mr - 20.0, 0.1))  # Avoid log(<=0)
+    # CFS's more accurate Eq. 15, paired with the Eq. 12 form above.
+    pr = 43.43 * (5.6348 - np.log(np.maximum(mr - 20.0, 0.1)))
     pr = np.maximum(pr, 0.0)
     
     # If no rain, pr is p0

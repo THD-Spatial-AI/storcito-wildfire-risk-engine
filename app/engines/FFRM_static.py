@@ -250,6 +250,12 @@ if run_fhist:
 
 layers_dir = Path(output_base) / "layers"
 fr_final = Path(output_base) / "forest_fire_risk_map.tif"
+import FR.landcover_mask as LandcoverMask
+clcplus_source = Path(base_dir) / "INPUT" / "LANDCOVER" / "CLCPLUS_2023.tif"
+domain_mask = LandcoverMask.build_wildfire_domain_mask(
+    input_clc, Path(reference_path), layers_dir / "wildfire_analysis_mask.tif",
+    clcplus_path=clcplus_source if clcplus_source.is_file() else None,
+)
 
 outputs = _combine_layers(
     raw_layer_paths,
@@ -260,6 +266,7 @@ outputs = _combine_layers(
     spec=ORIGINAL_SPECS["static"],
     active_topics=active_top_levels,
     export_only=export_only,
+    domain_mask_path=domain_mask,
 )
 
 print(f"Mapa final guardado exitosamente en:\n '{outputs['final_map']}'")

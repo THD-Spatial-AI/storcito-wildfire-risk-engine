@@ -723,10 +723,10 @@ def reconstruct_fwi(
     score_start = score_start or target_date
 
     with _pg_connect() as conn, conn.cursor() as cur:
-        # Exact model window: run-up begins before the first scoring date.
-        from FR.FWI import FWI_RUNUP_DAYS
+        # Fixed seasonal history plus one day of rainfall context.
+        from FR.FWI import fwi_history_start
 
-        window_start = score_start - timedelta(days=FWI_RUNUP_DAYS)
+        window_start = fwi_history_start(score_start)
         cur.execute(
             "SELECT DISTINCT ON (fdate) fdate, filename, nbytes FROM fwi_files "
             "WHERE fdate BETWEEN %s AND %s ORDER BY fdate, id DESC",
@@ -817,7 +817,7 @@ def available_dynamic_fwi_dates_db() -> list[date]:
         raise ValueError("dynamic source age limits must be non-negative")
     with _pg_connect() as conn, conn.cursor() as cur:
         cur.execute(
-            """WITH dates AS ( SELECT DISTINCT fdate FROM fwi_files WHERE fdate IS NOT NULL ), eligible AS ( SELECT d.fdate FROM dates d WHERE EXTRACT(MONTH FROM d.fdate) BETWEEN 5 AND 10 AND (SELECT count(DISTINCT f.fdate) FROM fwi_files f WHERE f.fdate BETWEEN d.fdate - 60 AND d.fdate) = 61 ) SELECT e.fdate FROM eligible e WHERE EXISTS ( SELECT 1 FROM sentinel_b4_ts b4 WHERE b4.capture_date BETWEEN e.fdate - %s AND e.fdate AND EXISTS (SELECT 1 FROM sentinel_b8_ts b8 WHERE b8.capture_date = b4.capture_date) ) ORDER BY e.fdate""",
+            """WITH dates AS ( SELECT DISTINCT fdate FROM fwi_files WHERE fdate IS NOT NULL ), eligible AS ( SELECT d.fdate FROM dates d WHERE EXTRACT(MONTH FROM d.fdate) BETWEEN 5 AND 10 AND (SELECT count(DISTINCT f.fdate) FROM fwi_files f WHERE f.fdate BETWEEN (make_date(EXTRACT(YEAR FROM d.fdate)::int, 3, 1) - 1) AND d.fdate) = d.fdate - make_date(EXTRACT(YEAR FROM d.fdate)::int, 3, 1) + 2 ) SELECT e.fdate FROM eligible e WHERE EXISTS ( SELECT 1 FROM sentinel_b4_ts b4 WHERE b4.capture_date BETWEEN e.fdate - %s AND e.fdate AND EXISTS (SELECT 1 FROM sentinel_b8_ts b8 WHERE b8.capture_date = b4.capture_date) ) ORDER BY e.fdate""",
             (sentinel_age,),
         )
         return [row[0] for row in cur.fetchall()]
@@ -854,7 +854,7 @@ def highest_temperature_fwi_date_for_year(year: int) -> date:
 
     with _pg_connect() as conn, conn.cursor() as cur:
         cur.execute(
-            """WITH eligible AS ( SELECT d.fdate, max(d.peak_temp) AS peak_temp FROM fwi_files d WHERE d.fdate BETWEEN %s AND %s AND d.peak_temp IS NOT NULL AND (SELECT count(DISTINCT f.fdate) FROM fwi_files f WHERE f.fdate BETWEEN d.fdate - 60 AND d.fdate) = 61 GROUP BY d.fdate ) SELECT fdate FROM eligible ORDER BY peak_temp DESC, fdate ASC LIMIT 1""",
+            """WITH eligible AS ( SELECT d.fdate, max(d.peak_temp) AS peak_temp FROM fwi_files d WHERE d.fdate BETWEEN %s AND %s AND d.peak_temp IS NOT NULL AND (SELECT count(DISTINCT f.fdate) FROM fwi_files f WHERE f.fdate BETWEEN (make_date(EXTRACT(YEAR FROM d.fdate)::int, 3, 1) - 1) AND d.fdate) = d.fdate - make_date(EXTRACT(YEAR FROM d.fdate)::int, 3, 1) + 2 GROUP BY d.fdate ) SELECT fdate FROM eligible ORDER BY peak_temp DESC, fdate ASC LIMIT 1""",
             (season_start, season_end),
         )
         row = cur.fetchone()
@@ -869,7 +869,7 @@ def highest_temperature_fwi_dates_db() -> list[date]:
     """Hottest eligible May-October FWI day per calendar year (sorted)."""
     with _pg_connect() as conn, conn.cursor() as cur:
         cur.execute(
-            """WITH eligible AS ( SELECT d.fdate, max(d.peak_temp) AS peak_temp FROM fwi_files d WHERE d.fdate IS NOT NULL AND d.peak_temp IS NOT NULL AND EXTRACT(MONTH FROM d.fdate) BETWEEN %s AND %s AND (SELECT count(DISTINCT f.fdate) FROM fwi_files f WHERE f.fdate BETWEEN d.fdate - 60 AND d.fdate) = 61 GROUP BY d.fdate ) SELECT DISTINCT ON (EXTRACT(YEAR FROM fdate)) fdate FROM eligible ORDER BY EXTRACT(YEAR FROM fdate), peak_temp DESC, fdate ASC""",
+            """WITH eligible AS ( SELECT d.fdate, max(d.peak_temp) AS peak_temp FROM fwi_files d WHERE d.fdate IS NOT NULL AND d.peak_temp IS NOT NULL AND EXTRACT(MONTH FROM d.fdate) BETWEEN %s AND %s AND (SELECT count(DISTINCT f.fdate) FROM fwi_files f WHERE f.fdate BETWEEN (make_date(EXTRACT(YEAR FROM d.fdate)::int, 3, 1) - 1) AND d.fdate) = d.fdate - make_date(EXTRACT(YEAR FROM d.fdate)::int, 3, 1) + 2 GROUP BY d.fdate ) SELECT DISTINCT ON (EXTRACT(YEAR FROM fdate)) fdate FROM eligible ORDER BY EXTRACT(YEAR FROM fdate), peak_temp DESC, fdate ASC""",
             (FIRE_SEASON_START_MONTH, FIRE_SEASON_END_MONTH),
         )
         return sorted(r[0] for r in cur.fetchall())

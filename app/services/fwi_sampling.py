@@ -202,12 +202,12 @@ def _fwi_history_window(
     target_date: date, score_start_date: date | None = None
 ) -> tuple[date, date]:
     """History needed to reproduce the engine state through ``target_date``."""
-    from FR.FWI import FWI_RUNUP_DAYS
+    from FR.FWI import fwi_history_start
 
     score_start_date = score_start_date or target_date
     if score_start_date > target_date:
         raise ValueError("FWI start date must be before or equal to the end date.")
-    return score_start_date - timedelta(days=FWI_RUNUP_DAYS), target_date
+    return fwi_history_start(target_date), target_date
 
 
 def _fwi_slice(
@@ -397,7 +397,7 @@ def sample_fwi_area_from_db(
                 cur, fdate, hour_index, source_fdate=source_fdate, step_offset=step_offset
             )
             if slice_data is None:
-                continue
+                raise ValueError(f"FWI weather slice is unavailable for {fdate}")
             rows_seen += 1
 
             if grid_y_idx is None or grid_x_idx is None:
@@ -422,6 +422,9 @@ def sample_fwi_area_from_db(
             if prev_rain_tail is not None:
                 precipitation_mm = precipitation_mm + prev_rain_tail
             prev_rain_tail = np.sum(prec_day[resolved_hour_index + 1 : day_hours], axis=0)
+
+            if fdate < FwiModule.fwi_state_start(target_date):
+                continue
 
             if f0 is None:
                 init_f, init_p, init_d = FwiModule.fwi_init_codes()
@@ -499,7 +502,7 @@ def sample_fwi_point_from_db(
     from FR.db_reconstruct import _pg_connect
 
     history_start = (
-        target_date - timedelta(days=FwiModule.FWI_RUNUP_DAYS)
+        FwiModule.fwi_history_start(target_date)
         if include_runup
         else target_date
     )
@@ -521,7 +524,7 @@ def sample_fwi_point_from_db(
         if include_runup:
             expected = {
                 history_start + timedelta(days=i)
-                for i in range(FwiModule.FWI_RUNUP_DAYS + 1)
+                for i in range((target_date - history_start).days + 1)
             }
             missing = _missing_fwi_days(expected, schedule, newest_archive)
             if missing:
@@ -534,7 +537,7 @@ def sample_fwi_point_from_db(
                 cur, fdate, hour_index, source_fdate=source_fdate, step_offset=step_offset
             )
             if slice_data is None:
-                continue
+                raise ValueError(f"FWI weather slice is unavailable for {fdate}")
             rows_seen += 1
 
             if grid is None:
@@ -561,6 +564,8 @@ def sample_fwi_point_from_db(
             resolved_hour_index = int(slice_data["hour_index"])
             precipitation_mm = float(np.sum(prec_day[: resolved_hour_index + 1])) + prev_rain_tail
             prev_rain_tail = float(np.sum(prec_day[resolved_hour_index + 1 : day_hours]))
+            if include_runup and fdate < FwiModule.fwi_state_start(target_date):
+                continue
             if not all(
                 np.isfinite(value)
                 for value in (

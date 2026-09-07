@@ -3,6 +3,24 @@
 Notable changes of this engine relative to the original UVIGO codebase
 (https://github.com/Mat-GL-02/STORCITO), plus operational notes.
 
+## 2026-09-07 — Fire-risk calculation fixes
+
+- Model version `2026-09-07.1` uses a fixed March 1 moisture-code initialization,
+  with the preceding day's rain tail. Engine, station, point/area sampling,
+  reconstruction, date availability, and nightly eligibility use seasonal
+  history. Results for a date no longer depend on the request window.
+- Terrain derivatives preserve missing-data masks; flat terrain still receives
+  class 1. Existing NDVI thresholds and classification behavior are retained.
+  Both whole-region engines now apply the same
+  land-cover exclusion mask as the AOI engine.
+- Corrected DMC's inverse moisture conversion to the CFS reference form and
+  retained exact 100% relative humidity.
+- Added regression tests for seasonal FWI history, terrain nodata, non-fuel
+  masking, and the existing NDVI classification.
+- Migration: seed continuous weather from the day before March 1 (February 28
+  in 2026), set `STORCITO_MODEL_VERSION=2026-09-07.1`, recreate the services, and
+  regenerate precomputed maps. Previous results use different model semantics.
+
 ## 2026-08 — Audited Galicia scientific profile
 
 - The default AHP equation now reproduces the published Galicia 2020 model

@@ -69,13 +69,14 @@ CREATE TABLE IF NOT EXISTS regional_runs (
 ALTER TABLE regional_runs ADD COLUMN IF NOT EXISTS publication_id text;
 ALTER TABLE regional_runs ADD COLUMN IF NOT EXISTS model_version text;"
 
-# New-date detection: only dates with the complete 60-day model run-up are eligible.
+# May–October dates require the complete fixed seasonal history and rain context.
 $PSQL -c "
 INSERT INTO regional_runs (engine, target_date, model_version)
 SELECT 'dynamic', d.fdate, '$MODEL_VERSION'
 FROM (SELECT DISTINCT fdate FROM fwi_files WHERE fdate IS NOT NULL) d
-WHERE (SELECT count(DISTINCT f.fdate) FROM fwi_files f
-       WHERE f.fdate BETWEEN d.fdate - 60 AND d.fdate) = 61
+WHERE EXTRACT(MONTH FROM d.fdate) BETWEEN 5 AND 10
+  AND (SELECT count(DISTINCT f.fdate) FROM fwi_files f
+       WHERE f.fdate BETWEEN (make_date(EXTRACT(YEAR FROM d.fdate)::int, 3, 1) - 1) AND d.fdate) = d.fdate - make_date(EXTRACT(YEAR FROM d.fdate)::int, 3, 1) + 2
   AND EXISTS (SELECT 1 FROM lst_ts l
               WHERE l.capture_date BETWEEN d.fdate - $LST_MAX_AGE AND d.fdate)
   AND EXISTS (
@@ -101,10 +102,11 @@ dates=$($PSQL -c "
 SELECT target_date FROM regional_runs
 WHERE engine='dynamic' AND status IN ('pending','failed')
   AND model_version='$MODEL_VERSION'
+  AND EXTRACT(MONTH FROM regional_runs.target_date) BETWEEN 5 AND 10
   AND attempts < $MAX_ATTEMPTS
   AND (SELECT count(DISTINCT f.fdate) FROM fwi_files f
-       WHERE f.fdate BETWEEN regional_runs.target_date - 60
-                         AND regional_runs.target_date) = 61
+       WHERE f.fdate BETWEEN (make_date(EXTRACT(YEAR FROM regional_runs.target_date)::int, 3, 1) - 1)
+                         AND regional_runs.target_date) = regional_runs.target_date - make_date(EXTRACT(YEAR FROM regional_runs.target_date)::int, 3, 1) + 2
   AND EXISTS (SELECT 1 FROM lst_ts l
               WHERE l.capture_date BETWEEN regional_runs.target_date - $LST_MAX_AGE
                                        AND regional_runs.target_date)

@@ -65,7 +65,25 @@ def normalize_fwi_precipitation(values, *, context: str = "") -> np.ndarray:
     return result
 
 
+# Legacy import compatibility only; history selection now uses the fixed season.
 FWI_RUNUP_DAYS = 60
+
+
+def fwi_state_start(day: date) -> date:
+    """Fixed annual initialization for the Galicia season, independent of requests.
+
+    March 1 provides at least 61 state updates before May assessments. This
+    deterministic convention is not an observed spring start or overwintering
+    model. January/February dates continue the preceding March's season.
+    """
+    start = date(day.year, 3, 1)
+    return start if day >= start else date(day.year - 1, 3, 1)
+
+
+def fwi_history_start(day: date) -> date:
+    """Include the preceding day's rain tail for the first noon-to-noon total."""
+    return fwi_state_start(day) - timedelta(days=1)
+
 
 FWI_FORECAST_DAYS = 2
 
@@ -438,12 +456,13 @@ def f_w_index(
 
     score_end = target_date
     score_start = start_date if start_date is not None else target_date
-    runup_start = score_start - timedelta(days=FWI_RUNUP_DAYS)
+    state_start = fwi_state_start(score_start)
+    runup_start = fwi_history_start(score_start)
     files = _select_fwi_files(input_folder, runup_start, score_end)
     if not files:
         raise ValueError("No netCDF files found in input folder")
 
-    n_runup = sum(1 for path in files if _fwi_file_date(path) < score_start)
+    n_runup = (score_start - state_start).days
     n_score = (score_end - score_start).days + 1
     warmup_end = score_start - timedelta(days=1)
     init_ffmc, init_dmc, init_dc = fwi_init_codes()
@@ -464,7 +483,7 @@ def f_w_index(
         runup_end=warmup_end.isoformat(),
         score_start=score_start.isoformat(),
         score_end=score_end.isoformat(),
-        initialization="fixed-codes-plus-contiguous-spin-up",
+        initialization="fixed-annual-march-1-with-prior-day-rain",
         initial_ffmc=init_ffmc,
         initial_dmc=init_dmc,
         initial_dc=init_dc,
@@ -540,6 +559,10 @@ def f_w_index(
             previous_rain_tail = precipitation[observation_index - day_start + 1 : day_hours].sum(axis=0)
             month = day.month
 
+        if day < state_start:
+            # This file supplies rainfall context only, not a moisture update.
+            continue
+
         x = np.linspace(float(x_coord.min()), float(x_coord.max()), grid_size)
         y = np.linspace(float(y_coord.min()), float(y_coord.max()), grid_size)
         grid_x, grid_y = np.meshgrid(x, y)
@@ -554,7 +577,7 @@ def f_w_index(
             coordinates, temperature.ravel() - 273.15, grid_coordinates, method="nearest"
         )
 
-        if ffmc_previous is None:
+        if ffmc_previous is None or day == fwi_state_start(day):
             ffmc_previous = np.full_like(humidity_grid, init_ffmc)
             dmc_previous = np.full_like(humidity_grid, init_dmc)
             dc_previous = np.full_like(humidity_grid, init_dc)
@@ -699,13 +722,15 @@ def f_w_index(
         "peak_mean_fwi": peak_mean,
         "daily_mean_fwi": daily_mean_fwi,
         "moisture_code_initialization": {
-            "method": "fixed codes followed by contiguous spin-up",
-            "requested_spin_up_days": FWI_RUNUP_DAYS,
+            "method": "fixed annual March 1 codes with prior-day rainfall context",
+            "state_start_date": state_start.isoformat(),
+            "rain_context_date": runup_start.isoformat(),
             "actual_spin_up_days": n_runup,
             "initial_ffmc": init_ffmc,
             "initial_dmc": init_dmc,
             "initial_dc": init_dc,
             "equivalent_to_persisted_seasonal_state": False,
+            "limitation": "Fixed startup codes; observed startup and overwinter drought are not modelled.",
         },
     }
     if export_image or export_daily:

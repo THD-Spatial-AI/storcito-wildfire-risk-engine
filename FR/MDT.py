@@ -48,14 +48,17 @@ def mdt(ruta_mdt,output_folder:str|Path=Path('data/OUTPUT'),
     # slope/aspect via GDAL (faster than numpy gradients)
     ds = gdal.Open(ruta_mdt)
     slope_ds = gdal.DEMProcessing('/vsimem/slope_tmp.tif', ds, 'slope', format='MEM')
-    aspect_ds = gdal.DEMProcessing('/vsimem/aspect_tmp.tif', ds, 'aspect', format='MEM')
+    aspect_ds = gdal.DEMProcessing('/vsimem/aspect_tmp.tif', ds, 'aspect', format='MEM', zeroForFlat=True)
     slope = slope_ds.ReadAsArray().astype('float32')
     aspect = aspect_ds.ReadAsArray().astype('float32')
 
+    # Flat aspect is explicitly zero; derivative nodata must remain missing,
+    # including valid elevation cells whose neighbours are unavailable.
+    slope_valid = np.isfinite(mdt) & np.isfinite(slope) & (slope >= 0)
+    aspect_valid = slope_valid & np.isfinite(aspect) & (aspect >= 0)
+    slope[~slope_valid] = np.nan
+    aspect[~aspect_valid] = np.nan
     slope_ds = aspect_ds = ds = None  # close datasets
-    # GDAL returns -9999 for flat cells unless zero-for-flat is requested.
-    # The published model explicitly assigns flat terrain to risk class 1.
-    aspect = np.where(aspect < 0, 0, aspect)
     print("Slope y Aspect calculados.")
     
     # reclasificaciones
@@ -72,6 +75,7 @@ def mdt(ruta_mdt,output_folder:str|Path=Path('data/OUTPUT'),
     slope_bins = [5, 15, 25, 35]
     slope_classes = np.array([1, 2, 3, 4, 5], dtype='int32')
     slope_re = slope_classes[np.digitize(slope, slope_bins, right=True)]
+    slope_re[~slope_valid] = 0
     log_array_stats("TERRAIN", "slope-degrees", slope)
     log_array_stats("TERRAIN", "slope-risk", slope_re, nodata=0)
     fig_slpe, ax_slope = default_imshow(slope_re, 'Slope Risk Map', {'label':'Risk'})
