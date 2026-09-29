@@ -512,3 +512,41 @@ Example request body:
   }
 }
 ```
+
+---
+
+## Contributing
+
+Bug reports, feature requests and pull requests are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md) before getting started.
+
+---
+
+## Citation
+
+If you use this software, please cite it using the metadata in [CITATION.cff](CITATION.cff).
+
+---
+
+## License
+
+MIT License — Copyright (c) 2026 BigGeoData & Spatial AI, Technische Hochschule Deggendorf. See [LICENSE](LICENSE) for the full text.
+
+> [!NOTE]
+> This engine is under active development. The wildfire-danger index is an expert-weighted susceptibility index: it is not a calibrated ignition probability, and its outputs have not been validated against observed fires. Model changes are recorded in [CHANGELOG.md](CHANGELOG.md).
+
+---
+
+## Acknowledgments
+
+Developed by Universidade de Vigo and the **BigGeoData & Spatial AI** research group at Technische Hochschule Deggendorf. The engine builds on the original STORCITO wildfire-risk code developed at Universidade de Vigo ([Mat-GL-02/STORCITO](https://github.com/Mat-GL-02/STORCITO)).
+
+This project is being developed in the context of the research project STORCITO — *Sustainable Transformation Of Rural Communities via Technical, social and Organizational innovations* (<https://cordis.europa.eu/project/id/101182153>). STORCITO is funded by the European Union's Horizon Europe research and innovation programme under grant agreement No. 101182153. Views and opinions expressed are however those of the author(s) only and do not necessarily reflect those of the European Union or the European Research Executive Agency (REA). Neither the European Union nor the granting authority can be held responsible for them.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/sponsors/storcito-logo-white.png">
+  <img src=".github/assets/sponsors/storcito-logo-dark.png" alt="STORCITO" height="40">
+</picture>
+&nbsp;&nbsp;
+<img src=".github/assets/sponsors/eu-funded.png" alt="Funded by the European Union" height="40">
+
+Open data: IGN, MeteoGalicia, Copernicus (Sentinel-2, Sentinel-3, CLC+ Backbone, CORINE Land Cover), MITECO, OpenStreetMap, NASA FIRMS and OpenDataSoft — see [ATTRIBUTIONS.md](ATTRIBUTIONS.md) for sources, licences and required attribution statements.

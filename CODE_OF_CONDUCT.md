@@ -46,13 +46,11 @@ We agree to restrict the following behaviors in our community. Instances, threat
 
 Tensions can occur between community members even when they are trying their best to collaborate. Not every conflict represents a code of conduct violation, and this Code of Conduct reinforces encouraged behaviors and norms that can help avoid conflicts and minimize harm.
 
-When an incident does occur, it is important to report it promptly. To report a possible violation, **Instances of abusive, harassing, or otherwise unacceptable behaviour to the project maintainers.
+When an incident does occur, it is important to report it promptly. To report a possible violation, email the project maintainers at **asim.khan@th-deg.de**. For matters that are not sensitive, you may also open an issue in the [issue tracker](https://github.com/THD-Spatial-AI/storcito-wildfire-risk-engine/issues).
 
 All reports will be reviewed and investigated, and a response will be made that is appropriate to the circumstances. The project team will make a good-faith effort to maintain the confidentiality and privacy of the person reporting the incident.
 
-Further details about enforcement procedures may be documented separately.
-
-Project maintainers who do not follow or enforce the Code of Conduct in good faith may face temporary or permanent consequences, as determined by the project leadership or organisation maintainers.**
+Project maintainers who do not follow or enforce the Code of Conduct in good faith may face temporary or permanent consequences, as determined by the project leadership or organisation maintainers.
 
 Community Moderators take reports of violations seriously and will make every effort to respond in a timely manner. They will investigate all reports of code of conduct violations, reviewing messages, logs, and recordings, or interviewing witnesses and other participants. Community Moderators will keep investigation and enforcement actions as transparent as possible while prioritizing safety and confidentiality. In order to honor these values, enforcement actions are carried out in private with the involved parties, but communicating to the whole community may be part of a mutually agreed upon resolution.
 

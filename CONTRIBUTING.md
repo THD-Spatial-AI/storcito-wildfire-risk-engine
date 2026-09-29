@@ -1,6 +1,6 @@
 # Contributing
 
-Thank you for taking the time to contribute to **[PROJECT_NAME]**.
+Thank you for taking the time to contribute to the **STORCITO Wildfire Risk Engine**.
 
 This project welcomes contributions such as bug reports, feature requests, documentation improvements, code changes, and general feedback.
 
@@ -34,8 +34,7 @@ Before creating a new issue or pull request, please:
 
 Use the project issue tracker for bug reports, feature requests, and documentation issues.
 
-- **Issue tracker:** [INSERT_ISSUE_TRACKER_URL]
-- **Discussions / Questions (optional):** [INSERT_DISCUSSION_URL_OR_REMOVE]
+- **Issue tracker:** <https://github.com/THD-Spatial-AI/storcito-wildfire-risk-engine/issues>
 
 When reporting an issue, please include:
 
@@ -43,36 +42,41 @@ When reporting an issue, please include:
 - What actually happened
 - Steps to reproduce the issue
 - Screenshots/logs/error messages (if applicable)
-- Environment details (OS, browser, version, etc., if relevant)
+- Environment details (OS, Docker version, model version, request payload without credentials, if relevant)
 
 ## Development Workflow
 
-The exact setup steps may differ by project. Please check the `README.md` and project documentation for installation and development instructions.
+Setup and data-pipeline instructions are in the [README](README.md).
 
 ### 1) Fork and clone the repository (if applicable)
 
 If you do not have direct write access, fork the repository first, then clone your fork:
 
 ```bash
-git clone [REPOSITORY_URL]
-cd [REPOSITORY_DIRECTORY]
+git clone https://github.com/THD-Spatial-AI/storcito-wildfire-risk-engine.git
+cd storcito-wildfire-risk-engine
 ```
 
 If you have direct write access, clone the main repository instead.
 
 ### 2) Create a branch for your change
 
-Create a dedicated branch for your bugfix, feature, or documentation update:
+Create a dedicated branch for your bugfix, feature, or documentation update. Branch names are checked in CI and must follow `<type>/<description>`:
 
 ```bash
 git checkout -b type/short-description
 ```
 
+- **type:** `feat`, `feature`, `fix`, `bugfix`, `hotfix`, `release`, `chore`, `docs`, `refactor`, `test`, `style` or `perf`
+- **description:** lowercase letters, digits, hyphens and dots, with no leading, trailing or doubled separators
+
 Examples:
 
-- `fix/login-validation`
-- `feat/export-yaml`
+- `fix/ndmi-nodata`
+- `feat/lst-regional-breaks`
 - `docs/readme-setup`
+
+`main`, `dev`, `develop` and `staging` are exempt.
 
 ### 3) Make your changes
 
@@ -89,14 +93,14 @@ Before submitting a pull request:
 
 ### 5) Commit your changes
 
-Use clear commit messages that explain what changed.
+Commit messages are checked in CI and must follow [Conventional Commits](https://www.conventionalcommits.org):
 
 ```bash
-git add .
-git commit -m "Short summary of the change"
+git add <files>
+git commit -m "fix(fwi): keep rainfall accumulation noon to noon"
 ```
 
-For larger changes, include a more descriptive commit message when needed.
+For larger changes, add a body that explains why the change was made.
 
 ### 6) Push your branch
 
@@ -112,8 +116,8 @@ In your pull request description, include:
 
 - What changed
 - Why it changed
-- Any screenshots (for UI changes)
 - Testing notes
+- For model changes: the effect on outputs and the new `STORCITO_MODEL_VERSION`
 - Related issue(s), if applicable (e.g. `Closes #123`)
 
 ## Pull Request Checklist
@@ -127,21 +131,22 @@ Before submitting a pull request, check:
 - [ ] I checked for sensitive information (keys, credentials, private data)
 - [ ] I linked related issues (if applicable)
 
-## Commit Message Guidance (Recommended)
+## Commit Message Rules
 
-Keep commit messages clear and specific.
+Format: `<type>(<scope>): <subject>` or `<type>: <subject>`.
+
+- **Allowed types:** `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`
+- The subject starts with a lowercase letter, uses the imperative mood and does not end with a period
+- The full subject line is at most 100 characters
+- Merge, revert and initial commits are skipped
 
 Good examples:
 
-- `Fix CSV upload validation for empty headers`
-- `Add YAML export button to model builder`
-- `Update installation steps in README`
+- `fix(ndmi): preserve source nodata in both entry points`
+- `feat(lst): add regional percentile breaks per assessment date`
+- `docs: update the data-source table in README`
 
-Avoid vague messages such as:
-
-- `fix`
-- `changes`
-- `update stuff`
+Avoid vague messages such as `fix`, `changes` or `update stuff`.
 
 ## Documentation Contributions
 
@@ -154,41 +159,20 @@ If you are updating docs:
 - Check links and commands
 - Match the style used in existing documentation
 
-## Project-Specific Notes (Template Placeholder)
+## Project-Specific Notes
 
-Replace or remove this section in project repositories.
-
-Examples of what may go here:
-
-- Setup links (Windows/Linux/Docker)
-- Testing commands (`npm test`, `pytest`, `go test ./...`)
-- Branching strategy
-- Review/approval rules
-- CI requirements
-- Changelog policy
+- **Setup:** follow the [README](README.md); `make build` and `make up` start the API stack, and the `make <layer>` targets fetch and seed input data.
+- **Tests:** `docker compose exec storcito-api-1 pytest`
+- **Model changes:** changes to scoring rules, AHP weights, FWI conventions or masks change the outputs. Record them in [CHANGELOG.md](CHANGELOG.md), bump `STORCITO_MODEL_VERSION`, and note that existing results and caches must be regenerated.
+- **Data and credentials:** never commit `.env` files, Copernicus/FIRMS/CLMS credentials or downloaded source data. New data sources must be listed with their licence in [ATTRIBUTIONS.md](ATTRIBUTIONS.md).
 
 ## Licensing of Contributions
 
 By contributing to this project, you confirm that:
 
 - your contribution is your own work (or you have the right to submit it), and
-- you agree that your contribution will be licensed under the same license as this repository.
+- you agree that your contribution will be licensed under the [MIT License](LICENSE) of this repository.
 
 ## Need Help?
 
-If you are unsure where to start, open an issue or discussion and ask. Maintainers can help point you in the right direction.
-
----
-
-## Maintainer Note (Template)
-
-> [!CAUTION]
-> This file is a template. Replace placeholders such as:
-
-- `[PROJECT_NAME]`
-- `[INSERT_ISSUE_TRACKER_URL]`
-- `[INSERT_DISCUSSION_URL_OR_REMOVE]`
-- `[REPOSITORY_URL]`
-- `[REPOSITORY_DIRECTORY]`
-
-Remove sections that do not apply to your project.
+If you are unsure where to start, open an issue and ask. Maintainers can help point you in the right direction.

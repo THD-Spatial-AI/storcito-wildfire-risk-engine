@@ -1,17 +1,32 @@
-# CITATION.cff — Update this file with your project's citation information.
-# See https://citation-file-format.github.io/ for the full specification.
-
 cff-version: 1.2.0
-title: "Project Title"
+title: "STORCITO Wildfire Risk Engine"
 message: "If you use this software, please cite it as below."
 type: software
 authors:
-  - family-names: "Last Name"
-    given-names: "First Name"
-    orcid: "https://orcid.org/0000-0000-0000-0000"
+  - family-names: "Ortega"
+    given-names: "Raquel"
+    email: "raquel.ortega@uvigo.gal"
+    affiliation: "Universidade de Vigo"
+  - family-names: "Khan"
+    given-names: "Asim"
+    email: "asim.khan@th-deg.de"
     affiliation: "BigGeoData & Spatial AI, Technische Hochschule Deggendorf"
-repository-code: "https://github.com/THD-Spatial-AI/github-template"
-url: "https://THD-Spatial-AI.github.io/github-template"
+abstract: >-
+  Dockerized Python engine for daily wildfire-danger mapping in Galicia, Spain.
+  It fetches terrain, fuel, Sentinel-2, Sentinel-3 LST, infrastructure, land-cover
+  and MeteoGalicia weather inputs into PostGIS, computes the Canadian Fire Weather
+  Index, scores each factor and aggregates them with the Analytic Hierarchy
+  Process into continuous and classified danger maps with input-coverage rasters,
+  served through a FastAPI service. Developed within the STORCITO project, funded
+  by the European Union's Horizon Europe programme under grant agreement
+  No. 101182153.
+keywords:
+  - wildfire danger
+  - Galicia
+  - Fire Weather Index
+  - Analytic Hierarchy Process
+  - Sentinel-2
+  - Earth observation
+repository-code: "https://github.com/THD-Spatial-AI/storcito-wildfire-risk-engine"
 license: MIT
-version: "0.1.0"
-date-released: "2026-01-01"
+version: "2026-09-07.3"
