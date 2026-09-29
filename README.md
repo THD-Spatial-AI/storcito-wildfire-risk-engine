@@ -1,9 +1,55 @@
-# STORCITO
+# STORCITO Wildfire Risk Engine
+### Daily wildfire-danger mapping for Galicia, Spain
 
-Dockerized Python geospatial CLI app.
+The **STORCITO Wildfire Risk Engine** calculates daily wildfire-danger maps for
+Galicia. It combines terrain, fuel, satellite, infrastructure, land-cover and
+weather data into one index that shows where environmental conditions and human
+influence favour wildfire on a given day. It is the calculation backend of the
+[STORCITO Wildfire platform](https://github.com/THD-Spatial-AI/Storcito-Wildfire),
+which lets users request and view these maps in a web browser.
 
-See [CHANGELOG.md](CHANGELOG.md) for differences vs. the original UVIGO code
-and season-backfill runbooks.
+## Purpose
+
+Wildfire danger depends on inputs that change at very different speeds: terrain
+barely changes, vegetation changes with the seasons, and weather changes every
+day. The engine brings these inputs together on a common grid for a requested
+area and date, so that fire-prevention and land-management users can see which
+areas are most exposed to wildfire on that day, and why.
+
+## What it does
+
+- **Fetches and stores inputs.** Downloads every input layer from its public
+  source (IGN, MeteoGalicia, Copernicus, MITECO, OpenStreetMap, NASA FIRMS) and
+  seeds it into PostGIS, with the date of each observation recorded.
+- **Calculates fire weather.** Computes the Canadian Fire Weather Index (FWI)
+  from MeteoGalicia 1 km forecasts, carrying fuel-moisture codes forward from a
+  fixed 1 March start of each season.
+- **Scores eleven factors from 1 to 5** in four topics (dynamic mode; static
+  mode uses a reduced set based on the published Galicia 2020 model):
+  - *Topography:* elevation, slope, aspect, topographic wetness index
+  - *Vegetation:* fuel model, NDVI, NDMI (Sentinel-2)
+  - *Human influence:* distance to roads/railways, wildland–urban interface
+  - *Weather:* FWI and land-surface temperature (Sentinel-3)
+- **Combines them** with Analytic Hierarchy Process (AHP) weights into a
+  continuous danger index and five danger classes, then removes non-burnable
+  surfaces such as water and sealed ground.
+- **Reports input coverage** alongside every map, showing how much of the
+  model's weighted input was available in each cell.
+- **Serves results** through a FastAPI service for any area of interest in
+  Galicia, and precomputes the whole region each night so common requests
+  return in seconds.
+
+Every output records its model version, source dates, classification breaks and
+weights, so a map can be traced back to how it was made.
+
+> [!IMPORTANT]
+> The danger index is an expert-weighted susceptibility index. It is not a
+> calibrated probability of ignition, does not model fire spread or losses, and
+> has not been validated against observed fires.
+
+The engine builds on the original STORCITO wildfire-risk code developed at
+Universidade de Vigo. See [CHANGELOG.md](CHANGELOG.md) for the differences from
+that code and for season-backfill runbooks.
 
 ## Run with Docker Compose
 
