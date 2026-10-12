@@ -132,7 +132,7 @@ def _find_fire_history_risk_map(base_output_dir: Path) -> Path:
     raise FileNotFoundError("Unable to find exported historical fire risk map.")
 
 
-# Published Galicia AHP model (Fernandez-Alonso et al., Remote Sensing 2020,
+# Published Galicia AHP model (Novo et al., Remote Sensing 2020,
 # doi:10.3390/rs12223705), renormalized after excluding its historical-fire
 # term.  The available FIRMS/dNBR overlay is not equivalent to the paper's
 # historical-fire-regime predictor, so it remains informational.

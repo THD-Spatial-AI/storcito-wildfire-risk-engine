@@ -605,6 +605,10 @@ def _finish_wildfire_response(outputs, payload, request, calculation_mode,
 
 
 
+# TWI breaks use 1 in N raster tiles (hash-sampled) to bound query cost.
+TWI_BREAK_TILE_SAMPLE = 50
+
+
 def _region_breaks(
     target_date,
     *,
@@ -706,7 +710,8 @@ def _region_breaks(
                     vals = cached("twi", twi_sig)
                 if vals is None:
                     cur.execute(
-                        """SELECT (q).value FROM ( SELECT ST_Quantile(ST_Union(rast), ARRAY[0.2,0.4,0.6,0.8]) q FROM twi WHERE mod(abs(hashint8(rid)::bigint), 50) = 0) s"""
+                        """SELECT (q).value FROM ( SELECT ST_Quantile(ST_Union(rast), ARRAY[0.2,0.4,0.6,0.8]) q FROM twi WHERE mod(abs(hashint8(rid)::bigint), %s) = 0) s""",
+                        (TWI_BREAK_TILE_SAMPLE,),
                     )
                     vals = [r[0] for r in cur.fetchall()]
                     if len(vals) != 4:
