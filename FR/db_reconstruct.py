@@ -162,6 +162,13 @@ def export_raster_table(
     return dest_tif
 
 
+def lst_reference_date(target_date) -> date:
+    """LST is observed only, so future days reuse today's freshness window."""
+    if isinstance(target_date, str):
+        target_date = date.fromisoformat(target_date)
+    return min(target_date, date.today())
+
+
 def _ts_date_for(ts_table: str, target_date, *, max_age_days: int | None = None) -> str | None:
     """Newest capture on or before the assessment date; never look forward."""
     if isinstance(target_date, str):
@@ -1220,7 +1227,7 @@ def reconstruct_temporal_inputs(
             _, capture = export_ts_raster(
                 TEMPORAL_TS_TABLES["lst"],
                 "lst",
-                target_date,
+                lst_reference_date(target_date),
                 lst_path,
                 clip_geom=clip_geom,
                 clip_geom_crs=clip_geom_crs,

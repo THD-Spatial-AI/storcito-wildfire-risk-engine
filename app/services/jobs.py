@@ -619,7 +619,7 @@ def _region_breaks(
     """Region-wide 20/40/60/80 percentile breakpoints for the percentile- classified layers, so tiled/partial runs classify identically everywhere. LST is per assessment date (from lst_ts); TWI is static and cached. Empty dict on any failure -> engine falls back to extent-local percentiles."""
     breaks: dict[str, str] = {}
     try:
-        from FR.db_reconstruct import _pg_connect, _ts_date_for
+        from FR.db_reconstruct import _pg_connect, _ts_date_for, lst_reference_date
 
         with _pg_connect() as conn, conn.cursor() as cur:
             cur.execute("SET LOCAL statement_timeout = '5min'")
@@ -662,7 +662,7 @@ def _region_breaks(
             capture = (
                 _ts_date_for(
                     "lst_ts",
-                    target_date,
+                    lst_reference_date(target_date),
                     max_age_days=int(os.environ.get("STORCITO_MAX_LST_AGE_DAYS", "3")),
                 )
                 if include_lst
