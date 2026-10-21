@@ -621,6 +621,72 @@ def cmd_load_sentinel(args: argparse.Namespace) -> int:
     return 0
 
 
+def _loaded_sentinel_dates() -> dict[str, dict[str, int]]:
+    """Capture date -> {table: tile rows} for B4/B8/B11."""
+    tables = ("sentinel_b4_ts", "sentinel_b8_ts", "sentinel_b11_ts")
+    union = " UNION ALL ".join(
+        f"SELECT '{table}', capture_date, count(*) FROM public.{table} GROUP BY capture_date"
+        for table in tables
+    )
+    result = subprocess.run(
+        psql_cmd() + ["-qtA", "-F", "|", "-c", union],
+        env=pg_env(), capture_output=True, text=True, check=True,
+    )
+    loaded: dict[str, dict[str, int]] = {}
+    for line in result.stdout.splitlines():
+        table, capture_date, rows = line.split("|")
+        loaded.setdefault(capture_date, {})[table] = int(rows)
+    return {
+        day: counts for day, counts in loaded.items() if set(counts) == set(tables)
+    }
+
+
+def cmd_sentinel_staging(args: argparse.Namespace) -> int:
+    """Report staged Sentinel windows missing from PostGIS; --prune deletes loaded ones."""
+    before = (
+        datetime.strptime(args.before, "%Y-%m-%d").date()
+        if args.before else date.today().replace(day=1)
+    )
+    loaded = _loaded_sentinel_dates()
+    windows = sorted(
+        path for path in args.root.iterdir()
+        if path.is_dir() and SENTINEL_WINDOW_RE.match(path.name)
+    )
+    removable: list[Path] = []
+    for window in windows:
+        capture = datetime.strptime(window.name.split("_")[1], "%Y%m%d").date()
+        size = sum(f.stat().st_size for f in window.rglob("*") if f.is_file())
+        label = f"{window.name}  capture={capture}  {size / 2**30:5.1f} GiB"
+        if capture.isoformat() in loaded:
+            rows = loaded[capture.isoformat()]["sentinel_b4_ts"]
+            if capture < before:
+                removable.append(window)
+                log(f"LOADED      {label}  ({rows} tiles) -> deletable")
+            else:
+                log(f"LOADED      {label}  ({rows} tiles) -> kept (current month)")
+            continue
+        try:
+            sentinel_window_files(window)
+            reason = (
+                "valid; load with: load-sentinel --skip-current --dir "
+                f"{window}"
+            )
+        except LoadError as exc:
+            reason = f"cannot load: {exc}"
+        log(f"NOT LOADED  {label}  {reason}")
+    freed = sum(
+        f.stat().st_size for window in removable for f in window.rglob("*") if f.is_file()
+    )
+    if not args.prune:
+        log(f"{len(removable)} loaded window(s) deletable, {freed / 2**30:.1f} GiB; "
+            "rerun with --prune to delete them")
+        return 0
+    for window in removable:
+        shutil.rmtree(window)
+    log(f"deleted {len(removable)} loaded window(s), {freed / 2**30:.1f} GiB freed")
+    return 0
+
+
 def _load_raster_tiles(args: argparse.Namespace, tifs: list[Path]) -> int:
     if not tifs:
         source_dir = getattr(args, "dir", None) or getattr(args, "source_dir", ".")
@@ -1059,10 +1125,95 @@ CREATE TABLE IF NOT EXISTS public.fwi_files (
 );
 CREATE INDEX IF NOT EXISTS fwi_files_fdate_idx ON public.fwi_files (fdate);
 ALTER TABLE public.fwi_files ADD COLUMN IF NOT EXISTS peak_temp double precision;
+-- Staged file size; nbytes is the stored blob.
+ALTER TABLE public.fwi_files ADD COLUMN IF NOT EXISTS source_nbytes bigint;
 """
 
 FWI_CHUNK_BYTES = 64 << 20
 FWI_REQUIRED_VARS = {"prec", "mod", "dir", "u", "v", "temp", "rh", "lon", "lat"}
+FWI_NETCDF4_MAGIC = b"\x89HDF\r\n\x1a\n"
+
+
+def compress_fwi_netcdf(src: Path, dst: Path) -> None:
+    """Losslessly rewrite an FWI file as zlib NetCDF4, one hour per chunk."""
+    import netCDF4 as nc
+
+    with nc.Dataset(src) as source, nc.Dataset(dst, "w", format="NETCDF4") as target:
+        target.setncatts({key: source.getncattr(key) for key in source.ncattrs()})
+        for name, dim in source.dimensions.items():
+            target.createDimension(name, None if dim.isunlimited() else len(dim))
+        for name, variable in source.variables.items():
+            variable.set_auto_maskandscale(False)
+            attrs = {key: variable.getncattr(key) for key in variable.ncattrs()}
+            fill = attrs.pop("_FillValue", None)
+            options: dict[str, Any] = {}
+            if variable.ndim:
+                options = {"zlib": True, "complevel": 4, "shuffle": True}
+                if variable.ndim > 1 and variable.dimensions[0] == "time":
+                    options["chunksizes"] = (1, *variable.shape[1:])
+            out = target.createVariable(
+                name, variable.dtype, variable.dimensions, fill_value=fill, **options
+            )
+            out.set_auto_maskandscale(False)
+            out.setncatts(attrs)
+            out[...] = variable[...]
+
+
+def fwi_netcdf_identical(a: Path, b: Path) -> bool:
+    """True when both files have the same dimensions, attributes and values."""
+    import netCDF4 as nc
+    import numpy as np
+
+    def same(x: Any, y: Any) -> bool:
+        return np.array_equal(np.asarray(x), np.asarray(y))
+
+    def same_attrs(x: Any, y: Any) -> bool:
+        keys = set(x.ncattrs())
+        return keys == set(y.ncattrs()) and all(
+            same(x.getncattr(key), y.getncattr(key)) for key in keys
+        )
+
+    with nc.Dataset(a) as left, nc.Dataset(b) as right:
+        if not same_attrs(left, right):
+            return False
+        if {k: len(d) for k, d in left.dimensions.items()} != {
+            k: len(d) for k, d in right.dimensions.items()
+        }:
+            return False
+        if set(left.variables) != set(right.variables):
+            return False
+        for name, x in left.variables.items():
+            y = right.variables[name]
+            if (x.dimensions, x.shape, x.dtype) != (y.dimensions, y.shape, y.dtype):
+                return False
+            if not same_attrs(x, y):
+                return False
+            vx, vy = x[...], y[...]
+            if not same(np.ma.getmaskarray(vx), np.ma.getmaskarray(vy)):
+                return False
+            dx, dy = np.ma.getdata(vx), np.ma.getdata(vy)
+            if not np.array_equal(dx, dy, equal_nan=dx.dtype.kind in "fc"):
+                return False
+    return True
+
+
+def compressed_fwi_copy(src: Path, work_dir: Path) -> Path | None:
+    """Verified compressed copy of ``src``, or None to keep the original."""
+    dst = work_dir / src.name
+    try:
+        compress_fwi_netcdf(src, dst)
+        if not fwi_netcdf_identical(src, dst):
+            log(f"warning: compressed {src.name} differs from its source; keeping original")
+            dst.unlink(missing_ok=True)
+            return None
+    except Exception as exc:  # noqa: BLE001
+        log(f"warning: could not compress {src.name} ({exc}); keeping original")
+        dst.unlink(missing_ok=True)
+        return None
+    if dst.stat().st_size >= src.stat().st_size:
+        dst.unlink()
+        return None
+    return dst
 
 
 def validate_fwi_file(path: Path, fdate: date) -> float:
@@ -1133,8 +1284,8 @@ def prune_verified_fwi_dir(cur, directory: Path, cutoff: date) -> int:
         if fdate >= cutoff:
             continue
         cur.execute(
-            "SELECT 1 FROM fwi_files WHERE filename=%s AND nbytes=%s "
-            "AND length(data)=nbytes",
+            "SELECT 1 FROM fwi_files WHERE filename=%s "
+            "AND %s IN (nbytes, source_nbytes) AND length(data)=nbytes",
             (path.name, path.stat().st_size),
         )
         if cur.fetchone():
@@ -1170,11 +1321,15 @@ def cmd_load_fwi_files(args: argparse.Namespace) -> int:
     cache_dir = args.dir.parent.parent / "_fwi_cache"
 
     conn = connect_db()
+    work = tempfile.TemporaryDirectory(prefix=".fwi_compress_", dir=args.dir.parent)
     try:
         with conn.cursor() as cur:
             cur.execute(FWI_DDL)
             for path, fdate, peak in files:
-                size = path.stat().st_size
+                source_size = path.stat().st_size
+                stored = None if args.no_compress else compressed_fwi_copy(path, Path(work.name))
+                blob_path = stored or path
+                size = blob_path.stat().st_size
                 # Assemble chunks server-side in one pass: repeated
                 # `data = data || chunk` updates rewrote the row per chunk and
                 # bloated the table to ~2.3x its logical size.
@@ -1183,21 +1338,25 @@ def cmd_load_fwi_files(args: argparse.Namespace) -> int:
                     "(i int, part bytea) ON COMMIT DELETE ROWS"
                 )
                 cur.execute("TRUNCATE fwi_chunks")
-                with path.open("rb") as fh:
+                with blob_path.open("rb") as fh:
                     i = 0
                     while chunk := fh.read(FWI_CHUNK_BYTES):
                         cur.execute(
                             "INSERT INTO fwi_chunks (i, part) VALUES (%s, %s)", (i, chunk)
                         )
                         i += 1
+                if stored is not None:
+                    stored.unlink()
                 cur.execute(
-                    """INSERT INTO fwi_files (fdate, filename, data, nbytes, peak_temp)
-                       SELECT %s, %s, string_agg(part, ''::bytea ORDER BY i), %s, %s
+                    """INSERT INTO fwi_files
+                           (fdate, filename, data, nbytes, peak_temp, source_nbytes)
+                       SELECT %s, %s, string_agg(part, ''::bytea ORDER BY i), %s, %s, %s
                        FROM fwi_chunks
                        ON CONFLICT (filename)
                        DO UPDATE SET fdate=EXCLUDED.fdate, data=EXCLUDED.data,
-                                     nbytes=EXCLUDED.nbytes, peak_temp=EXCLUDED.peak_temp""",
-                    (fdate, path.name, size, peak),
+                                     nbytes=EXCLUDED.nbytes, peak_temp=EXCLUDED.peak_temp,
+                                     source_nbytes=EXCLUDED.source_nbytes""",
+                    (fdate, path.name, size, peak, source_size),
                 )
                 # Invalidate caches keyed by date/filename: the per-day slices
                 # and the on-disk NetCDF cache would otherwise serve stale data.
@@ -1205,7 +1364,10 @@ def cmd_load_fwi_files(args: argparse.Namespace) -> int:
                 if cur.fetchone()[0] is not None and fdate is not None:
                     cur.execute("DELETE FROM fwi_slices WHERE fdate = %s", (fdate,))
                 (cache_dir / path.name).unlink(missing_ok=True)
-                log(f"fwi_files <- {path.name} date={fdate} bytes={size} peak_temp={peak}")
+                log(
+                    f"fwi_files <- {path.name} date={fdate} bytes={size} "
+                    f"(source {source_size}) peak_temp={peak}"
+                )
             conn.commit()
             if skipped:
                 log(f"skipped {skipped} staged file(s) outside {start}..{end}")
@@ -1228,6 +1390,87 @@ def cmd_load_fwi_files(args: argparse.Namespace) -> int:
                     log(f"pruned {cached} cached file(s) older than {cutoff} (verified in DB)")
     finally:
         conn.close()
+        work.cleanup()
+    return 0
+
+
+def cmd_compact_fwi_files(args: argparse.Namespace) -> int:
+    """Losslessly recompress existing fwi_files rows, one row per transaction."""
+    cache_dir = args.cache_dir
+    conn = connect_db()
+    work = tempfile.TemporaryDirectory(prefix=".fwi_compact_", dir=args.work_dir)
+    saved = 0
+    done = 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(FWI_DDL)
+            cur.execute(
+                "SELECT id, filename, nbytes FROM fwi_files "
+                "WHERE substring(data FROM 1 FOR 8) <> %s ORDER BY fdate",
+                (FWI_NETCDF4_MAGIC,),
+            )
+            rows = cur.fetchall()
+        conn.commit()
+        if args.limit is not None:
+            rows = rows[: args.limit]
+        log(f"{len(rows)} uncompressed FWI file(s) to compact"
+            + (" (dry run: nothing is written)" if args.dry_run else ""))
+        for index, (row_id, filename, nbytes) in enumerate(rows, start=1):
+            source = Path(work.name) / "source" / filename
+            source.parent.mkdir(exist_ok=True)
+            with conn.cursor() as cur:
+                cur.execute("SELECT data FROM fwi_files WHERE id = %s", (row_id,))
+                source.write_bytes(bytes(cur.fetchone()[0]))
+            conn.commit()
+            if source.stat().st_size != nbytes:
+                log(f"skip {filename}: stored blob is incomplete")
+                source.unlink()
+                continue
+            stored = compressed_fwi_copy(source, Path(work.name))
+            if stored is None:
+                source.unlink()
+                continue
+            size = stored.stat().st_size
+            if args.dry_run:
+                log(f"[{index}/{len(rows)}] {filename}: {nbytes} -> {size} bytes "
+                    f"({100 * size / nbytes:.0f}%), identical values")
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE fwi_files SET data = %s, nbytes = %s, "
+                        "source_nbytes = coalesce(source_nbytes, nbytes) "
+                        "WHERE id = %s AND nbytes = %s",
+                        (stored.read_bytes(), size, row_id, nbytes),
+                    )
+                    updated = cur.rowcount
+                conn.commit()
+                if updated:
+                    cached = cache_dir / filename
+                    if cached.is_file():
+                        part = cached.with_name(f".{filename}.{os.getpid()}.part")
+                        shutil.copyfile(stored, part)
+                        os.replace(part, cached)
+                    log(f"[{index}/{len(rows)}] {filename}: {nbytes} -> {size} bytes")
+                    saved += nbytes - size
+                    done += 1
+                    if done % args.vacuum_every == 0:  # reuse freed space
+                        conn.autocommit = True
+                        with conn.cursor() as cur:
+                            cur.execute("VACUUM fwi_files")
+                        conn.autocommit = False
+                else:
+                    log(f"skip {filename}: row changed while compacting")
+            stored.unlink()
+            source.unlink()
+        if done:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute("VACUUM fwi_files")
+            log(f"compacted {done} file(s), {saved / 2**30:.1f} GiB smaller; "
+                "run VACUUM FULL fwi_files to return the space to the disk")
+    finally:
+        conn.close()
+        work.cleanup()
     return 0
 
 
@@ -1819,6 +2062,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-missing", action="store_true")
     p.set_defaults(func=cmd_load_sentinel)
 
+    p = sub.add_parser(
+        "sentinel-staging",
+        help="report staged Sentinel windows missing from PostGIS; --prune deletes loaded ones",
+    )
+    p.add_argument("--root", type=Path, default=Path("data/OUTPUT/source_data/sentinel"))
+    p.add_argument("--before", help="only delete windows ending before YYYY-MM-DD "
+                   "(default: first day of the current month)")
+    p.add_argument("--prune", action="store_true", help="delete loaded windows")
+    p.set_defaults(func=cmd_sentinel_staging)
+
     p = sub.add_parser("load-clcplus", help="verify, extract, and load a staged CLC+ archive")
     p.add_argument(
         "--source-dir", type=Path, required=True, help="staged CLMS dataset/format folder"
@@ -1851,7 +2104,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--end", help="only load files dated <= YYYY-MM-DD")
     p.add_argument("--prune-days", type=int, default=None,
                    help="delete staged files older than N days once verified in the DB")
+    p.add_argument("--no-compress", action="store_true",
+                   help="store the staged NetCDF bytes as-is instead of a lossless NetCDF4 copy")
     p.set_defaults(func=cmd_load_fwi_files)
+
+    p = sub.add_parser(
+        "compact-fwi-files",
+        help="losslessly recompress uncompressed rows already stored in fwi_files",
+    )
+    p.add_argument("--limit", type=int, default=None, help="compact at most N files")
+    p.add_argument("--dry-run", action="store_true",
+                   help="compress and verify, report the sizes, but write nothing")
+    p.add_argument("--vacuum-every", type=int, default=5,
+                   help="plain VACUUM after every N rows so freed space is reused")
+    p.add_argument("--cache-dir", type=Path, default=Path("data/OUTPUT/_fwi_cache"))
+    p.add_argument("--work-dir", type=Path, default=Path("data/OUTPUT"),
+                   help="scratch folder for one decompressed and one compressed file")
+    p.set_defaults(func=cmd_compact_fwi_files)
 
     p = sub.add_parser("load-firms", help="load FIRMS hotspot CSVs into hist (replaces those years)")
     p.add_argument("--dir", type=Path, help="folder containing hotspots_*_<year>.csv files")

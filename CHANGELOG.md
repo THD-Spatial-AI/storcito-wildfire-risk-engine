@@ -3,6 +3,14 @@
 Notable changes of this engine relative to the original UVIGO codebase
 (https://github.com/Mat-GL-02/STORCITO), plus operational notes.
 
+## 2026-10-21 — Storage cleanup
+
+- FWI files are stored as lossless NetCDF4 (`--no-compress` to disable).
+  `make fwi-compact` recompresses existing rows; then `VACUUM FULL fwi_files`.
+- `make sentinel-staging [PRUNE=1]` reports unloaded Sentinel windows and
+  deletes loaded ones.
+- Sentinel fetch no longer downloads B8A by default.
+
 ## 2026-09-07 — Dynamic AHP and vegetation-contact WUI (model 2026-09-07.3)
 
 - Restored all upstream dynamic AHP matrices: top-level terrain/vegetation/

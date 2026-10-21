@@ -2200,7 +2200,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="mosaic window length in days within a season (default weekly)",
     )
     p.add_argument("--bbox", help="west,south,east,north; default Galicia bbox")
-    p.add_argument("--bands", default="B04,B08,B8A,B11")
+    p.add_argument("--bands", default="B04,B08,B11")
     p.add_argument(
         "--resolution",
         type=float,

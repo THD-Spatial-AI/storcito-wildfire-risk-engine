@@ -5,7 +5,7 @@ API_SERVICES ?= storcito-api-1 storcito-api-2 storcito-api-3 storcito-api-4
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build up down restart logs shell ps clean rebuild terrain-up publish-tiles borders sentinel clc fwi hist hist-scenes infra dtm lst twi fuels mdt iuf
+.PHONY: help build up down restart logs shell ps clean rebuild terrain-up publish-tiles borders sentinel clc fwi hist hist-scenes infra dtm lst twi fuels mdt iuf fwi-compact sentinel-staging
 
 help:
 	@echo "STORCITO - common targets"
@@ -29,6 +29,9 @@ help:
 	@echo "  make hist-scenes PRE=... POST=...   Sentinel B8A/B12 dNBR scene pair into hist_scenes"
 	@echo "  make infra [REGION=galicia]         OSM roads+railways (alias or Geofabrik path)"
 	@echo "  make dtm [RES=25]                   Spanish MDT elevation from IGN WCS (5 or 25 m)"
+	@echo "Storage maintenance:"
+	@echo "  make fwi-compact [DRY=1] [LIMIT=n]  Losslessly recompress FWI files already in PostGIS"
+	@echo "  make sentinel-staging [PRUNE=1]     Report staged Sentinel windows; PRUNE=1 deletes loaded ones"
 
 build:
 	$(COMPOSE) build
@@ -188,3 +191,15 @@ fwi:
 	$(COMPOSE) exec -T storcito-api-1 micromamba run -n storcito \
 	  python3 /app/scripts/load_localhost.py load-fwi-files --dir /app/data/OUTPUT/source_data/fwi \
 	  $(if $(START),--start $(START)) $(if $(END),--end $(END)) $(if $(PRUNE),--prune-days $(PRUNE)) && exit $$rc
+
+# Recompress FWI rows in PostGIS
+fwi-compact:
+	@$(COMPOSE) exec -T storcito-api-1 micromamba run -n storcito \
+	  python3 /app/scripts/load_localhost.py compact-fwi-files \
+	  --cache-dir /app/data/OUTPUT/_fwi_cache --work-dir /app/data/OUTPUT \
+	  $(if $(DRY),--dry-run) $(if $(LIMIT),--limit $(LIMIT))
+
+# Report staged Sentinel windows
+sentinel-staging:
+	@$(COMPOSE) exec -T geotools bash -c 'cd /data && \
+	  python3 scripts/load_localhost.py sentinel-staging $(if $(PRUNE),--prune)'

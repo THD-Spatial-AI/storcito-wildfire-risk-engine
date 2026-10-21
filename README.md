@@ -150,7 +150,7 @@ atomic swap. Delete a layer's staging folder only to force a fresh download.
 | `twi` | `twi` | Topographic Wetness Index | computed from `dtm` tiles (GRASS `r.fill.dir` + `r.topidx`) | 25 m | none |
 | `mdt` | `mdt` | reference grid resampled from the IGN MDT tiles | derived locally (no fetch) | 30 m | none |
 | `fwi` | `fwi_files` | WRF 1 km weather forecast | MeteoGalicia THREDDS NCSS — `thredds.meteogalicia.gal` | 1 km, daily NetCDF | none |
-| `sentinel` | `sentinel_b4/b8/b8a/b11` + `_ts` | Sentinel-2 L2A bands B04/B08/B8A/B11 | Copernicus Data Space Process API — `sh.dataspace.copernicus.eu` | 20 m weekly mosaics | `SH_CLIENT_ID` + `SH_CLIENT_SECRET` |
+| `sentinel` | `sentinel_b4/b8/b11` + `_ts` | Sentinel-2 L2A bands B04/B08/B11 | Copernicus Data Space Process API — `sh.dataspace.copernicus.eu` | 20 m weekly mosaics | `SH_CLIENT_ID` + `SH_CLIENT_SECRET` |
 | `lst` | `lst` + `lst_ts` | Sentinel-3 SLSTR L2 LST (`SENTINEL3_SLSTR_L2_LST`) | Copernicus Data Space openEO API | ~1 km, Kelvin | `SH_CLIENT_ID` + `SH_CLIENT_SECRET` |
 | `infra` | `infra` | OSM roads + railways | Geofabrik extracts — `download.geofabrik.de` | vector | none |
 | `fuels` | `fuels` | MFE forest map, Rothermel fuel model (`modelocombustible`) | MITECO OGC API-Features — `wmts.mapama.gob.es/sig-api` | 20 m (rasterized) | none |
