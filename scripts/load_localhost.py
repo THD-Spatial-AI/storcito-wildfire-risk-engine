@@ -216,7 +216,6 @@ def first_existing(paths: Iterable[Path]) -> Path | None:
 SENTINEL_BANDS = {
     "B04": "sentinel_b4",
     "B08": "sentinel_b8",
-    "B8A": "sentinel_b8a",
     "B11": "sentinel_b11",
 }
 
@@ -610,7 +609,7 @@ def cmd_load_sentinel(args: argparse.Namespace) -> int:
     for band, table in SENTINEL_BANDS.items():
         tiles = window_files.get(band)
         if not tiles:
-            if args.allow_missing or band == "B8A":
+            if args.allow_missing:
                 log(f"skip {band}: not found in {args.dir}")
                 continue
             raise LoadError(f"missing {band}.tif in {args.dir}")

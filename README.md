@@ -319,7 +319,7 @@ vector tables carry a `geom` (or `ogc_fid`) geometry column.
 | Table | Kind | SRID | Contents |
 |---|---|---|---|
 | `dtm` | raster | 4258 | IGN MDT elevation, 25 m (LiDAR-derived) |
-| `sentinel_b4`, `sentinel_b8`, `sentinel_b8a`, `sentinel_b11` | raster | 4326 | Sentinel-2 L2A current-week mosaic (engine input) |
+| `sentinel_b4`, `sentinel_b8`, `sentinel_b11` | raster | 4326 | Sentinel-2 L2A current-week mosaic (engine input) |
 | `sentinel_*_ts` | raster | 4326 | Sentinel-2 weekly time series with `capture_date` |
 | `fwi_files`, `fwi_slices` | blob/cache | n/a | MeteoGalicia WRF NetCDF files and per-day cached slices |
 | `fuels` | raster | 32629 | Rothermel fuel models 1-13, rasterized from MFE polygons |
