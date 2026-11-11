@@ -856,7 +856,14 @@ def run_static_aoi_for_geometry(
                 base_output_dir / "TIFs" / "TWI_Risk_Map.tif",
                 breaks=(classification_breaks or {}).get("FFRM_TWI_BREAKS"),
             )
-        Fmt.fmt(cropped_fuels, output_folder=base_output_dir, export_image=True, show_plots=False)
+        Fmt.fmt(
+            cropped_fuels,
+            output_folder=base_output_dir,
+            export_image=True,
+            show_plots=False,
+            clc_path=input_dir / "IUF" / "CLC_galicia.shp",
+        )
+        fuel_gap_fill = dict(Fmt.last_fill_stats)
 
         processing_reference = base_output_dir / "TIFs" / "MDT_RISK_MAP.tif"
         Infra.infrastructure(
@@ -1211,6 +1218,15 @@ def run_static_aoi_for_geometry(
                 "Experimental wildfire susceptibility/risk index; AHP matrix consistency "
                 "is not evidence of out-of-sample predictive accuracy."
             ),
+            "unassigned_fuel": {
+                **fuel_gap_fill,
+                "interpretation": (
+                    "MFE polygons without a fuel model (code 14). Policy 'clc' "
+                    "assigns a Rothermel model from CORINE land cover through the "
+                    "upstream fuel-type lookup; cells still unassigned have no "
+                    "fuel score and no danger value."
+                ),
+            },
             "wildfire_analysis_domain": {
                 "mask": str(analysis_domain_mask),
                 "primary_source": (

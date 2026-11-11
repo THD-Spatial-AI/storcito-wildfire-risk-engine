@@ -3,6 +3,20 @@
 Notable changes of this engine relative to the original UVIGO codebase
 (https://github.com/Mat-GL-02/STORCITO), plus operational notes.
 
+## 2026-11-11 — Fuel for land without an MFE fuel model (model 2026-11-11.1)
+
+- MFE polygons without a fuel model (code 14) no longer score 1. They take the
+  Rothermel model implied by CORINE land cover through the upstream fuel-type
+  lookup; cells that remain unassigned get no fuel score and no danger value.
+  The upstream code has no code 14 and gives such land a zero fuel term.
+- `FFRM_UNASSIGNED_FUEL` selects `clc` (default), `missing` or `legacy`
+  (score 1, reproduces earlier runs). Run metadata reports the cell counts
+  under `unassigned_fuel`.
+- This changes results wherever non-forest land is mapped. Runs made before
+  and after are not comparable.
+- Deploy with `STORCITO_MODEL_VERSION=2026-11-11.1`, recreate API services and
+  regenerate existing results.
+
 ## 2026-10-21 — Storage cleanup
 
 - FWI files are stored as lossless NetCDF4 (`--no-compress` to disable).

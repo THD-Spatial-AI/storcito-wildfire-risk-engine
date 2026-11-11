@@ -1,7 +1,11 @@
 import os
 import rasterio
 
+import geopandas as gpd
 import numpy as np
+import pandas as pd
+from rasterio.features import rasterize
+from shapely.geometry import box
 import matplotlib.pyplot as plt
 
 from FR.rutinas.setup import *
@@ -27,8 +31,110 @@ FINAL_MAP = {
     7: 5, 8: 2, 9: 3,
     10: 4, 11: 4,
     12: 4, 13: 5,
-    14: 1,
+    14: 0,  # no model
 }
+
+# MFE polygons without a fuel model.
+UNASSIGNED_FUEL_CODE = 14
+LEGACY_UNASSIGNED_SCORE = 1
+UNASSIGNED_FUEL_POLICIES = ("clc", "missing", "legacy")
+
+# CLC2018 class -> Rothermel model, through the upstream fuel-type lookup
+# (ROTHERMEL_MAP): cropland 41/42 -> 3, grassland 31-33/53 -> 3,
+# shrubland 22/23 -> 4, discontinuous urban 62 -> 5. Forest classes are left
+# out: the upstream model depends on canopy cover, which CLC does not record.
+CLC_FILL_ROTHERMEL = {
+    112: 5,
+    211: 3, 212: 3, 213: 3,
+    221: 3, 222: 3, 223: 3,
+    231: 3,
+    241: 3, 242: 3, 243: 3, 244: 3,
+    321: 3,
+    322: 4, 323: 4, 324: 4,
+    411: 3, 412: 3,
+}
+
+# Last run summary.
+last_fill_stats: dict = {}
+
+
+def unassigned_fuel_policy() -> str:
+    """How MFE polygons without a fuel model are handled.
+
+    ``clc`` (default) fills them from CORINE land cover and leaves the rest
+    without a score; ``missing`` gives none of them a score; ``legacy`` keeps
+    the former fixed score of 1.
+    """
+    policy = os.environ.get("FFRM_UNASSIGNED_FUEL", "clc").strip().lower() or "clc"
+    if policy not in UNASSIGNED_FUEL_POLICIES:
+        raise ValueError(
+            "FFRM_UNASSIGNED_FUEL must be one of: " + ", ".join(UNASSIGNED_FUEL_POLICIES)
+        )
+    return policy
+
+
+def fill_unassigned_fuel(
+    fuel_codes: np.ndarray,
+    clc_path: str | Path,
+    transform,
+    crs,
+) -> tuple[np.ndarray, dict]:
+    """Replace code 14 with the Rothermel model implied by CORINE land cover.
+
+    Cells whose land-cover class has no entry in ``CLC_FILL_ROTHERMEL`` keep
+    code 14 and therefore receive no fuel score.
+    """
+    clc_path = Path(clc_path)
+    if not clc_path.is_file():
+        raise FileNotFoundError(f"CLC land-cover vector is unavailable: {clc_path}")
+    if crs is None:
+        raise ValueError("Fuel raster has no CRS; cannot fill unassigned fuel")
+
+    filled = np.array(fuel_codes, copy=True)
+    unassigned = filled == UNASSIGNED_FUEL_CODE
+    stats = {
+        "source": "CORINE Land Cover 2018 Code_18",
+        "unassigned_cells": int(unassigned.sum()),
+        "filled_cells": 0,
+        "still_unassigned_cells": int(unassigned.sum()),
+        "filled_by_clc_code": {},
+    }
+    if not unassigned.any():
+        return filled, stats
+
+    clc = gpd.read_file(clc_path)
+    if "Code_18" not in clc.columns:
+        raise ValueError(f"CLC vector lacks required Code_18 field: {clc_path}")
+    if clc.crs is None:
+        raise ValueError(f"CLC vector has no CRS: {clc_path}")
+    clc = clc.to_crs(crs)
+    clc = clc[clc.geometry.notna() & ~clc.geometry.is_empty].copy()
+    height, width = filled.shape
+    bounds = rasterio.transform.array_bounds(height, width, transform)
+    if not clc.empty:
+        clc = clc[clc.intersects(box(*bounds))].copy()
+    clc["_code"] = pd.to_numeric(clc["Code_18"], errors="coerce")
+    clc = clc[clc["_code"].isin(CLC_FILL_ROTHERMEL)]
+    if clc.empty:
+        return filled, stats
+
+    clc_codes = rasterize(
+        ((geometry, int(code)) for geometry, code in zip(clc.geometry, clc["_code"])),
+        out_shape=(height, width),
+        transform=transform,
+        fill=0,
+        dtype="int32",
+        all_touched=False,
+    )
+    for clc_code, model in CLC_FILL_ROTHERMEL.items():
+        target = unassigned & (clc_codes == clc_code)
+        count = int(target.sum())
+        if count:
+            filled[target] = model
+            stats["filled_by_clc_code"][str(clc_code)] = count
+    stats["filled_cells"] = sum(stats["filled_by_clc_code"].values())
+    stats["still_unassigned_cells"] = stats["unassigned_cells"] - stats["filled_cells"]
+    return filled, stats
 
 def _print_progress(completed: int, total: int, label: str) -> None:
     """Print a compact in-place progress bar for long raster passes."""
@@ -110,7 +216,8 @@ def _integer_codes(values: np.ndarray, nodata: float | None) -> set[int]:
 
 @logged_step("FUEL", "classify-fuel-model")
 def fmt(input_file:str|Path,output_folder=Path('data/OUTPUT') ,file_name:str='FMT',
-        export_image:bool=False,show_plots:bool=True) -> np.ndarray:
+        export_image:bool=False,show_plots:bool=True,
+        clc_path:str|Path|None=None) -> np.ndarray:
     
     """Calculates Fuel Model Type (FMT) remapping with two classification levels. Remaps European FMT codes to Rothermel fuel model types and then to final risk categories using lookup tables. Args: input_file: Path to European FMT raster file output_folder: Output folder path for saving results. Defaults to 'OUTPUT' id_name: Identifier for output files. Defaults to 'FMT' export_image: Whether to save figure and GeoTIFF/PNG files. Defaults to False show_plots (bool, optional): _description_. Defaults to False. Returns: Remapped array classified into final FMT risk categories (int32) Raises: FileNotFoundError: If input_file does not exist"""
     input_file = Path(input_file)
@@ -142,9 +249,31 @@ def fmt(input_file:str|Path,output_folder=Path('data/OUTPUT') ,file_name:str='FM
             "ROTHERMEL_MAP",
             nodata=nodata,
         )
+    # Unassigned fuel
+    global last_fill_stats
+    policy = unassigned_fuel_policy()
+    final_map = dict(FINAL_MAP)
+    fill_stats = {
+        "unassigned_cells": int((fmt_rothermel == UNASSIGNED_FUEL_CODE).sum()),
+    }
+    if policy == "legacy":
+        final_map[UNASSIGNED_FUEL_CODE] = LEGACY_UNASSIGNED_SCORE
+    elif policy == "clc":
+        if clc_path is None:
+            raise ValueError(
+                "FFRM_UNASSIGNED_FUEL=clc needs the CORINE land-cover vector (clc_path)"
+            )
+        fmt_rothermel, fill_stats = fill_unassigned_fuel(
+            fmt_rothermel, clc_path, meta["transform"], meta.get("crs")
+        )
+    last_fill_stats = {"policy": policy, **fill_stats}
+    log_event("FUEL", "UNASSIGNED", **{
+        key: value for key, value in last_fill_stats.items() if not isinstance(value, dict)
+    })
+
     fmt_final, _, _, _ = _remap_with_lookup(
         fmt_rothermel.astype("float32", copy=False),
-        FINAL_MAP,
+        final_map,
         "Clasificando riesgo FMT",
     )
     log_array_stats("FUEL", "source-codes", fmt_eu, nodata=nodata)

@@ -151,7 +151,8 @@ if run_fmt:
         input_fmt,
         output_folder=output_folder_re,
         export_image=True,
-        show_plots=False
+        show_plots=False,
+        clc_path=input_clc,
     )
 
 if run_infra:

@@ -460,6 +460,20 @@ codes and source coverage are logged and embedded in
 `wildfire_analysis_mask.tif`. Fallback codes may be overridden with
 `FFRM_NON_BURNABLE_CLC_CODES`.
 
+The MFE forest map assigns fuel models only inside forest. Polygons without a
+fuel model (code 14) are handled according to `FFRM_UNASSIGNED_FUEL`:
+
+- `clc` (default): the cell takes the Rothermel model implied by its CORINE
+  class, through the upstream fuel-type lookup (cropland and grassland model 3,
+  shrubland model 4, discontinuous urban fabric model 5). Cells in any other
+  class, including CORINE forest without an MFE model, get no fuel score and
+  therefore no danger value.
+- `missing`: no code-14 cell gets a fuel score.
+- `legacy`: code 14 scores 1, as in model versions up to 2026-09-07.3.
+
+The counts of unassigned, filled and still-unassigned cells are written to the
+run metadata under `unassigned_fuel`.
+
 Processing logs use grep-friendly lifecycle lines such as
 `[FFRM][...][NDVI][START]`, `[STATS]`, `[DONE]`, or `[FAILED]`. Each major
 reconstruction, raster, FWI day, Sentinel selection, and AHP stage reports its
